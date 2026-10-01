@@ -22,6 +22,8 @@
 
 import { WebSocketServer } from 'ws'
 import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
+import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
+import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -654,6 +656,38 @@ const handleRequest = async (req, res) => {
     return res.end()
   }
 
+  // Model manager: what is installed, what is missing, and what it would cost.
+  if (req.method === 'GET' && req.url === '/models') {
+    const s = await modelSlotStatus()
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify(s))
+  }
+
+  // Local speech-to-text. Body is a WAV; reply is the transcript.
+  //
+  // Separate from the browser recogniser on purpose: that one needs Chrome and
+  // a network connection and sends audio to Google, which is disqualifying for
+  // something meant to run entirely on your own machine.
+  if (req.method === 'POST' && req.url === '/stt') {
+    const check = await whisperAvailable()
+    if (!check.ok) {
+      res.writeHead(503, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: check.why }))
+    }
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    try {
+      const out = await transcribe(Buffer.concat(chunks), {
+        language: new URL(req.url, 'http://x').searchParams.get('lang') ?? 'auto',
+      })
+      res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: true, ...out }))
+    } catch (e) {
+      res.writeHead(500, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }))
+    }
+  }
+
   if (req.method === 'GET' && req.url === '/health') {
     // The browser reads this at boot to know the bridge is alive, and the
     // diagnostics panel reads it to say why it is not. Speech needs no flag
@@ -668,6 +702,9 @@ const handleRequest = async (req, res) => {
         // Every slot, so the diagnostics panel can say which one is missing
         // rather than only that something is.
         models: model.slots,
+        // One line naming which slots are missing, so the diagnostics panel can
+        // say "pull the coder" instead of "something is wrong".
+        summary: await modelSummary(),
       }),
     )
   }

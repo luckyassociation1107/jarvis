@@ -55,6 +55,37 @@ English, keeping the original visible to the model as well — so a mistranslati
 is recoverable in context rather than silently wrong. English input skips it
 entirely, so an English user pays no latency.
 
+## Model manager
+
+`GET /models` asks Ollama what it has and compares that against the three slots,
+so a missing model is named rather than surfacing as JARVIS silently failing to
+think. Matching is on the model name before the tag, so `qwen2.5:latest` counts
+as `qwen2.5:7b` — a user who pulled `:latest` should not be told they are missing
+weights they already have.
+
+`ensure(slot, {auto})` will pull, but only when asked. A 7 GB download should
+never start as a side effect of booting. Pulls stream progress, because a 7 GB
+download with no feedback is indistinguishable from a hang.
+
+## Speech
+
+**STT** is local, via whisper.cpp — `POST /stt` takes a 16 kHz mono WAV and
+returns a transcript. The browser recogniser stays for the web front-end, but it
+needs Chrome, needs a network connection, and sends audio to Google, which is
+disqualinating for something meant to run on your own machine.
+
+Point it at your install:
+
+```bash
+export JARVIS_WHISPER_BIN=~/whisper.cpp/build/bin/whisper-cli
+export JARVIS_WHISPER_MODEL=~/whisper.cpp/models/ggml-base.en.bin
+```
+
+Binary and model are checked separately, because those are two different problems
+with two different fixes and one boolean sends people looking in the wrong place.
+
+**TTS** is the narration net from earlier — local, no API, no key.
+
 ## Two front-ends, one brain
 
 This repo holds two interfaces to the same local model:
