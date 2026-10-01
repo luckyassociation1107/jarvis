@@ -1,26 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { useStore, accentFor, type Phase } from '../store'
+import { useStore, accentFor } from '../store'
 import { Suggestions } from './Suggestions'
+import { CommandDeck } from './CommandDeck'
 import { BladeSweep, Blades } from './Blades'
 import { Effects } from './Effects'
 import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
-
-const statusText: Record<Phase, string> = {
-  offline: 'OFFLINE',
-  boot: 'INITIALISING',
-  dormant: 'STANDBY — SAY “HEY JARVIS”',
-  waking: 'ONLINE',
-  listening: 'LISTENING',
-  thinking: 'PROCESSING',
-  tooling: 'ACCESSING SYSTEMS',
-  speaking: 'RESPONDING',
-}
-
-function Corner({ at }: { at: 'tl' | 'tr' | 'bl' | 'br' }) {
-  return <div className={`corner corner-${at}`} />
-}
 
 /* ------------------------------------------------------------------ decode */
 
@@ -151,11 +137,7 @@ export function Hud() {
   const caption = useStore((s) => s.caption)
   const turns = useStore((s) => s.turns)
   const activeTool = useStore((s) => s.activeTool)
-  const connected = useStore((s) => s.connected)
   const error = useStore((s) => s.error)
-  const level = useStore((s) => s.level)
-  const voice = useStore((s) => s.voice)
-  const bootNote = useStore((s) => s.bootNote)
   const gestures = useStore((s) => s.gestures)
   const looking = useStore((s) => s.looking)
   const ui = useStore((s) => s.ui)
@@ -177,62 +159,9 @@ export function Hud() {
 
   return (
     <div className="hud" style={{ ['--accent' as string]: colour }}>
-      {/* First in the tree on purpose. Everything after it is positioned with
-          `z-index: auto`, so paint order is document order and the sweep stays
-          behind the transcript and the panels without a z-index war. */}
+      {/* Instrument layer stays behind the live transcript and assistant surfaces. */}
+      <CommandDeck />
       <BladeSweep />
-
-      <Corner at="tl" />
-      <Corner at="tr" />
-      <Corner at="bl" />
-      <Corner at="br" />
-
-      <header className="hud-top">
-        {ui.chrome.brand && (
-          <div className="brand">
-            <span className="brand-mark">J.A.R.V.I.S.</span>
-            <span className="brand-sub">Just A Rather Very Intelligent System</span>
-          </div>
-        )}
-
-        <div className="status">
-          <span className="dot" />
-          <span className="status-text">
-            {/* bootNote is the voice-model download readout. It is only ever
-                the right thing to show during boot — as a general fallback a
-                note that never got cleared (a stuck 'voice 97%') sits over
-                LISTENING and PROCESSING for the rest of the session. */}
-            {phase === 'boot' && bootNote ? bootNote : statusText[phase]}
-          </span>
-        </div>
-      </header>
-
-      {/* Left rail: which integrations are live */}
-      {ui.chrome.systems && (
-        <aside className="rail rail-left">
-          <div className="rail-title">SYSTEMS</div>
-          {connected.length === 0 && <div className="rail-item dim">none linked</div>}
-          {connected.map((c) => (
-            <div key={c} className="rail-item">
-              <span className="tick" />
-              {c}
-            </div>
-          ))}
-          <div className="rail-item">
-            <span className="tick" />
-            Web
-          </div>
-        </aside>
-      )}
-
-      {/* Right rail: live telemetry, mostly for flavour */}
-      <aside className="rail rail-right">
-        <div className="rail-title">SIGNAL</div>
-        <div className="meter">
-          <div className="meter-fill" style={{ height: `${level * 100}%` }} />
-        </div>
-        <div className="rail-item mono">{(level * 100).toFixed(0).padStart(3, '0')}%</div>
-      </aside>
 
       <AnimatePresence>
         {activeTool && ui.chrome.toolBadge && (
@@ -309,18 +238,6 @@ export function Hud() {
       {ui.chrome.suggestions && <Suggestions />}
 
       {error && <div className="error">{error}</div>}
-
-      <footer className="hud-bottom">
-        <span className="hint">
-          say <b>“hey jarvis”</b> · <kbd>Space</kbd> to talk · <kbd>G</kbd> hands
-          {voice && (
-            <>
-              {' · '}
-              <kbd>V</kbd> voice: {voice.replace(/\(.*?\)/g, '').trim()}
-            </>
-          )}
-        </span>
-      </footer>
 
       {/* Last, so a flash or a tear reads as being on the glass rather than
           underneath the chrome. It is pointer-events: none and unmounts the

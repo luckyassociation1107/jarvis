@@ -799,49 +799,78 @@ kbd {
 
 .ignition {
   position: fixed;
-  inset: 0;
   z-index: 7;
-  display: grid;
-  place-items: center;
-  background: radial-gradient(ellipse at center, #04121c 0%, #01060c 70%);
-  border: 0;
+  left: 50%;
+  bottom: max(52px, calc(env(safe-area-inset-bottom) + 46px));
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 42px;
+  padding: 7px 15px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(96, 216, 246, 0.48);
+  border-radius: 2px;
+  background: linear-gradient(110deg, rgba(4, 20, 31, 0.94), rgba(8, 34, 47, 0.88));
+  box-shadow: 0 0 22px rgba(33, 174, 211, 0.14), inset 0 0 18px rgba(47, 168, 199, 0.08);
+  backdrop-filter: blur(7px);
   cursor: pointer;
   font-family: inherit;
-  color: #4fd6ff;
+  color: #b9f5ff;
 }
 
-.ignition-ring {
+.ignition::before,
+.ignition::after {
   position: absolute;
-  width: 240px;
-  height: 240px;
-  border: 1px solid rgba(79, 214, 255, 0.28);
-  border-top-color: rgba(79, 214, 255, 0.9);
+  width: 8px;
+  height: 8px;
+  content: '';
+  border-color: #8feeff;
+  border-style: solid;
+}
+.ignition::before { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+.ignition::after { right: -1px; bottom: -1px; border-width: 0 1px 1px 0; }
+
+.ignition-ring {
+  position: relative;
+  display: block;
+  flex: 0 0 23px;
+  width: 23px;
+  height: 23px;
+  border: 1px solid rgba(79, 214, 255, 0.3);
+  border-top-color: rgba(127, 237, 255, 0.98);
   border-radius: 50%;
+  box-shadow: 0 0 10px rgba(79, 214, 255, 0.15);
 }
 
 .ignition-label {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 .ignition-word {
-  font-size: 15px;
-  letter-spacing: 0.52em;
-  text-indent: 0.52em; /* balance the trailing letter-space */
-  text-shadow: 0 0 30px rgba(79, 214, 255, 0.7);
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-indent: 0.3em;
+  text-shadow: 0 0 18px rgba(79, 214, 255, 0.62);
 }
 
 .ignition-sub {
-  font-size: 9px;
-  letter-spacing: 0.28em;
-  opacity: 0.4;
+  color: rgba(188, 229, 238, 0.56);
+  font-size: 6px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 
-.ignition:hover .ignition-word {
-  text-shadow: 0 0 44px rgba(79, 214, 255, 1);
+.ignition:hover {
+  border-color: rgba(126, 237, 255, 0.84);
+  box-shadow: 0 0 29px rgba(33, 174, 211, 0.25), inset 0 0 20px rgba(47, 168, 199, 0.14);
+}
+.ignition:hover .ignition-word { text-shadow: 0 0 30px rgba(79, 214, 255, 1); }
+
+@media (max-width: 680px) {
+  .ignition { bottom: max(51px, calc(env(safe-area-inset-bottom) + 43px)); padding: 6px 12px; }
 }
 
 /* ------------------------------------------------------------------- boot */
