@@ -10,39 +10,10 @@
  * browser, send things): `npm start -- --writes`.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
-import { cpSync, existsSync, mkdirSync } from 'node:fs'
-
-/**
- * Put MediaPipe's WebAssembly where the page can actually load it.
- *
- * Hand tracking needs a WASM runtime, and the usual recipe fetches it from a
- * CDN. That fails here twice over. The page's CSP names no CDN in `script-src`,
- * and the runtime arrives as a script — so it is blocked, and the failure
- * surfaces as gesture control simply never starting. And a CDN import is a live
- * supply-chain dependency: executable code, re-resolved on every load, that we
- * do not control and cannot pin against being changed under us.
- *
- * Copying it out of node_modules solves both. It is served from our own origin,
- * so `'self'` covers it; and it is the exact bytes of the version in the
- * lockfile. It stays out of git — 34 MB of build output does not belong in a
- * repository — and is re-copied whenever it is missing, which costs nothing
- * after the first run.
- */
-function vendorWasm() {
-  const from = 'node_modules/@mediapipe/tasks-vision/wasm'
-  const to = 'public/mediapipe'
-  if (!existsSync(from)) return // gesture control is optional; carry on without it
-  if (existsSync(`${to}/vision_wasm_internal.wasm`)) return
-  try {
-    mkdirSync(to, { recursive: true })
-    cpSync(from, to, { recursive: true })
-    console.log('  vendored the hand-tracking runtime into public/mediapipe.')
-  } catch (err) {
-    console.warn(`  could not vendor the hand-tracking runtime: ${err.message}`)
-  }
-}
+import { plan as planRam } from '../bridge/autopilot.mjs'
+import { vendorWasm } from './vendor-mediapipe.mjs'
 
 const writes = process.argv.includes('--writes')
 
@@ -92,6 +63,80 @@ function shutdown(code) {
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
 
+const OLLAMA_URL = (process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '')
+const runtimePlan = planRam()
+const needsLocalModels = ['chat', 'vision', 'reason'].some((cap) => {
+  const choice = runtimePlan.choices[cap]
+  return Boolean(choice?.fits && choice.model)
+})
+
+function loopback(hostname) {
+  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '::1' || host === '127.0.0.1' || host.startsWith('127.')
+}
+
+function sameLocalModelEndpoint() {
+  try {
+    const model = new URL(process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1')
+    const ollama = new URL(OLLAMA_URL)
+    return loopback(model.hostname) && loopback(ollama.hostname)
+      && model.hostname === ollama.hostname
+      && model.port === ollama.port
+      && /\/v1\/?$/.test(model.pathname)
+  } catch {
+    return false
+  }
+}
+
+async function startOllamaIfNeeded() {
+  if (!needsLocalModels || !sameLocalModelEndpoint()) return
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })
+    if (response.ok) {
+      console.log(`Ollama is already responding at ${OLLAMA_URL}.`)
+      return
+    }
+  } catch { /* start the installed daemon below */ }
+
+  const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
+  const check = spawnSync(binary, ['--version'], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
+  if (check.error || check.status !== 0) {
+    console.warn('Ollama is not reachable and its CLI was not found. The web UI will still start; local model replies need Ollama.')
+    return
+  }
+
+  const env = { ...process.env }
+  try {
+    const endpoint = new URL(OLLAMA_URL)
+    if (endpoint.port) {
+      const host = endpoint.hostname.includes(':') ? `[${endpoint.hostname}]` : endpoint.hostname
+      env.OLLAMA_HOST = `${host}:${endpoint.port}`
+    }
+  } catch { /* the bridge will report an invalid configured endpoint */ }
+
+  const daemon = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  daemon.stdout.on('data', (chunk) => process.stdout.write(`[ollama] ${chunk}`))
+  daemon.stderr.on('data', (chunk) => process.stderr.write(`[ollama] ${chunk}`))
+  daemon.once('error', (error) => console.warn(`[ollama] could not start: ${error.message}`))
+  daemon.once('exit', (code) => {
+    if (!stopping) console.warn(`[ollama] server exited (${code}); local inference may be unavailable.`)
+  })
+  children.push(daemon)
+  console.log(`Starting the local Ollama server at ${OLLAMA_URL}…`)
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline && daemon.exitCode === null) {
+    try {
+      const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(900) })
+      if (response.ok) {
+        console.log('Ollama is ready for local model requests.')
+        return
+      }
+    } catch { /* wait for the daemon to bind its local port */ }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+  console.warn('Ollama did not become ready before the startup wait ended. The UI will still start.')
+}
+
 /**
  * Tell the bridge which port the face will actually be on.
  *
@@ -112,6 +157,7 @@ if (port) {
 }
 
 vendorWasm()
+await startOllamaIfNeeded()
 
 console.log('\nJ.A.R.V.I.S. starting — the brain and the face.\n')
 run('bridge', 'node', ['bridge/server.mjs'], '36', bridgeEnv)

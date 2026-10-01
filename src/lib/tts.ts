@@ -1,14 +1,13 @@
-import { TTS_ENGINE, KOKORO_VOICE } from '../config'
+import { TTS_ENGINE, KOKORO_DTYPE, KOKORO_VOICE } from '../config'
 import * as kokoro from './kokoro'
 
 /**
  * Speech output.
  *
- * The browser's own speechSynthesis is the default because it is by far the
- * fastest thing available: it runs on-device, so there is no request, no
- * generation wait and no download — speech starts on the next frame. A cloud
- * voice sounds better but costs a few hundred milliseconds per sentence, and in
- * conversation that gap is much more noticeable than the timbre.
+ * The RAM planner selects browser/OS speechSynthesis when there is no headroom
+ * for Kokoro, or selects a browser-local neural Kokoro voice when it fits. The
+ * system voice is immediate and download-free; Kokoro is cached in the tab and
+ * can sound better, but costs model memory and generation time.
  *
  * Either way, text is cut at sentence boundaries as it streams in and spoken a
  * sentence at a time, so JARVIS starts talking while the model is still writing.
@@ -53,8 +52,11 @@ const ECHO_TAIL_MS = 1800
  * a barge-in, or nothing was ever queued — and from outside the page they are
  * indistinguishable. This tells them apart at a glance.
  */
+let activeEngine: 'system' | 'kokoro' = TTS_ENGINE === 'kokoro' ? 'kokoro' : 'system'
+let activeDtype: 'q8' | 'fp32' = KOKORO_DTYPE === 'fp32' ? 'fp32' : 'q8'
+
 export const diag = {
-  engine: 'system' as 'system' | 'kokoro',
+  engine: activeEngine,
   /** Utterances handed to an engine — the OS voice or an audio element. */
   spoken: 0,
   /**
@@ -72,7 +74,7 @@ export const diag = {
   failures: 0,
   /** Last SpeechSynthesis error code, e.g. 'synthesis-failed'. */
   lastError: '',
-  /** Set once the OS voice has proved unusable; the cloud voice takes over. */
+  /** Set once the OS voice has proved unusable; selected Kokoro may take over. */
   nativeBroken: false,
   voice: '',
   lastText: '',
@@ -82,14 +84,22 @@ if (typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__tts = diag
 }
 
-/**
- * Once the OS voice has failed, stop asking it.
- *
- * A broken system voice is not a transient condition — it fails identically on
- * every sentence — so retrying it per line would make the whole answer stutter
- * through the same dead path. After the first real failure everything routes to
- * Kokoro instead, which runs in this tab and has no key to hold.
- */
+/** Apply the local RAM planner's TTS choice before speech recognition starts. */
+export function configureTtsEngine(engine: 'system' | 'kokoro', dtype: 'q8' | 'fp32' = activeDtype) {
+  activeEngine = engine
+  activeDtype = dtype
+  diag.engine = engine
+  if (engine === 'kokoro') {
+    kokoro.configureDtype(dtype)
+    void kokoro.load()
+  }
+}
+
+export function selectedTtsEngine(): 'system' | 'kokoro' {
+  return activeEngine
+}
+
+/** A failed system voice is not retried forever; fallback stays within the RAM plan. */
 let nativeBroken = false
 
 let speakingAt = 0
@@ -233,7 +243,7 @@ function pickVoice(): SpeechSynthesisVoice | null {
  *  always naming a speechSynthesis voice that a cloud or neural engine has
  *  quietly replaced. */
 export function currentVoiceName(): string {
-  if (TTS_ENGINE === 'kokoro' && !kokoro.isUnavailable()) {
+  if (activeEngine === 'kokoro' && !kokoro.isUnavailable()) {
     return KOKORO_VOICE.replace(/^bm_/, '')
   }
   return pickVoice()?.name ?? 'default'
@@ -361,11 +371,10 @@ export function createSpeaker(): Speaker {
 
   /** null means "no audio pipeline, use the system voice directly". */
   function synthesise(text: string): Promise<string | null> | null {
-    // Kokoro runs in this tab: no network, no key, nothing leaving the machine.
-    // It is slow to start, so it is not the default — but two things override
-    // that. The user choosing it, and the system voice having proved unusable,
-    // which leaves Kokoro as the only engine that can still speak at all.
-    const useKokoro = TTS_ENGINE === 'kokoro' || nativeBroken
+    // Kokoro is used only when the user or RAM planner selected its reserved
+    // browser-local model. A failed OS voice never silently loads a larger
+    // neural model that was not included in the memory plan.
+    const useKokoro = activeEngine === 'kokoro'
     if (useKokoro && !kokoro.isUnavailable()) {
       diag.engine = 'kokoro'
       return kokoro.speak(text).catch(() => null)
@@ -425,24 +434,18 @@ export function createSpeaker(): Speaker {
       const spoke = await speakNative(item.text)
       if (spoke || cancelled) return
 
-      // The OS voice produced no sound, and retrying it will not help — it
-      // fails identically every time. So it is latched off, which makes every
-      // later sentence go to Kokoro from the start rather than dying on the
-      // system voice first. This sentence is rescued the same way: one retry
-      // through the neural voice, now that synthesise() has been told the
-      // system voice is not an option.
-      //
-      // There was a second rescue here once — a proxy on the bridge holding a
-      // paid API key — and it is gone. Kokoro is the only thing left that does
-      // not need a key, and it is enough: a worse timbre beats silence.
+      // The OS voice produced no sound. Latch that fact; only retry through
+      // Kokoro when the RAM plan explicitly reserved that model.
       if (!nativeBroken) {
         nativeBroken = true
         diag.nativeBroken = true
-        console.warn('[jarvis] system voice is not producing sound — switching to Kokoro from here on')
-        const rescue = (await synthesise(item.text)?.catch(() => null)) ?? null
-        if (rescue && !cancelled) {
-          await playUrl(rescue, item.text)
-          return
+        if (activeEngine === 'kokoro') {
+          console.warn('[jarvis] system voice failed; retrying with the selected Kokoro model')
+          const rescue = (await synthesise(item.text)?.catch(() => null)) ?? null
+          if (rescue && !cancelled) {
+            await playUrl(rescue, item.text)
+            return
+          }
         }
       }
       // Nothing at all could speak this sentence. Logged rather than swallowed:
@@ -563,7 +566,7 @@ export function createSpeaker(): Speaker {
         }
         watchdog = setTimeout(() => {
           if (done || started) return
-          console.error('[jarvis] speech engine is not responding — switching to the cloud voice')
+          console.error('[jarvis] speech engine is not responding — trying the selected Kokoro fallback if available')
           diag.failures++
           diag.lastError = diag.lastError || 'no-start'
           finish()
@@ -625,7 +628,7 @@ export function createSpeaker(): Speaker {
         if (currentAudio === audio) currentAudio = null
         resolve()
       }
-      // Sound is genuinely coming out. This is the cloud/neural counterpart of
+      // Sound is genuinely coming out. This is the generated/neural counterpart of
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {

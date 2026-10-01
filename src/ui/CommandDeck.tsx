@@ -1,6 +1,8 @@
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { BRIDGE_HTTP_URL } from '../config'
 import { useStore, type Phase } from '../store'
+import { ModelManager } from './ModelManager'
+import { analyserActive, micLevel } from '../lib/audio'
 import './CommandDeck.css'
 
 type HealthSlot = {
@@ -39,6 +41,19 @@ const FALLBACK_SLOTS = [
   { slot: 'REASON', hint: 'CODE / TOOL MODEL' },
 ]
 
+// Fixed decorative traces add the reference display's instrumentation density.
+// They are explicitly labelled schematic and are never presented as telemetry.
+function makeSchematicTrace(seed: number) {
+  return Array.from({ length: 52 }, (_, index) => {
+    const carrier = 0.1 + Math.abs(Math.sin(index * 0.39 + seed)) * 0.12
+    const burst = Math.max(0, 1 - Math.abs(((index + seed * 3) % 17) - 8) / 1.8)
+    const echo = Math.max(0, 1 - Math.abs(((index + seed * 7) % 29) - 13) / 3.4)
+    return Math.min(0.96, carrier + burst * 0.66 + echo * 0.24)
+  })
+}
+
+const SCHEMATIC_TRACES = [0.7, 2.1, 4.3, 5.8].map(makeSchematicTrace)
+
 function initialBridgeMode(): BridgeState['mode'] {
   if (typeof window === 'undefined') return 'checking'
   // GitHub Pages is a static preview. Do not make the hosted page probe the
@@ -46,7 +61,7 @@ function initialBridgeMode(): BridgeState['mode'] {
   if (window.location.hostname.endsWith('.github.io')) return 'view'
 
   try {
-    const target = new URL(BRIDGE_HTTP_URL)
+    const target = new URL(BRIDGE_HTTP_URL, window.location.href)
     // An HTTPS page cannot safely poll a plain-HTTP bridge. Local development
     // works over HTTP; a remote deployment needs a separately configured HTTPS
     // bridge rather than silently downgrading the browser connection.
@@ -281,33 +296,59 @@ function RadarScale({ phase }: { phase: Phase }) {
   )
 }
 
-function SignalGraph({ value, phase }: { value: number; phase: Phase }) {
-  const bars = useMemo(
-    () =>
-      Array.from({ length: 52 }, (_, i) => {
-        const base = value > 0.005 ? Math.abs(Math.sin(i * 0.83 + 1.7)) * 8 : 0
-        const pulse = value * (5 + Math.abs(Math.sin(i * 0.41)) * 24)
-        const activity = phase === 'listening' && value > 0.005 ? 4 : 0
-        return Math.min(38, value > 0.005 ? 3 + base + pulse + activity : 2)
-      }),
-    [value, phase],
-  )
+function TraceGraph({
+  samples,
+  max,
+  label,
+}: {
+  samples: number[]
+  max: number
+  label: string
+}) {
+  const points = useMemo(() => {
+    if (!samples.length) return ''
+    const range = Math.max(max, 1)
+    return samples.map((sample, index) => {
+      const x = samples.length <= 1 ? 260 : (index / (samples.length - 1)) * 260
+      const y = 42 - (Math.min(Math.max(sample, 0), range) / range) * 34
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    }).join(' ')
+  }, [max, samples])
+  const last = samples[samples.length - 1] ?? 0
+  const lastY = 42 - (Math.min(Math.max(last, 0), Math.max(max, 1)) / Math.max(max, 1)) * 34
 
   return (
-    <svg className="deck-signal-graph" role="img" viewBox="0 0 260 52" preserveAspectRatio="none" aria-label="Live microphone level visualization">
-      <path d="M0 13H260M0 26H260M0 39H260" className="deck-graph-grid" />
-      <path d="M0 45H260" className="deck-graph-baseline" />
-      {bars.map((height, i) => (
-        <line
-          key={i}
-          x1={i * 5 + 2}
-          y1={45 - height}
-          x2={i * 5 + 2}
-          y2="45"
-          className={i > 42 ? 'deck-graph-bar deck-graph-bar-tail' : 'deck-graph-bar'}
-        />
-      ))}
+    <svg className="deck-trace-graph" role="img" viewBox="0 0 260 48" preserveAspectRatio="none" aria-label={label}>
+      <path d="M0 10H260M0 24H260M0 38H260" className="deck-trace-grid" />
+      {points && <path d={`M0 43 L${points} L260 43 Z`} className="deck-trace-area" />}
+      {points && <polyline points={points} className="deck-trace-line" />}
+      {points && <circle cx="260" cy={lastY} r="2.1" className="deck-trace-dot" />}
     </svg>
+  )
+}
+
+function SchematicTracePanel({
+  title,
+  code,
+  samples,
+  label,
+  className = '',
+}: {
+  title: string
+  code: string
+  samples: number[]
+  label: string
+  className?: string
+}) {
+  return (
+    <PanelFrame title={title} code={code} className={`deck-panel-mini deck-mini-schematic ${className}`}>
+      <div className="deck-mini-readout">
+        <span>ILLUSTRATIVE TRACE</span>
+        <strong>STATIC<small> / NOT LIVE</small></strong>
+      </div>
+      <TraceGraph samples={samples} max={1} label={`${label}; illustrative schematic, not live telemetry`} />
+      <div className="deck-mini-foot"><span>SCHEMATIC / NOT LIVE</span><span>NO SENSOR DATA</span></div>
+    </PanelFrame>
   )
 }
 
@@ -385,7 +426,7 @@ function useHostProfile(): HostProfile {
   return host
 }
 
-function CommandDeckView() {
+function CommandDeckView({ onStart }: { onStart: () => void }) {
   const phase = useStore((s) => s.phase)
   const connected = useStore((s) => s.connected)
   const turns = useStore((s) => s.turns.length)
@@ -396,10 +437,15 @@ function CommandDeckView() {
   const looking = useStore((s) => s.looking)
   const ui = useStore((s) => s.ui)
   const bridge = useBridgeHealth()
+  const [modelManagerOpen, setModelManagerOpen] = useState(false)
+  const closeModelManager = useCallback(() => setModelManagerOpen(false), [])
 
   const [clock, setClock] = useState('00:00:00')
   const [fps, setFps] = useState(0)
   const [mic, setMic] = useState(0)
+  const [micMonitoring, setMicMonitoring] = useState(false)
+  const [micHistory, setMicHistory] = useState<number[]>([])
+  const [fpsHistory, setFpsHistory] = useState<number[]>([])
   const host = useHostProfile()
   const micPct = Math.round(mic * 100)
 
@@ -416,7 +462,36 @@ function CommandDeckView() {
   }, [])
 
   useEffect(() => {
-    const id = window.setInterval(() => setMic(useStore.getState().level), 90)
+    const openModelStack = (event: KeyboardEvent) => {
+      const target = event.target
+      const typing = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+      if (typing || event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+      if (event.key.toLowerCase() === 'm') {
+        event.preventDefault()
+        setModelManagerOpen((open) => !open)
+      }
+    }
+    window.addEventListener('keydown', openModelStack)
+    return () => window.removeEventListener('keydown', openModelStack)
+  }, [])
+
+  useEffect(() => {
+    const update = () => {
+      const active = analyserActive()
+      setMicMonitoring((current) => current === active ? current : active)
+      if (active) {
+        // Read the input analyser directly. The reactor's shared level switches
+        // to JARVIS's speaker output while he talks, which is not microphone data.
+        const level = micLevel()
+        setMic(level)
+        setMicHistory((history) => [...history.slice(-51), level])
+      } else {
+        setMic(0)
+        setMicHistory((history) => history.length ? [] : history)
+      }
+    }
+    update()
+    const id = window.setInterval(update, 90)
     return () => window.clearInterval(id)
   }, [])
 
@@ -427,7 +502,9 @@ function CommandDeckView() {
     const sample = (now: number) => {
       frames += 1
       if (now - start >= 1000) {
-        setFps(Math.round((frames * 1000) / (now - start)))
+        const measured = Math.round((frames * 1000) / (now - start))
+        setFps(measured)
+        setFpsHistory((history) => [...history.slice(-51), measured])
         frames = 0
         start = now
       }
@@ -458,7 +535,7 @@ function CommandDeckView() {
       }))
 
   return (
-    <div className={`command-deck phase-${phase}`} role="region" aria-label="JARVIS tactical command interface">
+    <div className={`command-deck phase-${phase}${modelManagerOpen ? ' model-manager-open' : ''}`} role="region" aria-label="JARVIS tactical command interface">
       <div className="deck-screen-grid" aria-hidden="true" />
       <div className="deck-frame" aria-hidden="true">
         <i className="deck-frame-corner deck-frame-tl" />
@@ -472,17 +549,16 @@ function CommandDeckView() {
           <div className="deck-brand">
             <BrandMark />
             <div className="deck-brand-copy">
-              <span className="deck-brand-overline">LOCAL-FIRST ASSISTANT INTERFACE</span>
-              <strong>J.A.R.V.I.S.</strong>
+              <span className="deck-brand-overline">LOCAL-FIRST INTELLIGENCE</span>
+              <strong>COMMAND NODE / 01</strong>
               <span className="deck-brand-sub">TACTICAL INTERFACE <i /> BROWSER CLIENT</span>
             </div>
           </div>
         )}
-        <div className="deck-nav" aria-hidden="true">
-          <span className="deck-nav-active"><i />OVERVIEW</span>
-          <span>SYSTEMS</span>
-          <span>TELEMETRY</span>
-          <span>ARCHIVE</span>
+        <div className="deck-masthead" aria-hidden="true">
+          <span>LOCAL INTELLIGENCE / TACTICAL DISPLAY</span>
+          <strong>J.A.R.V.I.S.</strong>
+          <i />
         </div>
         <div className="deck-head-state">
           <div className="deck-clock-block">
@@ -518,9 +594,6 @@ function CommandDeckView() {
               <div className="deck-host-foot"><span>NETWORK</span><b>{host.network}</b><i className={navigator.onLine ? 'deck-led deck-led-on' : 'deck-led'} /></div>
             </PanelFrame>
 
-            <PanelFrame title="ROUTE DIAGRAM" code="03" className="deck-panel-map">
-              <NetworkMap />
-            </PanelFrame>
           </aside>
         )}
 
@@ -533,58 +606,120 @@ function CommandDeckView() {
         </section>
 
         <aside className="deck-side deck-side-right" aria-label="Live telemetry">
-          <PanelFrame title="LIVE TELEMETRY" code="04" className="deck-panel-telemetry">
-            <div className="deck-chart-title"><span>MICROPHONE INPUT</span><b>{String(micPct).padStart(3, '0')}<small>%</small></b></div>
-            <SignalGraph value={mic} phase={phase} />
-            <div className="deck-chart-meta"><span>{phase === 'listening' ? 'VOICE CAPTURE ACTIVE' : phase === 'offline' ? 'AUDIO INPUT / LOCKED' : 'MIC LEVEL / LIVE'}</span><span>AMPLITUDE</span></div>
-            <div className="deck-chart-divider" />
-            <div className="deck-phase-track" aria-label={`Current stage: ${PHASE_LABEL[phase]}`}>
-              {(['listening', 'thinking', 'tooling', 'speaking'] as Phase[]).map((step, index) => (
-                <span key={step} className={`deck-phase-step ${phase === step ? 'deck-phase-current' : ''} ${(['listening', 'thinking', 'tooling', 'speaking'].indexOf(phase) > index) ? 'deck-phase-past' : ''}`}>
-                  <i />{['INPUT', 'INFER', 'TOOLS', 'OUTPUT'][index]}
-                </span>
-              ))}
-            </div>
+          <PanelFrame title="INPUT / AUDIO TRACE" code="04" className="deck-panel-mini deck-mini-audio">
+            <div className="deck-mini-readout"><span>{micMonitoring ? 'MIC LEVEL / LIVE' : 'MIC LEVEL / NO LOCAL METER'}</span><strong>{micMonitoring ? String(micPct).padStart(3, '0') : '—'}<small>{micMonitoring ? '%' : ' N/A'}</small></strong></div>
+            <TraceGraph samples={micMonitoring ? micHistory : []} max={1} label={micMonitoring ? 'Recent measured microphone level samples' : 'No active microphone analyser; no live trace is shown'} />
+            <div className="deck-mini-foot"><span>{micMonitoring ? (phase === 'listening' ? 'CAPTURING VOICE' : 'BROWSER INPUT') : 'LOCAL METER INACTIVE'}</span><span>{micMonitoring ? '0–100%' : 'NO DATA'}</span></div>
           </PanelFrame>
 
-          <PanelFrame title="NEURAL PIPELINE" code="05" className="deck-panel-models">
-            <div className="deck-model-list">
-              {slots.map((slot) => (
-                <div className="deck-model-row" key={slot.name}>
-                  <span className={`deck-model-led ${slot.ready ? 'deck-model-ready' : ''}`} />
-                  <span className="deck-model-name">{slot.name}</span>
-                  <span className="deck-model-detail" title={slot.detail}>{slot.detail}</span>
-                  <span className={`deck-model-status ${slot.ready ? 'deck-model-status-on' : ''}`}>
-                    {bridge.mode === 'view' ? 'LOCAL' : bridge.mode === 'online' ? (slot.ready ? 'READY' : slot.state === 'unknown' ? 'DOWN' : 'MISS') : 'WAIT'}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="deck-model-footer"><span>ROUTER</span><b>{bridge.payload?.ok ? 'ALL SLOTS READY' : bridge.mode === 'view' ? 'LOCAL BRIDGE REQUIRED' : bridgeOn ? 'SEE SLOT STATUS' : 'OPENAI-COMPATIBLE / LOCAL'}</b></div>
+          <PanelFrame title="RENDER / FRAME TRACE" code="05" className="deck-panel-mini deck-mini-render">
+            <div className="deck-mini-readout"><span>MEASURED FRAME RATE</span><strong>{fps || '—'}<small> FPS</small></strong></div>
+            <TraceGraph samples={fpsHistory} max={120} label="Recent measured animation frame rate" />
+            <div className="deck-mini-foot"><span>REQUEST ANIMATION FRAME</span><span>0–120 FPS</span></div>
           </PanelFrame>
 
-          <PanelFrame title="EVENT STREAM" code="06" className="deck-panel-events">
-            <div className="deck-event-row"><span className="deck-event-time">{clock}</span><span>CORE / {PHASE_LABEL[phase]}</span><i className="deck-event-pulse" /></div>
-            {activeTool && <div className="deck-event-row"><span className="deck-event-time">LIVE</span><span>TOOL / {activeTool.replace(/[_-]/g, ' ').toUpperCase()}</span><i className="deck-event-pulse deck-event-pulse-hot" /></div>}
-            <div className="deck-event-row"><span className="deck-event-time">{String(turns).padStart(3, '0')}</span><span>{turns ? 'CONVERSATION TURNS' : 'NO ACTIVE SESSION'}</span><i className="deck-event-pulse" /></div>
-            {error && <div className="deck-event-alert"><span>!</span>{error}</div>}
-          </PanelFrame>
+          <SchematicTracePanel
+            title="VISION / EDGE PROFILE"
+            code="06"
+            samples={SCHEMATIC_TRACES[0]}
+            label="Vision edge profile"
+            className="deck-mini-vision"
+          />
+          <SchematicTracePanel
+            title="WHISPER / SPECTRAL GATE"
+            code="07"
+            samples={SCHEMATIC_TRACES[1]}
+            label="Optional Whisper spectral gate"
+            className="deck-mini-whisper"
+          />
+          <SchematicTracePanel
+            title="INTENT / ROUTING TRACE"
+            code="08"
+            samples={SCHEMATIC_TRACES[2]}
+            label="Multilingual intent routing"
+            className="deck-mini-intent"
+          />
+          <SchematicTracePanel
+            title="AUTOPILOT / RESOURCE CURVE"
+            code="09"
+            samples={SCHEMATIC_TRACES[3]}
+            label="RAM-aware model autopilot"
+            className="deck-mini-autopilot"
+          />
         </aside>
       </main>
 
+      <section className="deck-bottom-band" aria-label="System routing and session data">
+        <PanelFrame title="ROUTE DIAGRAM / SCHEMATIC" code="09" className="deck-bottom-panel deck-bottom-route">
+          <NetworkMap />
+        </PanelFrame>
+
+        <PanelFrame title="LOCAL MODEL ROUTING MATRIX" code="10" className="deck-bottom-panel deck-bottom-models">
+          <div className="deck-matrix-head"><span>ROUTE</span><span>MODEL / CONFIGURATION</span><span>STATE</span></div>
+          <div className="deck-matrix-rows">
+            {slots.map((slot) => (
+              <div className="deck-matrix-row" key={slot.name}>
+                <b>{slot.name}</b>
+                <span title={slot.detail}>{slot.detail}</span>
+                <strong className={slot.ready ? 'deck-matrix-ready' : ''}>
+                  {bridge.mode === 'view' ? 'LOCAL ONLY' : bridge.mode === 'online' ? (slot.ready ? 'READY' : slot.state === 'unsupported' ? 'RAM LIMIT' : slot.state === 'unknown' ? 'OFFLINE' : 'MISSING') : bridge.mode === 'checking' ? 'CHECKING' : 'NO LINK'}
+                </strong>
+              </div>
+            ))}
+          </div>
+          <div className="deck-matrix-foot"><span>ROUTING / LOCAL-FIRST</span><span>{bridge.payload?.summary ?? (bridge.mode === 'view' ? 'STATIC WEB VIEW' : 'AWAITING BRIDGE HEALTH')}</span></div>
+        </PanelFrame>
+
+        <PanelFrame title="CONNECTED SYSTEMS" code="11" className="deck-bottom-panel deck-bottom-links">
+          <div className="deck-link-list">
+            {connected.length ? connected.map((name) => (
+              <div className="deck-link-chip" key={name}><i className="deck-led deck-led-on" /><span>{name}</span><b>LINKED</b></div>
+            )) : <div className="deck-link-empty"><i className="deck-led" />NO MCP CONNECTIONS REPORTED</div>}
+          </div>
+          <div className="deck-matrix-foot"><span>ACTIVE INTEGRATIONS</span><span>{String(connected.length).padStart(2, '0')}</span></div>
+        </PanelFrame>
+
+        <PanelFrame title="LIVE EVENT REGISTER" code="12" className="deck-bottom-panel deck-bottom-events">
+          <div className="deck-register-grid">
+            <div><span>LOCAL TIME</span><b>{clock}</b></div>
+            <div><span>SESSION ITEMS</span><b>{String(turns).padStart(3, '0')}</b></div>
+            <div><span>ACTIVE TOOL</span><b>{activeTool ? activeTool.replace(/[_-]/g, ' ').toUpperCase() : 'NONE'}</b></div>
+            <div><span>PHASE</span><b>{PHASE_LABEL[phase]}</b></div>
+          </div>
+          {error && <div className="deck-register-alert"><i>!</i>{error}</div>}
+        </PanelFrame>
+      </section>
+
       <footer className="deck-footer">
         <div className="deck-footer-brand"><span className="deck-footer-emblem">J</span><span>J.A.R.V.I.S. / CLIENT</span><i />LOCAL-FIRST SESSION</div>
-        <div className="deck-footer-center"><span className="deck-footer-line" /><span>{phase === 'offline' ? 'CLICK INITIALISE TO POWER UP' : phase === 'dormant' ? 'SAY “HEY JARVIS”' : PHASE_LABEL[phase]}</span><span className="deck-footer-line" /></div>
+        <div className="deck-footer-center"><span className="deck-footer-line" /><span>{phase === 'offline' ? 'SYSTEM OFFLINE / INPUT REQUIRED' : phase === 'dormant' ? 'SAY “HEY JARVIS”' : PHASE_LABEL[phase]}</span><span className="deck-footer-line" /></div>
         <div className="deck-footer-actions">
-          <span><kbd>SPACE</kbd> TALK</span>
-          <span><kbd>G</kbd> {gestures ? 'STOP HANDS' : 'HANDS'}{looking ? ' / LOOKING' : ''}</span>
-          {voice && <span className="deck-voice-hint"><kbd>V</kbd> {voice.replace(/\(.*?\)/g, '').trim()}</span>}
-          <button type="button" onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }))}>
-            <kbd>D</kbd> DIAGNOSTICS
+          {phase === 'offline' ? (
+            <button className="deck-power-button" type="button" onClick={onStart}>
+              <i className="deck-power-glyph" /> INITIALISE SYSTEM
+            </button>
+          ) : (
+            <>
+              <span><kbd>SPACE</kbd> TALK</span>
+              <span><kbd>G</kbd> {gestures ? 'STOP HANDS' : 'HANDS'}{looking ? ' / LOOKING' : ''}</span>
+              {voice && <span className="deck-voice-hint"><kbd>V</kbd> {voice.replace(/\(.*?\)/g, '').trim()}</span>}
+              <button type="button" onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }))}>
+                <kbd>D</kbd> DIAGNOSTICS
+              </button>
+              <span><kbd>ESC</kbd> STANDBY</span>
+            </>
+          )}
+          <button
+            className="deck-model-stack-button"
+            type="button"
+            aria-expanded={modelManagerOpen}
+            onClick={() => setModelManagerOpen((open) => !open)}
+          >
+            <kbd>M</kbd> {modelManagerOpen ? 'CLOSE STACK' : 'MODEL STACK'}
           </button>
-          <span><kbd>ESC</kbd> STANDBY</span>
         </div>
       </footer>
+      {modelManagerOpen && <ModelManager onClose={closeModelManager} />}
     </div>
   )
 }

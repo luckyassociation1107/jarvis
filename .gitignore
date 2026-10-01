@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Copied out of node_modules by scripts/start.mjs — 34MB of build output.
+# Copied out of node_modules by scripts/vendor-mediapipe.mjs — build output.
 public/mediapipe/
 
 # Models downloaded by the autopilot. Multi-gigabyte and machine-specific, so

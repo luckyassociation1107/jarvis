@@ -1,472 +1,540 @@
 /**
- * Automated model install, quantization-aware.
+ * RAM-aware local model planner and explicit installer.
  *
- * The brief that shaped this: whisper, chat, vision and coding must ALL work on
- * EVERY machine from 1 GB to 32 GB. What changes with RAM is not which
- * capabilities exist — it is which parameters, which models, and which
- * quantization you get.
+ * The OS/apps/model split is fixed at 35/25/40. Text, vision, coding and
+ * Whisper are planned as sequential workloads: only one Ollama model is allowed
+ * to remain resident at a time, and each pick has runtime/context headroom on
+ * top of its download size. Downloads are a disk-space concern, not a sum of
+ * simultaneously resident model weights.
  *
- * That reframes the whole problem. A fixed catalogue with a greedy fit gives you
- * a machine that can chat but not see. A *ladder* per capability gives you
- * everything, always, at a quality that shrinks to fit.
- *
- * The budget arithmetic:
- *
- *     35%  the OS           not negotiable, and not ours to spend
- *     25%  everything else  browser, editor, and other running apps
- *     40%  models           what is left, and all we may touch
- *
- * Plus, when there is a GPU: its VRAM, counted separately and conservatively,
- * because VRAM the desktop is already using is not VRAM we have.
- *
- * Two passes, and the order is the whole trick:
- *
- *   1. Every capability gets its *minimum viable* variant. Nothing is dropped.
- *   2. Remaining budget upgrades them, best-first, one rung at a time.
- *
- * Pass 1 is what makes "all types of RAM" true. Pass 2 is what makes a 32 GB
- * machine feel better than a 1 GB one without being a different product.
+ * This is deliberately honest at the 1 GB end. The smallest chat/coder weights
+ * are about 398 MB each and can be offered as best-effort, but there is not
+ * enough reserved RAM to guarantee inference once runtime overhead is included.
+ * General image Q&A is unavailable below the tiny vision tier. No capability is
+ * silently reported as fitting when it does not.
  */
 
-import { execSync } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
-import { totalmem } from 'node:os'
-import { join } from 'node:path'
+import { execFile, execFileSync } from 'node:child_process'
+import { createWriteStream } from 'node:fs'
+import { createRequire } from 'node:module'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { freemem, totalmem } from 'node:os'
+import { basename, join, resolve } from 'node:path'
+import { pipeline } from 'node:stream/promises'
+import { promisify } from 'node:util'
 
-/** The split. Exported so the UI shows the same numbers the model planner uses. */
-export const BUDGET = { os: 0.35, apps: 0.25, models: 0.40 }
+const execFileAsync = promisify(execFile)
+const require = createRequire(import.meta.url)
 
-const GB = 1024 * 1024 * 1024
-const MB = 1024 * 1024
+/** The split. Exported so the UI and planner always show identical arithmetic. */
+export const BUDGET = Object.freeze({ os: 0.35, apps: 0.25, models: 0.40 })
+
+const GB = 1024 ** 3
+const MB = 1024 ** 2
+const OLLAMA_HOST = (process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '')
+const WHISPER_DIR = 'models'
+const ACTIVE_WHISPER_FILE = '.whisper-active'
 
 /**
- * One rung of one capability's ladder.
- *
- * `bytes` is the *resident* cost, not the download size. They are the same
- * thing for GGUF — you download the quantised file and mmap it — but stating it
- * keeps the budget honest.
- */
-/**
- * The ladders.
- *
- * Chat and code only, both entirely abliterated. Vision is gone — the smallest
- * multimodal model that produces useful output is ~950 MB, it is not a chat or
- * coding model, and the standing requirement is abliterated chat and coding
- * models *only*. Adding it back would mean installing something aligned, which
- * is precisely what must not happen.
- *
- * Both families come from the same publisher and span the same parameter range,
- * so the two ladders are structurally identical. That is not a coincidence — it
- * means the RAM arithmetic is the same shape for both, and a machine that
- * affords one affords the other.
- *
- * Sizes are Q4_K_M, which is what these tags resolve to. Where a publisher
- * exposes explicit quantization tags (dagbs does: `:q2_k`, `:q3_k_m`, ...) those
- * are the way to get a genuinely different quant of the *same* weights; the
- * huihui tags pin one quant per size, so here the ladder moves in parameters
- * instead. Both are "quantization changing with RAM", which is what was asked
- * for — one moves the knob, the other moves the model.
+ * Rung sizes use catalogue download sizes. residentBytes adds a conservative
+ * CPU/context estimate; it is not a guarantee because KV cache and runtime
+ * versions vary. All language and coding entries must be abliterated instruct
+ * builds. Vision uses only the supplied abliterated Qwen2.5-VL tiers; there is
+ * no substitute VLM below their honest resident-memory floor.
  */
 const LADDERS = {
-  // Conversation, and the intent extraction everything else routes through.
-  // Runs on every request, so it is first in the upgrade pass.
   chat: [
-    { model: 'huihui_ai/qwen2.5-abliterate:14b', quant: 'q4_K_M', bytes: 9.0 * GB, quality: 5 },
-    { model: 'huihui_ai/qwen2.5-abliterate:7b', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 4 },
-    { model: 'huihui_ai/qwen2.5-abliterate:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 3 },
-    { model: 'huihui_ai/qwen2.5-abliterate:1.5b', quant: 'q4_K_M', bytes: 1.0 * GB, quality: 2 },
-    { model: 'huihui_ai/qwen2.5-abliterate:0.5b', quant: 'q4_K_M', bytes: 398 * MB, quality: 1 },
+    { model: 'huihui_ai/qwen2.5-abliterate:14b', quant: 'Q4_K_M', bytes: 9.0 * GB, residentBytes: 10.8 * GB, quality: 5 },
+    { model: 'huihui_ai/qwen2.5-abliterate:7b', quant: 'Q4_K_M', bytes: 4.7 * GB, residentBytes: 5.7 * GB, quality: 4 },
+    { model: 'huihui_ai/qwen2.5-abliterate:3b', quant: 'Q4_K_M', bytes: 1.9 * GB, residentBytes: 2.4 * GB, quality: 3 },
+    { model: 'huihui_ai/qwen2.5-abliterate:1.5b', quant: 'Q4_K_M', bytes: 986 * MB, residentBytes: 1.25 * GB, quality: 2 },
+    { model: 'huihui_ai/qwen2.5-abliterate:0.5b', quant: 'Q4_K_M', bytes: 398 * MB, residentBytes: 510 * MB, quality: 1 },
   ],
-
-  // The hands. A coder that writes badly is worse than one that writes nothing
-  // slowly, so the floor is the same 0.5b as chat rather than something smaller.
-  code: [
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:14b', quant: 'q4_K_M', bytes: 9.0 * GB, quality: 5 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:7b', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 4 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 3 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:1.5b', quant: 'q4_K_M', bytes: 1.0 * GB, quality: 2 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:0.5b', quant: 'q4_K_M', bytes: 398 * MB, quality: 1 },
+  vision: [
+    { model: 'huihui_ai/qwen2.5-vl-abliterated:7b', quant: 'Q4_K_M', bytes: 6.0 * GB, residentBytes: 7.5 * GB, quality: 4 },
+    { model: 'huihui_ai/qwen2.5-vl-abliterated:3b', quant: 'Q4_K_M', bytes: 3.2 * GB, residentBytes: 4.1 * GB, quality: 3 },
   ],
-
-  // Speech. Kept because voice was asked for explicitly, and because it is a
-  // different category: whisper.cpp is a speech recogniser with no chat
-  // behaviour and therefore no alignment to remove. Its ladder is the
-  // quantization of one model rather than a model family, and the rungs are an
-  // order of magnitude apart — which is why it fits everywhere.
+  reason: [
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:14b', quant: 'Q4_K_M', bytes: 9.0 * GB, residentBytes: 10.8 * GB, quality: 5 },
+    // The requested abliterated 7B coder, with genuine Ollama quant tags for
+    // tighter budgets rather than silently swapping in an aligned model.
+    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q4_k_m', quant: 'Q4_K_M', bytes: 4.7 * GB, residentBytes: 5.7 * GB, quality: 4 },
+    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q3_k_m', quant: 'Q3_K_M', bytes: 3.8 * GB, residentBytes: 4.65 * GB, quality: 3 },
+    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q2_k', quant: 'Q2_K', bytes: 3.0 * GB, residentBytes: 3.75 * GB, quality: 2 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:3b', quant: 'Q4_K_M', bytes: 1.9 * GB, residentBytes: 2.4 * GB, quality: 2 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:1.5b', quant: 'Q4_K_M', bytes: 1.1 * GB, residentBytes: 1.4 * GB, quality: 1 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:0.5b', quant: 'Q4_K_M', bytes: 398 * MB, residentBytes: 510 * MB, quality: 0 },
+  ],
   speech: [
-    { kind: 'whisper', file: 'ggml-large-v3-turbo-q5_0.bin', quant: 'q5_0', bytes: 550 * MB, quality: 5 },
-    { kind: 'whisper', file: 'ggml-medium.en-q5_0.bin', quant: 'q5_0', bytes: 466 * MB, quality: 4 },
-    { kind: 'whisper', file: 'ggml-small.en-q5_1.bin', quant: 'q5_1', bytes: 200 * MB, quality: 3 },
-    { kind: 'whisper', file: 'ggml-base.en-q5_1.bin', quant: 'q5_1', bytes: 57 * MB, quality: 2 },
-    { kind: 'whisper', file: 'ggml-tiny.en-q5_1.bin', quant: 'q5_1', bytes: 31 * MB, quality: 1 },
+    { kind: 'whisper', file: 'ggml-large-v3-turbo-q5_0.bin', quant: 'Q5_0', bytes: 550 * MB, residentBytes: 1.35 * GB, quality: 5, multilingual: true },
+    { kind: 'whisper', file: 'ggml-medium-q5_0.bin', quant: 'Q5_0', bytes: 539 * MB, residentBytes: 1.25 * GB, quality: 4, multilingual: true },
+    { kind: 'whisper', file: 'ggml-small-q5_1.bin', quant: 'Q5_1', bytes: 190 * MB, residentBytes: 700 * MB, quality: 3, multilingual: true },
+    { kind: 'whisper', file: 'ggml-base-q5_1.bin', quant: 'Q5_1', bytes: 57 * MB, residentBytes: 340 * MB, quality: 2, multilingual: true },
+    { kind: 'whisper', file: 'ggml-tiny-q5_1.bin', quant: 'Q5_1', bytes: 32 * MB, residentBytes: 240 * MB, quality: 1, multilingual: true },
+  ],
+  tts: [
+    { kind: 'tts', engine: 'kokoro', dtype: 'fp32', model: 'onnx-community/Kokoro-82M-v1.0-ONNX (fp32)', quant: 'FP32', bytes: 330 * MB, residentBytes: 1.5 * GB, quality: 3, note: 'browser-local neural voice; resident estimate is conservative and must be validated on the target GPU/browser' },
+    { kind: 'tts', engine: 'kokoro', dtype: 'q8', model: 'onnx-community/Kokoro-82M-v1.0-ONNX (q8)', quant: 'Q8', bytes: 86 * MB, residentBytes: 750 * MB, quality: 2, note: 'browser-local neural voice; downloaded and cached by the browser on first use' },
+    { kind: 'tts', engine: 'system', dtype: null, model: 'Browser / operating-system SpeechSynthesis', quant: 'SYSTEM', bytes: 0, residentBytes: 0, quality: 1, note: 'no JARVIS model download; available voices and languages depend on the browser and OS' },
   ],
 }
 
-/**
- * Every chat and coding model must be abliterated. This is a standing
- * requirement, so it is *checked* rather than assumed — a catalogue entry that
- * slips in a base model should fail the plan loudly rather than quietly install
- * something the brief says not to install.
- *
- * "Abliterated" means fine-tuned without refusal training, which in practice is
- * the `abliterat` family. Ollama's plain `qwen2.5` and `qwen2.5-coder` tags are
- * the aligned originals and are exactly what must not be used.
- */
-const UNCENSORED = /abliterat|dolphin|hermes|nous|openchat|wizard-vicuna|solar|heretic/i
-
-/**
- * Assert the ladders obey the standing requirement.
- *
- * Speech is exempt: whisper.cpp is a speech recogniser with no chat behaviour and
- * therefore no alignment to remove. Exempting it here rather than filtering it
- * out at the call site keeps the rule and its exception in one place.
- */
-function assertUncensored() {
-  const offenders = []
-  for (const [cap, ladder] of Object.entries(LADDERS)) {
-    if (cap === 'speech') continue
-    for (const rung of ladder) {
-      const name = rung.model ?? rung.file ?? ''
-      if (!UNCENSORED.test(name)) offenders.push(`${cap}: ${name}`)
+const PURPOSE = Object.freeze({
+  chat: 'multilingual chat, intent extraction, English translation',
+  vision: 'image understanding',
+  reason: 'coding, tool use and technical reasoning',
+  speech: 'local multilingual speech-to-text',
+  tts: 'browser/system text-to-speech',
+})
+function assertModelPolicy() {
+  const problems = []
+  for (const cap of ['chat', 'reason', 'vision']) {
+    for (const rung of LADDERS[cap]) {
+      if (!/abliterat/i.test(rung.model ?? '')) problems.push(`${cap}: ${rung.model}`)
     }
   }
-  if (offenders.length) {
-    throw new Error(`these models are not abliterated and must not be installed: ${offenders.join(', ')}`)
+  if (problems.length) {
+    throw new Error(`refusing a non-abliterated chat/coding model: ${problems.join(', ')}`)
+  }
+  for (const rung of LADDERS.speech) {
+    if (/\.en\./i.test(rung.file)) throw new Error(`Whisper model must be multilingual: ${rung.file}`)
   }
 }
 
-/** What each capability is for, for the report. */
-const PURPOSE = {
-  chat: 'conversation and intent extraction',
-  code: 'writing and debugging code',
-  speech: 'speech to text',
-}
-
-/** Upgrade order when budget is left over. Chat first — it runs on every turn. */
-const UPGRADE_ORDER = ['chat', 'code', 'speech']
-
-/** The whisper.cpp binary. Cheap enough to always take. */
-const WHISPER_BINARY = { id: 'whisper-binary', kind: 'whisper-binary', bytes: 3 * MB }
-
-/**
- * Total RAM.
- *
- * `totalmem`, not `freemem`: free memory is a snapshot of this instant and is
- * wrong the moment anything else starts. Total is what the budget is carved out
- * of, and it does not change while the process lives.
- */
+/** System memory, in bytes. */
 export function totalRam() {
   return totalmem()
 }
 
-/**
- * A GPU, if there is one, with the VRAM we may actually use.
- *
- * Counted conservatively on purpose. `nvidia-smi` reports total VRAM including
- * whatever the compositor already holds; on a 4 GB card with a desktop running
- * that can be a third. Taking the whole number would be a budget that lies.
- */
+/** Current available memory is reported separately; it never changes the fixed 35/25/40 split. */
+export function availableRam() {
+  return freemem()
+}
+
+/** GPU telemetry is advisory only. System RAM remains the hard budget. */
 export function gpu() {
-  // NVIDIA
-  try {
-    const out = execSync('nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits', {
-      stdio: 'pipe',
-      timeout: 4000,
-    })
-      .toString()
-      .trim()
-      .split('\n')[0]
-    const [mb, ...nameParts] = out.split(',').map((s) => s.trim())
-    const vram = Number(mb) * MB
-    if (vram > 0) {
-      return {
-        vendor: 'nvidia',
-        name: nameParts.join(','),
-        vram,
-        usable: Math.floor(vram * 0.75),
-        note: 'CUDA — pass -ngl 99 to offload every layer',
-      }
-    }
-  } catch {
-    /* no nvidia-smi; fall through */
-  }
-
-  // AMD ROCm
-  try {
-    const out = execSync('rocm-smi --showmeminfo vram --csv', { stdio: 'pipe', timeout: 4000 }).toString()
-    const match = out.match(/(\d{3,})/)
-    if (match) {
-      const vram = Number(match[1]) * MB
-      return {
-        vendor: 'amd',
-        name: 'AMD ROCm',
-        vram,
-        usable: Math.floor(vram * 0.75),
-        note: 'HSA_OVERRIDE_GFX_VERSION may be needed on RDNA cards',
-      }
-    }
-  } catch {
-    /* no rocm-smi */
-  }
-
-  // Apple Silicon: unified memory, so "VRAM" is a slice of system RAM. The
-  // default iogpu.wired_limit_rdmb is 75% of RAM, which is the honest number.
   if (process.platform === 'darwin') {
     const total = totalRam()
-    return {
-      vendor: 'apple',
-      name: 'Apple Silicon (Metal)',
-      vram: total,
-      usable: Math.floor(total * 0.55),
-      note: 'unified memory — Metal offload, no separate VRAM',
-    }
+    return { vendor: 'apple', name: 'Apple unified memory', vram: total, usable: Math.floor(total * 0.55), note: 'shared memory; CPU RAM budget still applies' }
   }
-
+  if (process.platform === 'win32') {
+    try {
+      const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      const [first] = stdout.trim().split(/\r?\n/)
+      const [mb, ...name] = first.split(',').map((s) => s.trim())
+      const vram = Number(mb) * MB
+      if (vram > 0) return { vendor: 'nvidia', name: name.join(','), vram, usable: Math.floor(vram * 0.75), note: 'NVIDIA VRAM is advisory; CPU RAM cap is unchanged' }
+    } catch { /* no NVIDIA telemetry */ }
+    return null
+  }
+  try {
+    const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const [first] = stdout.trim().split(/\r?\n/)
+    const [mb, ...name] = first.split(',').map((s) => s.trim())
+    const vram = Number(mb) * MB
+    if (vram > 0) return { vendor: 'nvidia', name: name.join(','), vram, usable: Math.floor(vram * 0.75), note: 'GPU is advisory; CPU RAM cap is unchanged' }
+  } catch { /* no NVIDIA telemetry */ }
+  try {
+    const stdout = execFileSync('rocm-smi', ['--showmeminfo', 'vram', '--csv'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const match = stdout.match(/(\d{3,})/)
+    if (match) {
+      const vram = Number(match[1]) * MB
+      return { vendor: 'amd', name: 'AMD ROCm', vram, usable: Math.floor(vram * 0.75), note: 'GPU is advisory; CPU RAM cap is unchanged' }
+    }
+  } catch { /* no ROCm telemetry */ }
   return null
 }
 
-/** The budget, with the reasoning attached. */
-export function budget() {
-  const total = totalRam()
-  const g = gpu()
-  const cpuSide = Math.floor(total * BUDGET.models)
+/** The exact fixed RAM arithmetic, with an injected total for deterministic tests. */
+export function budget(total = totalRam(), free = availableRam()) {
+  const models = Math.floor(total * BUDGET.models)
   return {
     total,
     os: Math.floor(total * BUDGET.os),
     apps: Math.floor(total * BUDGET.apps),
-    models: cpuSide,
-    gpu: g ? g.usable : 0,
-    gpuInfo: g,
+    models,
+    free,
+    freeForModels: Math.min(models, Math.floor(free * 0.9)),
+    gpuInfo: null,
     gb: total / GB,
   }
 }
 
+function smallest(ladder) {
+  return ladder[ladder.length - 1]
+}
+
+function selectRung(cap, ramBudget, selected, skipped) {
+  const ladder = LADDERS[cap]
+  const languagePolicy = cap === 'chat' ? { multilingual: true } : cap === 'reason' ? { englishOnly: true } : {}
+  const rung = ladder.find((candidate) => candidate.residentBytes <= ramBudget)
+  if (rung) {
+    selected[cap] = { ...rung, ...languagePolicy, fits: true, mode: 'within-budget' }
+    return
+  }
+  // Keep the minimum chat/coder as an explicit opt-in best-effort pick instead
+  // of pretending it fits. Vision has no 1 GB miracle model; omit it entirely.
+  if (cap === 'chat' || cap === 'reason') {
+    const floor = smallest(ladder)
+    selected[cap] = { ...floor, ...languagePolicy, fits: false, mode: 'best-effort' }
+    skipped.push({ cap, model: floor.model, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `minimum ${cap} model estimates ${ (floor.residentBytes / GB).toFixed(2) } GB resident; the reserved JARVIS budget is ${(ramBudget / GB).toFixed(2)} GB. Best-effort only.` })
+    return
+  }
+  skipped.push({ cap, model: null, needsGb: +(smallest(ladder).residentBytes / GB).toFixed(2), why: `${cap} is unavailable within this RAM tier. The smallest supported choice estimates ${(smallest(ladder).residentBytes / GB).toFixed(2)} GB resident.` })
+}
+
 /**
- * The plan.
+ * Plan each feature against the same sequential-runtime ceiling.
  *
- * Pass 1 takes the *last* rung of each ladder — the smallest, the floor. Pass 2
- * climbs. Because pass 1 guarantees presence, "works on every RAM" is true by
- * construction rather than by luck.
- *
- * @returns {{choices:object, budget:object, usedBytes:number, notes:string[]}}
+ * `total`/`free` can be injected for tests. Per-capability resident estimates
+ * are compared to the 40% budget; downloads are summed separately for disk.
  */
-export function plan() {
-  assertUncensored()
-  const b = budget()
-  const notes = []
+export function plan(options = {}) {
+  assertModelPolicy()
+  const total = options.total ?? totalRam()
+  const free = options.free ?? availableRam()
+  const b = budget(total, free)
+  b.gpuInfo = Object.hasOwn(options, 'gpuInfo')
+    ? options.gpuInfo
+    : (options.total === undefined && options.free === undefined ? gpu() : null)
+  // If current free memory is lower than the reserved cap, be more conservative
+  // instead of causing avoidable paging/OOM. This does not alter the 35/25/40
+  // budget shown to the user.
+  const ceiling = b.freeForModels
   const choices = {}
-  let used = 0
-
-  // The whisper binary is always affordable and always required, so take it
-  // first and let it come out of the same pot.
-  used += WHISPER_BINARY.bytes
-
-  // Pass 1 — the floor. Every capability, no exceptions.
-  for (const cap of Object.keys(LADDERS)) {
-    const rung = LADDERS[cap][LADDERS[cap].length - 1]
-    choices[cap] = { ...rung, floor: true }
-    used += rung.bytes
+  const skipped = []
+  for (const cap of Object.keys(LADDERS).filter((name) => name !== 'tts')) {
+    selectRung(cap, ceiling, choices, skipped)
   }
 
-  // If even the floor does not fit, drop the least essential managed
-  // capability first, one at a time, until it fits. Chat is the core; the code
-  // ladder is dropped before speech. Tiny machines may keep chat alone, while
-  // larger budgets retain chat, code, and a Whisper rung.
-  //
-  // Essentiality, most first. The array is traversed in reverse when dropping:
-  // code first, then speech, and chat last.
-  const ESSENTIALITY = ['chat', 'speech', 'code']
-  if (used > b.models) {
-    const dropped = []
-    const kept = new Set(Object.keys(LADDERS))
-    let keptBytes = used
+  // Kokoro is retained in the browser while Ollama runs. Reserve its RAM beside
+  // the largest other active local model; if that cannot fit, use zero-model
+  // SpeechSynthesis rather than exceeding the fixed cap.
+  const primaryPeak = Math.max(0, ...Object.values(choices).filter((rung) => rung.fits).map((rung) => rung.residentBytes))
+  const selectedTts = LADDERS.tts.find((candidate) => primaryPeak + candidate.residentBytes <= ceiling)
+  choices.tts = { ...(selectedTts ?? LADDERS.tts.at(-1)), fits: true, mode: 'within-budget' }
 
-    for (const cap of [...ESSENTIALITY].reverse()) {
-      if (keptBytes <= b.models) break
-      if (!kept.has(cap)) continue
-      kept.delete(cap)
-      keptBytes -= LADDERS[cap][LADDERS[cap].length - 1].bytes
-      dropped.push({ cap, needsGb: +(LADDERS[cap][LADDERS[cap].length - 1].bytes / GB).toFixed(2) })
+  const fittingChoices = Object.values(choices).filter((rung) => rung.fits)
+  const maxResidentBytes = primaryPeak + choices.tts.residentBytes
+  const totalDownloadBytes = fittingChoices.reduce((sum, rung) => sum + rung.bytes, 0)
+  const notes = [
+    '35% reserved for the OS, 25% for other apps, 40% maximum for JARVIS.',
+    'Models are selected for sequential loading; Ollama residency is released after each local request.',
+    `Only ${(ceiling / GB).toFixed(2)} GB is currently planned for one active model at a time; context/runtime estimates vary by backend.`,
+    choices.tts.engine === 'system'
+      ? 'TTS uses the browser/OS voice at this RAM tier; voice language availability depends on the installed OS voices.'
+      : `TTS selects browser-local Kokoro ${choices.tts.dtype} (${(choices.tts.bytes / MB).toFixed(0)} MB weights). The browser downloads and caches it on first use; resident use is an estimate, not a measured guarantee.`,
+  ]
+  if (skipped.some((item) => item.cap === 'vision')) {
+    notes.push('Full image Q&A is not available in this RAM tier; the supplied Qwen2.5-VL 3B model alone downloads at about 3.2 GB and needs additional runtime memory.')
+  }
+  if (skipped.some((item) => item.cap === 'chat' || item.cap === 'reason')) {
+    notes.push('The minimum abliterated 0.5B text weights are offered as best-effort only; 1 GB total RAM cannot guarantee inference inside the 0.4 GB JARVIS cap.')
+  }
+  const g = b.gpuInfo
+  if (g) notes.push(`${g.name}: ${(g.usable / GB).toFixed(1)} GB advisory VRAM; the fixed system-RAM limit still applies.`)
+
+  return {
+    choices,
+    budget: b,
+    ramBudgetBytes: b.models,
+    effectiveModelBytes: ceiling,
+    maxResidentBytes,
+    totalDownloadBytes,
+    usedBytes: maxResidentBytes,
+    notes,
+    skipped,
+    dropped: skipped.map((item) => ({ cap: item.cap, needsGb: item.needsGb, why: item.why })),
+    salvaged: skipped.length > 0,
+  }
+}
+
+export function planSummary(input) {
+  const p = input ?? plan()
+  const picked = Object.entries(p.choices)
+    .map(([cap, rung]) => `${cap} ${rung.quant ?? 'unknown'}${rung.fits ? '' : ' (best-effort)'}`)
+    .join(', ')
+  return `autopilot: ${p.budget.gb.toFixed(1)} GB RAM → ${(p.budget.models / GB).toFixed(1)} GB JARVIS cap | ${picked}`
+}
+
+/** Install only after an explicit local UI action or setup-script invocation. */
+export async function install(opts = {}) {
+  const { dry = false, onStep = () => {}, dir = WHISPER_DIR, planned, skipOllamaModels = false } = opts
+  const p = planned ?? plan()
+  const log = []
+  const root = resolve(dir)
+  onStep({ phase: 'plan', summary: planSummary(p), notes: p.notes, totalDownloadBytes: p.totalDownloadBytes })
+  if (dry) return { log, plan: p, installed: [] }
+
+  await mkdir(root, { recursive: true })
+  const hasFittingOllamaModels = !skipOllamaModels && Object.values(p.choices).some((rung) =>
+    rung.fits && rung.kind !== 'whisper' && rung.kind !== 'tts' && Boolean(rung.model),
+  )
+  const ollamaReady = hasFittingOllamaModels ? await ollamaUp() : false
+  const existingModels = ollamaReady ? await installedOllamaModels() : new Set()
+
+  for (const [cap, rung] of Object.entries(p.choices)) {
+    const id = rung.model ?? rung.file ?? cap
+    if (!rung.fits) {
+      const why = `skipped: ${cap} is outside the ${ (p.effectiveModelBytes / GB).toFixed(2) } GB active-memory plan; no over-cap model was downloaded`
+      onStep({ phase: 'skip', cap, model: id, status: why, fits: false })
+      log.push({ cap, id, ok: true, skipped: true, fits: false, note: why })
+      continue
     }
 
-    const salvaged = {}
-    for (const cap of kept) {
-      salvaged[cap] = { ...LADDERS[cap][LADDERS[cap].length - 1], floor: true }
+    if (skipOllamaModels && rung.kind !== 'whisper' && rung.kind !== 'tts' && rung.model) {
+      const note = 'skipped: a non-Ollama model endpoint is configured; no local Ollama weights were downloaded'
+      onStep({ phase: 'skip', cap, model: rung.model, status: note, fits: rung.fits })
+      log.push({ cap, id: rung.model, ok: true, skipped: true, fits: rung.fits, note })
+      continue
     }
 
-    return {
-      choices: salvaged,
-      budget: b,
-      usedBytes: keptBytes,
-      notes: [
-        ...dropped.map(
-          (d) =>
-            `${d.cap} dropped — needs ${d.needsGb} GB, only ${(b.models / GB).toFixed(1)} GB budgeted. ` +
-            `Raises the floor for every other capability, so it is the honest trade.`,
-        ),
-      ],
-      salvaged: true,
-      dropped,
+    if (rung.kind === 'tts') {
+      const note = rung.engine === 'system'
+        ? 'uses the installed browser/OS voice; no model download required'
+        : 'browser model is fetched and cached on first Kokoro use, not by the Ollama bridge'
+      onStep({ phase: 'browser-voice', cap, model: rung.model, status: note })
+      log.push({ cap, id: rung.model, ok: true, skipped: true, note })
+      continue
+    }
+
+    if (rung.kind === 'whisper') {
+      onStep({ phase: 'whisper', cap, file: rung.file, completed: 0, total: rung.bytes })
+      try {
+        const modelPath = join(root, rung.file)
+        const alreadyHaveModel = await fileIsComplete(modelPath, rung.bytes)
+        const result = alreadyHaveModel
+          ? { id: rung.file, ok: true, skipped: true, path: modelPath, bytes: (await stat(modelPath)).size, note: 'already installed; kept existing multilingual Whisper weights' }
+          : await downloadWhisperModel(rung.file, root, (progress) => onStep({ phase: 'whisper', cap, file: rung.file, ...progress }))
+        log.push({ ...result, cap })
+        if (result.ok) {
+          await writeFile(join(root, ACTIVE_WHISPER_FILE), rung.file, 'utf8')
+          const runtime = await ensureWhisperPackage()
+          log.push({ ...runtime, cap })
+        }
+      } catch (error) {
+        log.push({ cap, id: rung.file, ok: false, error: concise(error) })
+      }
+      continue
+    }
+
+    if (!ollamaReady) {
+      const note = 'not downloaded because Ollama is offline; start it and run the installer again'
+      onStep({ phase: 'skip', cap, model: rung.model, status: note })
+      log.push({ cap, id: rung.model, ok: true, skipped: true, fits: true, note })
+      continue
+    }
+    if (existingModels.has(rung.model)) {
+      const note = 'already installed in Ollama; download skipped'
+      onStep({ phase: 'skip', cap, model: rung.model, status: note, fits: true })
+      log.push({ cap, id: rung.model, ok: true, skipped: true, fits: true, note })
+      continue
+    }
+
+    onStep({ phase: 'pull', cap, model: rung.model, completed: 0, total: rung.bytes, fits: true })
+    try {
+      await pullOllamaModel(rung.model, (progress) => onStep({ phase: 'pull', cap, model: rung.model, fits: true, ...progress }))
+      existingModels.add(rung.model)
+      log.push({ cap, id: rung.model, ok: true, fits: true })
+    } catch (error) {
+      log.push({ cap, id: rung.model, ok: false, fits: true, error: concise(error) })
     }
   }
 
-  // Pass 2 — climb, round-robin.
-  //
-  // Not best-first. A best-first walk gives the whole budget to whichever
-  // capability is listed first, and on a 24 GB machine that means a 9 GB chat
-  // model beside a 0.4 GB coder — which is a machine that converses well and
-  // writes code badly. Round-robin takes one rung from each capability in turn,
-  // so they climb together and no single one can starve the rest.
-  //
-  // Loops until nothing fits, so a capability can take two upgrades if it is the
-  // only one left with room.
-  let climbing = true
-  while (climbing) {
-    climbing = false
-    for (const cap of UPGRADE_ORDER) {
-      const ladder = LADDERS[cap]
-      if (!ladder) continue
-      const idx = ladder.findIndex((r) => r.model === choices[cap].model && r.file === choices[cap].file)
-      if (idx <= 0) continue // already at the top
-      const next = ladder[idx - 1]
-      const delta = next.bytes - choices[cap].bytes
-      if (used + delta <= b.models) {
-        choices[cap] = { ...next, floor: false }
-        used += delta
-        climbing = true
+  const failures = log.filter((item) => !item.ok && !item.skipped)
+  const installed = log.filter((item) => item.ok && !item.skipped)
+  onStep({ phase: 'done', installed: installed.length, skipped: log.filter((item) => item.skipped).length, failed: failures.length })
+  return { log, plan: p, installed }
+}
+
+async function installedOllamaModels() {
+  try {
+    const response = await fetch(`${OLLAMA_HOST}/api/tags`, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return new Set()
+    const data = await response.json()
+    return new Set((data.models ?? []).map((model) => String(model.name ?? '')).filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+async function fileIsComplete(path, expectedBytes) {
+  try {
+    const entry = await stat(path)
+    return entry.isFile() && entry.size >= expectedBytes * 0.9
+  } catch {
+    return false
+  }
+}
+
+async function ollamaUp() {
+  try {
+    const response = await fetch(`${OLLAMA_HOST}/api/tags`, { signal: AbortSignal.timeout(2500) })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+async function pullOllamaModel(model, onProgress) {
+  const response = await fetch(`${OLLAMA_HOST}/api/pull`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: model, stream: true }),
+    signal: AbortSignal.timeout(60 * 60 * 1000),
+  })
+  if (!response.ok) throw new Error(`Ollama pull ${model}: HTTP ${response.status}`)
+  if (!response.body) throw new Error('Ollama returned no download stream')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const event = JSON.parse(line)
+        onProgress({ status: event.status ?? '', completed: event.completed ?? null, total: event.total ?? null })
+        if (event.error) throw new Error(event.error)
+      } catch (error) {
+        if (error instanceof SyntaxError) continue
+        throw error
       }
     }
   }
-
-  // A GPU changes the answer rather than the arithmetic: it does not make the
-  // budget bigger, it makes the *larger* rungs affordable, because the resident
-  // cost moves off system RAM. Reported, not silently acted on, because whether
-  // Ollama is built with CUDA is a question only the machine can answer.
-  if (b.gpu > 0) {
-    notes.push(`${b.gpuInfo.vendor} GPU with ${(b.gpuInfo.usable / GB).toFixed(1)} GB usable — ${b.gpuInfo.note}`)
-  }
-
-  return { choices, budget: b, usedBytes: used, notes, salvaged: false }
-}
-
-/** One line for the boot banner. */
-export function planSummary() {
-  const p = plan()
-  const b = p.budget
-  const picked = Object.entries(p.choices)
-    .map(([cap, r]) => `${cap} ${r.quant ?? '?'}`)
-    .join(', ')
-  return `autopilot: ${b.gb.toFixed(1)} GB RAM → ${(b.models / GB).toFixed(1)} GB models | ${picked}`
-}
-
-/**
- * Install the plan.
- *
- * @param {{dry?:boolean, onStep?:Function, dir?:string}} [opts]
- */
-export async function install(opts = {}) {
-  const { dry = false, onStep = () => {}, dir = 'models' } = opts
-  const p = plan()
-  const log = []
-
-  onStep({ phase: 'plan', summary: planSummary(), notes: p.notes })
-
-  if (dry) return { log, plan: p, installed: [] }
-
-  await mkdir(dir, { recursive: true })
-
-  // The whisper binary first. plan() charges its 3 MB against the budget, so
-  // install() has to actually spend it — otherwise the budget counts a download
-  // that never happens and the speech capability is left without its executable.
-  log.push(await installWhisperBinary())
-
-  for (const [cap, rung] of Object.entries(p.choices)) {
-    if (rung.kind === 'whisper') {
-      onStep({ phase: 'whisper', cap, file: rung.file })
-      log.push({ ...(await downloadWhisperModel(rung.file, dir)), cap })
-      continue
-    }
-    onStep({ phase: 'pull', cap, model: rung.model })
+  if (buffer.trim()) {
     try {
-      execSync(`ollama pull ${rung.model}`, { stdio: 'pipe' })
-      log.push({ cap, id: rung.model, ok: true })
-    } catch (e) {
-      // One failed model is not a failed install. The pipeline still runs, and
-      // the report says exactly which capability is degraded.
-      log.push({ cap, id: rung.model, ok: false, error: String(e.message ?? e).slice(0, 200) })
+      const event = JSON.parse(buffer)
+      if (event.error) throw new Error(event.error)
+      onProgress({ status: event.status ?? '', completed: event.completed ?? null, total: event.total ?? null })
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
     }
   }
+}
 
-  return { log, plan: p, installed: log.filter((l) => l.ok) }
+async function ensureWhisperPackage() {
+  const id = 'whisper-runtime'
+  const pkg = '@lumen-labs-dev/whisper-node@0.4.1'
+  try {
+    require.resolve('@lumen-labs-dev/whisper-node')
+    return { id, ok: true, skipped: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'already installed' }
+  } catch { /* install it below */ }
+  try {
+    await execFileAsync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-save', '--prefix', process.cwd(), pkg], {
+      timeout: 10 * 60 * 1000,
+      maxBuffer: 8 * MB,
+      windowsHide: true,
+      shell: process.platform === 'win32',
+    })
+    return { id, ok: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'local Whisper runtime installed by explicit model-manager action' }
+  } catch (error) {
+    return { id, ok: false, error: `Could not install ${pkg}: ${concise(error)}` }
+  }
+}
+
+async function downloadWhisperModel(file, dir, onProgress = () => {}) {
+  const part = join(dir, `${file}.part`)
+  const target = join(dir, file)
+  try {
+    const response = await fetch(`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${file}`, { signal: AbortSignal.timeout(30 * 60 * 1000) })
+    if (!response.ok) throw new Error(`Hugging Face HTTP ${response.status}`)
+    const total = Number(response.headers.get('content-length')) || null
+    let completed = 0
+    const body = response.body
+    if (!body) throw new Error('Whisper download returned no body')
+    const progressStream = new TransformStream({
+      transform(chunk, controller) {
+        completed += chunk.byteLength
+        onProgress({ completed, total, status: 'downloading multilingual Whisper model' })
+        controller.enqueue(chunk)
+      },
+    })
+    await pipeline(body.pipeThrough(progressStream), createWriteStream(part))
+    await rm(target, { force: true })
+    await rename(part, target)
+    return { id: file, ok: true, path: target, bytes: completed }
+  } catch (error) {
+    await import('node:fs/promises').then(({ rm }) => rm(part, { force: true })).catch(() => {})
+    throw error
+  }
+}
+
+function concise(error) {
+  return String(error?.message ?? error).slice(0, 320)
+}
+
+/** Full selectable catalogue, for the model manager. */
+export function ladder() {
+  return Object.fromEntries(Object.entries(LADDERS).map(([cap, rungs]) => [
+    cap,
+    {
+      purpose: PURPOSE[cap],
+      rungs: rungs.map((rung) => ({
+        model: rung.model ?? rung.file,
+        quant: rung.quant,
+        downloadGb: +(rung.bytes / GB).toFixed(2),
+        residentGb: +(rung.residentBytes / GB).toFixed(2),
+        quality: rung.quality,
+        multilingual: rung.multilingual ?? undefined,
+        note: rung.note ?? undefined,
+      })),
+    },
+  ]))
 }
 
 /**
- * Get the whisper.cpp binary.
- *
- * This was wrong twice and is now verified by actually trying it. The first
- * version invented a HuggingFace URL; the second invented per-platform ones.
- * Neither existed. whisper.cpp publishes **no prebuilt binaries at all** — not
- * on HuggingFace, not in its GitHub releases (which have zero assets), and the
- * repo itself has moved from ggerganov/whisper.cpp to ggml-org/whisper.cpp.
- *
- * So the only honest options are: use a package that ships its own prebuilt
- * binary, or build from source. The first is what this does, because most people
- * do not have cmake and a compiler.
- *
- * `whisper-node` is the npm package that bundles prebuilt whisper.cpp bindings
- * across platforms. The autopilot installs this pinned npm package only when
- * the user explicitly requests the model plan; it is not guessed from a URL.
+ * Reference plan for each requested machine-size tier. The catalog is for
+ * comparison only: it does not install or download the models in other rows.
+ * Profiles assume all reported system RAM is currently free; live planning may
+ * step down when other processes reduce available memory.
  */
-async function installWhisperBinary() {
-  const id = 'whisper-binary'
-  const pkg = 'whisper-node@1.1.1'
-
-  try {
-    execSync(`npm install --no-save --prefix . ${pkg}`, { stdio: 'pipe', timeout: 300000 })
-    return {
-      id,
-      ok: true,
-      path: 'node_modules/whisper-node',
-      note: 'whisper.cpp bindings installed via npm — whisper.mjs resolves the binary from node_modules',
-    }
-  } catch (e) {
-    // Not a soft failure. Without a binary the speech capability cannot run at
-    // all, so say exactly what to do rather than reporting a partial success.
-    return {
-      id,
-      ok: false,
-      error:
-        `could not install ${pkg}: ${String(e.message ?? e).slice(0, 120)}. ` +
-        'Build it instead: git clone https://github.com/ggml-org/whisper.cpp && ' +
-        'cmake -B build && cmake --build build --config Release',
-    }
-  }
-}
-
-async function downloadWhisperModel(file, dir) {
-  try {
-    const url = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${file}`
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const buf = Buffer.from(await res.arrayBuffer())
-    const { writeFile } = await import('node:fs/promises')
-    const path = join(dir, file)
-    await writeFile(path, buf)
-    return { id: file, ok: true, path }
-  } catch (e) {
-    return { id: file, ok: false, error: String(e.message ?? e) }
-  }
-}
-
-/** For a UI that wants to show the whole ladder and what was chosen. */
-export function ladder() {
-  return Object.fromEntries(
-    Object.entries(LADDERS).map(([cap, rungs]) => [
+export function tierProfiles() {
+  const sizes = [0.5, ...Array.from({ length: 32 }, (_, index) => index + 1)]
+  return sizes.map((ramGb) => {
+    const profile = plan({ total: ramGb * GB, free: ramGb * GB, gpuInfo: null })
+    const slots = Object.fromEntries(Object.entries(profile.choices).map(([cap, rung]) => [
       cap,
       {
-        purpose: PURPOSE[cap],
-        rungs: rungs.map((r) => ({ model: r.model ?? r.file, quant: r.quant ?? 'gguf', gb: +(r.bytes / GB).toFixed(2), quality: r.quality })),
+        model: rung.model ?? rung.file ?? null,
+        fits: Boolean(rung.fits),
+        state: rung.fits ? 'fits' : ['chat', 'reason'].includes(cap) ? 'best-effort' : 'unavailable',
+        engine: rung.engine ?? null,
+        dtype: rung.dtype ?? null,
       },
-    ]),
-  )
+    ]))
+    return {
+      ramGb,
+      aiCapGb: +(profile.budget.models / GB).toFixed(2),
+      totalDownloadGb: +(profile.totalDownloadBytes / GB).toFixed(2),
+      slots,
+    }
+  })
+}
+
+/** The selected multilingual Whisper file, persisted across bridge restarts. */
+export async function selectedWhisperModel(dir = WHISPER_DIR) {
+  try {
+    const file = (await readFile(join(dir, ACTIVE_WHISPER_FILE), 'utf8')).trim()
+    if (file && !file.includes('/') && !file.includes('\\')) return join(resolve(dir), file)
+  } catch { /* no saved selection */ }
+  return join(resolve(dir), 'ggml-tiny-q5_1.bin')
+}
+
+/** True when a Whisper model is installed locally. */
+export async function whisperFileReady(modelPath) {
+  try {
+    const entry = await stat(modelPath)
+    if (!entry.isFile()) return false
+    const expected = LADDERS.speech.find((rung) => rung.file === basename(modelPath))?.bytes
+    // Known planned files must be essentially complete; unknown user overrides
+    // still need a substantial model file rather than a zero-byte placeholder.
+    return entry.size >= (expected ? expected * 0.9 : 32 * MB)
+  } catch {
+    return false
+  }
 }

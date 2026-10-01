@@ -9,7 +9,7 @@
  * nothing to do with the work.
  *
  * These two stand in for them, built directly on `@modelcontextprotocol/sdk`.
- * The signatures are identical, so the four server modules only change their
+ * The signatures are identical, so the in-process server modules only change their
  * import line; everything below that line is untouched.
  *
  *   import { createSdkMcpServer, tool } from './mcp.mjs'

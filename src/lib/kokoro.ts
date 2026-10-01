@@ -27,6 +27,13 @@ type Kokoro = {
 let model: Kokoro | null = null
 let loading: Promise<Kokoro | null> | null = null
 let failed = false
+let selectedDtype: 'q8' | 'fp32' = 'q8'
+
+/** Configure precision before first load; the RAM planner selects this at boot. */
+export function configureDtype(dtype: 'q8' | 'fp32') {
+  if (model || loading) return
+  selectedDtype = dtype
+}
 
 /** 0..1 while the model downloads, for the boot readout. */
 let progress = 0
@@ -80,10 +87,10 @@ export async function load(): Promise<Kokoro | null> {
       const tts = await KokoroTTS.from_pretrained(
         'onnx-community/Kokoro-82M-v1.0-ONNX',
         {
-          // q8 is about 86MB against fp32's 330MB, and the difference is
-          // inaudible through laptop speakers. WebGPU keeps generation ahead
-          // of playback; without it this would be too slow to converse with.
-          dtype: 'q8',
+          // q8 is about 86MB and fp32 about 330MB. The local RAM planner
+          // reserves headroom for the model that remains resident alongside
+          // this browser model; runtime memory still varies by GPU/browser.
+          dtype: selectedDtype,
           device: 'webgpu',
           // The callback is a union across several event shapes; only the
           // download-progress one carries a percentage.

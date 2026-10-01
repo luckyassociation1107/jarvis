@@ -33,6 +33,11 @@ export async function startAnalyser(): Promise<void> {
   buf = new Uint8Array(analyser.frequencyBinCount)
 }
 
+/** True only while the real input stream and its analyser are both active. */
+export function analyserActive(): boolean {
+  return Boolean(analyser && buf && stream?.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled))
+}
+
 /** 0..1 loudness. Returns 0 before the analyser is up. */
 export function micLevel(): number {
   if (!analyser || !buf) return 0

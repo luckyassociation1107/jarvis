@@ -21,10 +21,11 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
-import { plan as autopilotPlan, install as autopilotInstall, planSummary } from './autopilot.mjs'
+import { install as autopilotInstall, planSummary, ladder as autopilotLadder, tierProfiles } from './autopilot.mjs'
+import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -33,6 +34,7 @@ import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
+import { windowsServer } from './windows.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
@@ -41,6 +43,7 @@ import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
 import { renderPage } from './page.mjs'
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
+const AUTOPILOT_JOBS = new Map()
 
 /**
  * A crash here takes the whole assistant down mid-sentence, and most of what
@@ -74,6 +77,9 @@ const EXTRA_ORIGINS = new Set(
     .filter(Boolean),
 )
 const ALLOW_NO_ORIGIN = process.env.JARVIS_ALLOW_NO_ORIGIN === '1'
+// Opt in only for hosted sandbox previews; local runs keep the localhost-only
+// origin policy unless the environment explicitly enables this bridge path.
+const ALLOW_ARENA_PREVIEW = process.env.JARVIS_ALLOW_ARENA_PREVIEW === '1'
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
@@ -95,6 +101,7 @@ function originAllowed(origin) {
   } catch {
     return false
   }
+  if (ALLOW_ARENA_PREVIEW && url.protocol === 'https:' && url.hostname.endsWith('.e2b.app')) return true
   if (url.protocol !== 'http:') return false
   if (!LOCAL_HOSTS.has(url.hostname)) return false
   return isDevPort(Number(url.port))
@@ -280,6 +287,10 @@ function decideTool(name) {
     // and the real gate is the browser's own camera permission plus an
     // indicator the user can see for as long as it is live.
     if (server === 'jarvis_eyes') return true
+
+    // Window enumeration is read-only. Every Windows desktop action requires
+    // the explicit bridge:writes opt-in, independently of tool-name heuristics.
+    if (server === 'jarvis_windows') return mcpToolOf(name) === 'list_windows' || ALLOW_WRITES
 
     const tool = mcpToolOf(name)
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
@@ -636,6 +647,7 @@ function corsFor(req) {
   if (origin) {
     headers['access-control-allow-origin'] = origin
     headers['access-control-allow-headers'] = 'content-type'
+    headers['access-control-allow-methods'] = 'GET, POST, OPTIONS'
   }
   return headers
 }
@@ -651,6 +663,7 @@ const handleRequest = async (req, res) => {
     return res.end('forbidden')
   }
   const cors = corsFor(req)
+  const requestUrl = new URL(req.url ?? '/', 'http://jarvis.local')
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, cors)
@@ -664,81 +677,145 @@ const handleRequest = async (req, res) => {
     return res.end(JSON.stringify(s))
   }
 
-  // Local speech-to-text. Body is a WAV; reply is the transcript.
-  //
-  // Separate from the browser recogniser on purpose: that one needs Chrome and
-  // a network connection and sends audio to Google, which is disqualifying for
-  // something meant to run entirely on your own machine.
-  if (req.method === 'POST' && req.url === '/stt') {
+  // Local multilingual Whisper status and transcription. Nothing is proxied off-device.
+  if (req.method === 'GET' && requestUrl.pathname === '/stt') {
+    const check = await whisperAvailable()
+    res.writeHead(check.ok ? 200 : 503, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ ok: check.ok, error: check.why ?? undefined, model: check.model ? check.model.split(/[\\/]/).pop() : undefined, engine: check.engine ?? undefined }))
+  }
+  if (req.method === 'POST' && requestUrl.pathname === '/stt') {
+    const MAX_AUDIO_BYTES = 20 * 1024 * 1024
+    const announced = Number(req.headers['content-length'] ?? 0)
+    if (announced > MAX_AUDIO_BYTES) {
+      res.writeHead(413, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: 'Audio segment exceeds the 20 MB local limit.' }))
+    }
+    const chunks = []
+    let bytes = 0
+    for await (const chunk of req) {
+      bytes += chunk.length
+      if (bytes > MAX_AUDIO_BYTES) {
+        res.writeHead(413, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ ok: false, error: 'Audio segment exceeds the 20 MB local limit.' }))
+      }
+      chunks.push(chunk)
+    }
     const check = await whisperAvailable()
     if (!check.ok) {
       res.writeHead(503, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: false, error: check.why }))
     }
-    const chunks = []
-    for await (const c of req) chunks.push(c)
     try {
-      const out = await transcribe(Buffer.concat(chunks), {
-        language: new URL(req.url, 'http://x').searchParams.get('lang') ?? 'auto',
-      })
+      const requested = requestUrl.searchParams.get('lang') ?? 'auto'
+      const language = /^(auto|[a-z]{2,3})$/i.test(requested) ? requested : 'auto'
+      const out = await transcribe(Buffer.concat(chunks), { language })
       res.writeHead(200, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: true, ...out }))
-    } catch (e) {
+    } catch (error) {
       res.writeHead(500, { ...cors, 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }))
+      return res.end(JSON.stringify({ ok: false, error: String(error.message ?? error) }))
     }
   }
 
-  // Autopilot: what this machine can afford, and install it.
-  //
-  // GET reports the plan without downloading. POST downloads. They are separate
-  // on purpose — a 7 GB pull must never happen because something polled an
-  // endpoint.
-  if (req.method === 'GET' && req.url === '/autopilot') {
-    const p = autopilotPlan()
+  // RAM-aware Model Stack. GET is always read-only; POST is the explicit
+  // user-triggered download action and runs as a tracked background job.
+  if (req.method === 'GET' && requestUrl.pathname === '/autopilot') {
+    const p = AUTOPILOT_PLAN
+    const runtime = await modelSlotStatus()
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(
-      JSON.stringify({
-        summary: planSummary(),
-        ram: {
-          totalGb: +(p.budget.total / 1073741824).toFixed(2),
-          osGb: +(p.budget.os / 1073741824).toFixed(2),
-          appsGb: +(p.budget.apps / 1073741824).toFixed(2),
-          modelsGb: +(p.budget.models / 1073741824).toFixed(2),
-        },
-        fits: Object.entries(p.choices).map(([id, rung]) => ({
-          id,
-          kind: rung.kind ?? 'model',
-          model: rung.model ?? rung.file,
-          quant: rung.quant ?? null,
-          gb: +(rung.bytes / 1073741824).toFixed(2),
-          floor: Boolean(rung.floor),
-        })),
-        skipped: (p.dropped ?? []).map((x) => ({
-          id: x.cap,
-          needsGb: x.needsGb,
-          why: `${x.cap} was dropped to keep the remaining selected capabilities within the RAM budget.`,
-        })),
-        notes: p.notes,
-        salvaged: Boolean(p.salvaged),
-        usedGb: +(p.usedBytes / 1073741824).toFixed(2),
-      }),
-    )
+    return res.end(JSON.stringify({
+      summary: planSummary(p),
+      ram: {
+        totalGb: +(p.budget.total / 1073741824).toFixed(2),
+        osGb: +(p.budget.os / 1073741824).toFixed(2),
+        appsGb: +(p.budget.apps / 1073741824).toFixed(2),
+        modelsGb: +(p.budget.models / 1073741824).toFixed(2),
+        effectiveModelGb: +(p.effectiveModelBytes / 1073741824).toFixed(2),
+        currentFreeGb: +(p.budget.free / 1073741824).toFixed(2),
+      },
+      fits: Object.entries(p.choices).map(([id, rung]) => ({
+        id,
+        kind: rung.kind ?? 'ollama',
+        model: rung.model ?? rung.file,
+        quant: rung.quant ?? null,
+        downloadGb: +(rung.bytes / 1073741824).toFixed(2),
+        residentGb: +(rung.residentBytes / 1073741824).toFixed(2),
+        fits: Boolean(rung.fits),
+        mode: rung.mode,
+        engine: rung.engine ?? undefined,
+        dtype: rung.dtype ?? undefined,
+        quality: rung.quality,
+        note: rung.note ?? undefined,
+        multilingual: rung.multilingual ?? undefined,
+        englishOnly: rung.englishOnly ?? undefined,
+      })),
+      skipped: p.skipped.map((item) => ({
+        id: item.cap,
+        model: item.model,
+        needsGb: item.needsGb,
+        why: item.why,
+      })),
+      totalDownloadGb: +(p.totalDownloadBytes / 1073741824).toFixed(2),
+      maxResidentGb: +(p.maxResidentBytes / 1073741824).toFixed(2),
+      notes: p.notes,
+      catalog: autopilotLadder(),
+      tiers: tierProfiles(),
+      ollama: Boolean(runtime.ollama),
+      modelSlots: runtime.slots,
+    }))
   }
 
-  if (req.method === 'POST' && req.url === '/autopilot/install') {
-    // Long by design: this can be a 7 GB download. The client should not time
-    // out on it, and the response is the full log either way.
-    const result = await autopilotInstall({ dir: 'models' })
+  if (req.method === 'POST' && requestUrl.pathname === '/autopilot/install') {
+    const active = [...AUTOPILOT_JOBS.values()].find((job) => job.state === 'running')
+    if (active) {
+      res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ jobId: active.id, state: active.state }))
+    }
+    const job = {
+      id: randomUUID(),
+      state: 'running',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      progress: { phase: 'starting' },
+      steps: [],
+      result: null,
+      error: null,
+    }
+    AUTOPILOT_JOBS.set(job.id, job)
+    for (const [id, old] of AUTOPILOT_JOBS) {
+      if (old.state !== 'running' && Date.now() - old.updatedAt > 30 * 60 * 1000) AUTOPILOT_JOBS.delete(id)
+    }
+    void autopilotInstall({
+      dir: 'models',
+      planned: AUTOPILOT_PLAN,
+      onStep: (step) => {
+        job.progress = step
+        job.updatedAt = Date.now()
+        job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
+      },
+    }).then((result) => {
+      job.result = result.log
+      const failed = result.log.filter((item) => !item.ok && !item.skipped).length
+      job.state = failed ? (result.log.some((item) => item.ok && !item.skipped) ? 'partial' : 'failed') : 'completed'
+      job.updatedAt = Date.now()
+    }).catch((error) => {
+      job.error = String(error?.message ?? error)
+      job.state = 'failed'
+      job.updatedAt = Date.now()
+    })
+    res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ jobId: job.id, state: job.state }))
+  }
+
+  if (req.method === 'GET' && requestUrl.pathname === '/autopilot/install/status') {
+    const id = requestUrl.searchParams.get('id') ?? ''
+    const job = AUTOPILOT_JOBS.get(id)
+    if (!job) {
+      res.writeHead(404, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'installer job not found' }))
+    }
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(
-      JSON.stringify({
-        installed: result.installed.length,
-        failed: result.log.filter((l) => !l.ok),
-        skipped: (result.plan.dropped ?? []).map((x) => x.cap),
-        log: result.log,
-      }),
-    )
+    return res.end(JSON.stringify(job))
   }
 
   if (req.method === 'GET' && req.url === '/health') {
@@ -1047,7 +1124,7 @@ const handleConnection = async (socket) => {
   /**
    * Every tool this bridge can reach, as connected MCP clients.
    *
-   * Two kinds, and the split matters. The four JARVIS servers are built inside
+   * Two kinds, and the split matters. The five JARVIS servers are built inside
    * this process and reach the browser through callbacks that close over this
    * socket, so they are per-connection — an in-memory transport joins each to a
    * client with no port and no subprocess. Everything else the user has
@@ -1073,6 +1150,8 @@ const handleConnection = async (socket) => {
     jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }),
     // The camera, which unlike everything else here has to ask and wait.
     jarvis_eyes: visionServer(ask),
+    // Read-only window inventory by default; acting tools exist only behind the write gate.
+    jarvis_windows: windowsServer({ allowWrites: ALLOW_WRITES }),
   }
 
   for (const [name, server] of Object.entries(own)) {

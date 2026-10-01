@@ -56,8 +56,23 @@ export const BACKEND = 'bridge' as const
  * `wss://` maps to `https://` on its own, which is why this is a prefix swap
  * rather than a hardcoded scheme.
  */
-export const BRIDGE_WS_URL = str(import.meta.env.VITE_BRIDGE_URL) ?? 'ws://localhost:8787'
-export const BRIDGE_HTTP_URL = BRIDGE_WS_URL.replace(/^ws/, 'http')
+const arenaPreview = typeof window !== 'undefined' && window.location.hostname.endsWith('.e2b.app')
+
+// Arena's browser cannot reach the sandbox through localhost. In its live
+// preview, send both HTTP and WebSocket traffic back through Vite's same-origin
+// proxy; ordinary local installs continue using the local bridge port.
+export const BRIDGE_WS_URL = arenaPreview
+  ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/bridge/ws`
+  : str(import.meta.env.VITE_BRIDGE_URL) ?? 'ws://localhost:8787'
+export const BRIDGE_HTTP_URL = arenaPreview ? '/bridge' : BRIDGE_WS_URL.replace(/^ws/, 'http')
+
+/** Local Whisper is opt-in so the default browser path stays keyless and requires no model download. */
+export const STT_ENGINE: 'auto' | 'browser' | 'whisper' = choice(
+  'VITE_STT_ENGINE',
+  import.meta.env.VITE_STT_ENGINE,
+  ['auto', 'browser', 'whisper'] as const,
+  'auto',
+)
 
 /**
  * Speech engine.
@@ -75,11 +90,19 @@ export const BRIDGE_HTTP_URL = BRIDGE_WS_URL.replace(/^ws/, 'http')
  *     quantisation often silently falls back to CPU on WebGPU, which is the
  *     likely cause.
  */
-export const TTS_ENGINE: 'kokoro' | 'system' = choice(
+export const TTS_ENGINE: 'auto' | 'kokoro' | 'system' = choice(
   'VITE_TTS_ENGINE',
   import.meta.env.VITE_TTS_ENGINE,
-  ['kokoro', 'system'] as const,
-  'system',
+  ['auto', 'kokoro', 'system'] as const,
+  'auto',
+)
+
+/** Kokoro precision can be pinned; auto follows the local RAM planner. */
+export const KOKORO_DTYPE: 'auto' | 'q8' | 'fp32' = choice(
+  'VITE_KOKORO_DTYPE',
+  import.meta.env.VITE_KOKORO_DTYPE,
+  ['auto', 'q8', 'fp32'] as const,
+  'auto',
 )
 
 /**

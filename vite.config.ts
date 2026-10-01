@@ -21,6 +21,17 @@ export default defineConfig({
     host: '0.0.0.0',
     allowedHosts: ['.e2b.app'],
     port: Number(process.env.PORT) || 5173,
+    proxy: {
+      // Hosted preview browsers cannot address sandbox services via localhost.
+      // Keep client requests same-origin and proxy them from Vite to the local
+      // bridge, including WebSocket upgrades on /bridge/ws.
+      '/bridge': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/bridge/, '') || '/',
+      },
+    },
   },
   optimizeDeps: {
     // kokoro-js pulls in `phonemizer`, which carries espeak-ng as inline WASM.

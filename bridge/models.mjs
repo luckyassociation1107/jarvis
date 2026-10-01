@@ -1,7 +1,7 @@
 /**
  * The model manager.
  *
- * Three model slots and none of them work until the models are on disk. Ollama
+ * RAM-planned model slots only work once their selected weights are on disk. Ollama
  * will happily report "model not found" on the first request, which surfaces to
  * the user as JARVIS silently failing to think — the worst possible failure mode,
  * because it looks like a bug in the assistant rather than a missing download.
@@ -19,20 +19,15 @@ import { PIPELINE } from './local-llm.mjs'
 
 const OLLAMA_HOST = process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434'
 
-/** Rough download sizes, for the "this will take a while" warning. */
-const APPROX_BYTES = {
-  '0.5b': 398 * 1024 * 1024,
-  '3b': 1.9 * 1024 * 1024 * 1024,
-  '7b': 4.7 * 1024 * 1024 * 1024,
-}
-
 /**
  * What one slot looks like right now.
  * @typedef {Object} SlotStatus
  * @property {string} slot
  * @property {string} model        the configured model name
- * @property {'ready'|'missing'|'unknown'} state
+ * @property {'ready'|'missing'|'unknown'|'unsupported'} state
  * @property {number|null} size    bytes on disk, if Ollama reported it
+ * @property {boolean|null} fits   RAM planner fit flag, null when manually overridden
+ * @property {number|null} residentBytes estimated resident memory
  * @property {string|null} note    human-readable detail
  */
 
@@ -68,9 +63,9 @@ export async function installed() {
 /**
  * Compare the configured slots against what is installed.
  *
- * Matching is on the model *name* before the tag, because `qwen2.5:7b` and
- * `qwen2.5:latest` are the same weights and a user who pulled `:latest` should
- * not be told they are missing a model.
+ * Matching is exact for explicit tags and quantizations. A tagless model name
+ * may match Ollama's implicit `:latest`, but a different quantization is never
+ * treated as equivalent because its RAM fit can be different.
  */
 export async function status() {
   const up = await ollamaUp()
@@ -80,26 +75,41 @@ export async function status() {
       slots: Object.keys(PIPELINE).map((slot) => ({
         slot,
         model: PIPELINE[slot].model,
-        state: 'unknown',
+        state: PIPELINE[slot].model ? 'unknown' : 'unsupported',
         size: null,
-        note: 'Ollama is not running',
+        fits: PIPELINE[slot].fits,
+        residentBytes: PIPELINE[slot].residentBytes,
+        note: PIPELINE[slot].model ? 'Ollama is not running' : 'not selected within the current RAM plan',
       })),
       ready: 0,
-      total: Object.keys(PIPELINE).length,
+      total: Object.values(PIPELINE).filter((entry) => entry.model).length,
     }
   }
 
   const have = await installed()
   const slots = Object.entries(PIPELINE).map(([slot, cfg]) => {
     const wanted = cfg.model
-    const base = wanted.split(':')[0]
-    const match = have.find((m) => m.name === wanted || m.name.split(':')[0] === base)
+    if (!wanted) {
+      return {
+        slot,
+        model: null,
+        state: 'unsupported',
+        size: null,
+        fits: false,
+        residentBytes: null,
+        note: 'not selected within the current RAM plan',
+      }
+    }
+    const tagless = !wanted.includes(':')
+    const match = have.find((m) => m.name === wanted || (tagless && m.name === `${wanted}:latest`))
     if (match) {
       return {
         slot,
         model: wanted,
         state: 'ready',
         size: match.size,
+        fits: cfg.fits,
+        residentBytes: cfg.residentBytes,
         note: match.name === wanted ? null : `matched as ${match.name}`,
       }
     }
@@ -108,6 +118,8 @@ export async function status() {
       model: wanted,
       state: 'missing',
       size: null,
+      fits: cfg.fits,
+      residentBytes: cfg.residentBytes,
       note: `not pulled — roughly ${approxSize(wanted)}`,
     }
   })
@@ -116,7 +128,7 @@ export async function status() {
     ollama: true,
     slots,
     ready: slots.filter((s) => s.state === 'ready').length,
-    total: slots.length,
+    total: slots.filter((s) => s.state !== 'unsupported').length,
   }
 }
 
@@ -173,6 +185,7 @@ export async function pull(model, onProgress = () => {}) {
 export async function ensure(slot, { auto = false, onProgress } = {}) {
   const cfg = PIPELINE[slot]
   if (!cfg) return { slot, ok: false, note: `no such slot: ${slot}` }
+  if (!cfg.model) return { slot, ok: false, note: `${slot} is unavailable within the current RAM plan` }
 
   const current = await status()
   const entry = current.slots.find((s) => s.slot === slot)
@@ -200,20 +213,26 @@ export async function ensure(slot, { auto = false, onProgress } = {}) {
 export async function summary() {
   const s = await status()
   if (!s.ollama) return 'models: Ollama is not running'
-  const missing = s.slots.filter((x) => x.state !== 'ready')
-  if (missing.length === 0) return `models: ${s.ready}/${s.total} ready`
-  return `models: ${s.ready}/${s.total} ready — missing ${missing.map((m) => m.slot).join(', ')}`
+  const missing = s.slots.filter((x) => x.state !== 'ready' && x.state !== 'unsupported')
+  const unavailable = s.slots.filter((x) => x.state === 'unsupported')
+  const ready = `models: ${s.ready}/${s.total} selected ready`
+  if (missing.length === 0) {
+    return unavailable.length ? `${ready} — unavailable by RAM plan: ${unavailable.map((slot) => slot.slot).join(', ')}` : ready
+  }
+  return `${ready} — missing ${missing.map((m) => m.slot).join(', ')}${unavailable.length ? `; unavailable by RAM plan: ${unavailable.map((slot) => slot.slot).join(', ')}` : ''}`
 }
 
 function approxSize(model) {
-  const lower = model.toLowerCase()
-  for (const [key, bytes] of Object.entries(APPROX_BYTES)) {
-    if (lower.includes(key)) return formatBytes(bytes)
-  }
-  return 'a few GB'
-}
-
-function formatBytes(b) {
-  const gb = b / (1024 * 1024 * 1024)
-  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`
+  const lower = String(model ?? '').toLowerCase()
+  if (lower.includes('qwen2.5-vl-abliterated:7b')) return 'about 6.0 GB'
+  if (lower.includes('qwen2.5-vl-abliterated:3b')) return 'about 3.2 GB'
+  if (lower.includes('q2_k')) return 'about 3.0 GB'
+  if (lower.includes('q3_k_m')) return 'about 3.8 GB'
+  if (lower.includes('qwen2.5-coder') && lower.includes(':1.5b')) return 'about 1.1 GB'
+  if (lower.includes(':0.5b')) return 'about 398 MB'
+  if (lower.includes(':1.5b')) return 'about 986 MB'
+  if (lower.includes(':3b')) return 'about 1.9 GB'
+  if (lower.includes(':7b')) return 'about 4.7 GB'
+  if (lower.includes(':14b')) return 'about 9.0 GB'
+  return 'check model catalogue'
 }

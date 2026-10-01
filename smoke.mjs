@@ -22,7 +22,16 @@ const MODEL = 'stub-model'
 // behaviour and also why the turn still runs: the model name is passed through
 // regardless of what is loaded.
 const CHAT = 'huihui_ai/qwen2.5-abliterate:0.5b'
-const REASON = 'dagbs/qwen2.5-coder-7b-instruct-abliterated'
+const REASON = 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q4_k_m'
+const VISION = 'huihui_ai/qwen2.5-vl-abliterated:3b'
+
+// Keep this test deterministic regardless of the runner's real RAM or Ollama.
+process.env.JARVIS_BRIDGE_PORT = String(PORT)
+process.env.JARVIS_MODEL_BASE_URL = `http://localhost:${MODEL_PORT}/v1`
+process.env.JARVIS_MODEL_CHAT = CHAT
+process.env.JARVIS_MODEL_REASON = REASON
+process.env.JARVIS_MODEL_VISION = VISION
+process.env.JARVIS_ALLOW_NO_ORIGIN = '1'
 
 // --- the stub model server -------------------------------------------------
 let calls = 0
@@ -34,6 +43,10 @@ const asked = []
 let chatHits = 0
 /** Set when the chat slot narrates instead of acting. */
 let sawChatNarrate = false
+let visionSawImage = false
+let visionSawIntent = false
+let coderSawCombinedVisionPrompt = false
+let coderSawEnglishTranslation = false
 const http = createServer((req, res) => {
   if (req.url === '/v1/models') {
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -43,17 +56,47 @@ const http = createServer((req, res) => {
     res.writeHead(404)
     return res.end()
   }
-  calls++
   const body = []
   req.on('data', (c) => body.push(c))
   req.on('end', () => {
     const payload = JSON.parse(Buffer.concat(body).toString())
+    if (payload.stream === false) {
+      const userText = lastText(payload.messages)
+      let result
+      if (payload.model === VISION) {
+        visionSawImage = (payload.messages ?? []).some((message) => Array.isArray(message.content) && message.content.some((part) => part?.type === 'image_url'))
+        visionSawIntent = /blueprint|code|screenshot/i.test(userText)
+        result = 'A bright cyan circular status display sits centered between two compact navigation panels.'
+      } else {
+        const nonEnglish = [...userText].some((character) => character.codePointAt(0) > 127)
+        const english = nonEnglish ? 'Debug this Python function and explain the fix.' : userText
+        const isCode = /\b(code|program|function|script|debug)\b/i.test(english)
+        result = {
+          language: nonEnglish ? 'te' : 'en',
+          english,
+          intent: isCode ? 'code' : 'chat',
+          target: isCode ? 'Python function' : '',
+          prompt: isCode ? 'Debug the Python function, propose a corrected implementation, and explain the fix in English.' : english,
+          confidence: 0.95,
+        }
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      const content = typeof result === 'string' ? result : JSON.stringify(result)
+      return res.end(JSON.stringify({ choices: [{ message: { content } }] }))
+    }
+    calls++
     asked.push(payload.model)
+    const userText = lastText(payload.messages)
+    if (payload.model === REASON && /bright cyan circular status display/i.test(userText) && /blueprint|code/i.test(userText)) {
+      coderSawCombinedVisionPrompt = true
+    }
+    if (payload.model === REASON && /High-level English coding prompt: Debug the Python function/i.test(userText)) {
+      coderSawEnglishTranslation = true
+    }
     const askedForTool = (payload.tools ?? []).length > 0
     const hasToolResult = (payload.messages ?? []).some((m) => m.role === 'tool')
     const isChat = payload.model === CHAT
     const wantsTool = /screenshot/i.test(lastText(payload.messages))
-
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -116,22 +159,47 @@ const _bridge = await import('./bridge/server.mjs').catch((err) => {
   process.exit(1)
 })
 
+const autopilotResponse = await fetch(`http://localhost:${PORT}/autopilot`)
+const autopilotData = await autopilotResponse.json()
+const speechPlan = autopilotData.fits?.find((slot) => slot.id === 'speech')
+const validTierStates = new Set(['fits', 'best-effort', 'unavailable'])
+const tierCatalogOkay = Array.isArray(autopilotData.tiers)
+  && autopilotData.tiers.length === 33
+  && autopilotData.tiers[0]?.ramGb === 0.5
+  && autopilotData.tiers.at(-1)?.ramGb === 32
+  && autopilotData.tiers.every((tier) => {
+    const slots = tier.slots
+    if (!slots?.chat?.model || !slots?.reason?.model) return false
+    return Object.values(slots).every((slot) => validTierStates.has(slot.state) && slot.fits === (slot.state === 'fits'))
+      && (!slots.vision?.fits || /abliterat/i.test(slots.vision.model ?? ''))
+  })
+const autopilotChecks = [
+  ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
+  ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
+  ['/autopilot returns model-status slots and notes', Array.isArray(autopilotData.modelSlots) && Array.isArray(autopilotData.notes)],
+  ['/autopilot includes all 33 reference RAM profiles with valid slot statuses and abliterated vision', tierCatalogOkay],
+  ['auto STT can identify only an explicitly selected Whisper slot', !speechPlan || (speechPlan.kind === 'whisper' && typeof speechPlan.fits === 'boolean')],
+]
+
 const ws = new WebSocket(`ws://localhost:${PORT}`)
 const frames = []
 const tools = []
 let sawReady = false
+let sentAsk = false
 
 await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('timed out waiting for frames')), 20000)
-  ws.on('open', () => {
-    ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Take a screenshot of my phone.' }))
-  })
+  ws.on('open', () => {})
   ws.on('message', (raw) => {
     const f = JSON.parse(raw.toString())
     frames.push(f)
     if (f.type === 'ready') {
       sawReady = true
       console.log(`  ready  servers: ${JSON.stringify(f.servers)}`)
+      if (!sentAsk && Array.isArray(f.servers) && f.servers.length >= 5) {
+        sentAsk = true
+        ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Take a screenshot of my phone.' }))
+      }
     }
     if (f.type === 'tool') tools.push(f.name)
     if (f.type === 'text') process.stdout.write(`  text   ${JSON.stringify(f.delta)}\n`)
@@ -157,7 +225,7 @@ const done = frames.find((f) => f.type === 'done')
 const readyServers = frames.filter((f) => f.type === 'ready').pop()?.servers ?? []
 const checks = [
   ['the bridge started and served a socket', sawReady],
-  ['all four built-in MCP servers connected', readyServers.length >= 4],
+  ['all five built-in MCP servers connected', readyServers.length >= 5],
   ['the model was asked twice (answer -> tool -> answer)', calls === 2],
   ['the model was offered the tools', sawToolAsk],
   ['the tool it asked for was announced on the HUD', tools.includes('mcp__jarvis__blade')],
@@ -165,7 +233,7 @@ const checks = [
   ['the tool result was fed back to the model', sawToolResult],
   ['the final answer streamed in pieces', text.length > 0],
   ['the answer is the model\'s second turn', Boolean(done?.text.includes('sir'))],
-  ['a tool-shaped question was sent to the reason slot', asked[0] === 'dagbs/qwen2.5-coder-7b-instruct-abliterated'],
+  ['a tool-shaped question was sent to the reason slot', asked[0] === REASON],
 ]
 
 // --- phase two: the chat slot narrating instead of acting -------------------
@@ -174,12 +242,17 @@ const checks = [
 // net has to catch it before the browser hears a word of it.
 const ws2 = new WebSocket(`ws://localhost:${PORT}`)
 const frames2 = []
+let sentAsk2 = false
 await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('timed out waiting for frames (phase 2)')), 20000)
-  ws2.on('open', () => ws2.send(JSON.stringify({ type: 'ask', id: 'q2', text: 'good evening' })))
+  ws2.on('open', () => {})
   ws2.on('message', (raw) => {
     const f = JSON.parse(raw.toString())
     frames2.push(f)
+    if (f.type === 'ready' && !sentAsk2 && Array.isArray(f.servers) && f.servers.length >= 5) {
+      sentAsk2 = true
+      ws2.send(JSON.stringify({ type: 'ask', id: 'q2', text: 'good evening' }))
+    }
     if (f.type === 'done') { clearTimeout(timer); resolve() }
     if (f.type === 'error') { clearTimeout(timer); reject(new Error(f.message)) }
   })
@@ -195,6 +268,43 @@ const netChecks = [
   ['the turn was retried on the reason slot', asked2[1] === REASON],
   ['the inert answer never reached the browser', !spoken2.includes('I will now open the browser')],
   ['a real answer was spoken in its place', done2?.text?.includes('sir') ?? false],
+]
+
+// Exercise the real multilingual and vision preparation path against the stub.
+// This verifies that intent extraction, image analysis, prompt fusion, and
+// downstream code routing happen in the intended order without claiming a live
+// Ollama conversation.
+const { runTurn } = await import('./bridge/local-llm.mjs')
+const teluguMessage = { role: 'user', content: 'ఈ Python ఫంక్షన్‌ని డీబగ్ చేయి' }
+const translatedConversation = [teluguMessage]
+const translatedReply = await runTurn({
+  messages: translatedConversation,
+  clients: new Map(),
+  gate: () => true,
+})
+const multilingualChecks = [
+  ['a Telugu coding request is translated into an English coding brief', coderSawEnglishTranslation],
+  ['translated multilingual code intent is routed to the coding model', asked.at(-1) === REASON],
+  ['the routed code request reaches an answer', translatedReply.includes('sir')],
+]
+
+const visionConversation = [{
+  role: 'user',
+  content: [
+    { type: 'text', text: 'Code an English implementation of the visual layout shown.' },
+    { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AA' } },
+  ],
+}]
+const visionReply = await runTurn({
+  messages: visionConversation,
+  clients: new Map(),
+  gate: () => true,
+  translate: false,
+})
+const visionChecks = [
+  ['the vision model receives both pixels and the original user intent', visionSawImage && visionSawIntent],
+  ['vision observations and coding intent are fused for the coding model', coderSawCombinedVisionPrompt],
+  ['the fused vision/code request reaches an answer', visionReply.includes('sir')],
 ]
 
 // Routing is a pure function of the conversation, so it is checked directly
@@ -223,8 +333,14 @@ for (const [name, ok] of checks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
   if (!ok) failed++
 }
+const loopPassed = checks.length - failed
 
 console.log(`\n  models asked, in order: ${asked.join(' -> ')}`)
+let autopilotFailed = 0
+for (const [name, ok] of autopilotChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) autopilotFailed++
+}
 let routeFailed = 0
 for (const [name, ok] of routingChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
@@ -235,11 +351,23 @@ for (const [name, ok] of netChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
   if (!ok) netFailed++
 }
+let multilingualFailed = 0
+for (const [name, ok] of multilingualChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) multilingualFailed++
+}
+let visionFailed = 0
+for (const [name, ok] of visionChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) visionFailed++
+}
 if (netFailed) failed += netFailed
+if (autopilotFailed) failed += autopilotFailed
 if (routeFailed) failed += routeFailed
+if (multilingualFailed) failed += multilingualFailed
+if (visionFailed) failed += visionFailed
 
-const loopPassed = checks.length - (failed - netFailed - routeFailed)
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net`)
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision`)
 
 ws.close()
 ws2.close()

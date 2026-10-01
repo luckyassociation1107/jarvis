@@ -1,163 +1,119 @@
 #!/usr/bin/env node
-// JARVIS preflight — a friendly, advisory check you run with `npm run setup`.
-//
-// It changes nothing and installs nothing. It looks at your machine, tells you
-// what is ready and what is missing, and prints the two commands that start
-// JARVIS. Every check degrades to a single friendly line if something is not
-// there, and the script always exits 0 — it is advice, not a gate.
-//
-// The one check that matters is the model server, and it is the one thing here
-// that cannot be defaulted around: everything else in this project runs on the
-// user's machine for free, but a model still has to be running somewhere.
-
+// JARVIS preflight — advisory only. It changes nothing and installs nothing.
 import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { createRequire } from 'node:module'
+import { homedir, totalmem } from 'node:os'
 import { join } from 'node:path'
+import { AUTOPILOT_PLAN, MODEL_URL, PIPELINE } from '../bridge/local-llm.mjs'
+import { planSummary, whisperFileReady } from '../bridge/autopilot.mjs'
 
+const require = createRequire(import.meta.url)
+const GB = 1024 ** 3
 const tick = '  ok  '
 const warn = ' note '
 const info = '  ·   '
 
-function line(tag, msg) {
-  console.log(`[${tag}] ${msg}`)
+function line(tag, message) {
+  console.log(`[${tag}] ${message}`)
 }
 
 console.log('')
-console.log('JARVIS preflight — checking your machine (nothing is changed)')
-console.log('------------------------------------------------------------')
+console.log('JARVIS preflight — checking prerequisites (nothing is changed)')
+console.log('-------------------------------------------------------------')
 
 // --- Node version --------------------------------------------------------
-try {
-  const major = Number(process.versions.node.split('.')[0])
-  if (Number.isFinite(major) && major >= 20) {
-    line(tick, `Node.js ${process.versions.node} (20+ required).`)
-  } else {
-    line(
-      warn,
-      `Node.js ${process.versions.node} is below 20. Please upgrade — the bridge needs Node 20 or newer.`,
-    )
-  }
-} catch {
-  line(warn, 'Could not read the Node.js version. JARVIS needs Node 20 or newer.')
+const major = Number(process.versions.node.split('.')[0])
+if (Number.isFinite(major) && major >= 20) {
+  line(tick, `Node.js ${process.versions.node} (20+ required).`)
+} else {
+  line(warn, `Node.js ${process.versions.node} is below 20. The bridge needs Node 20 or newer.`)
 }
 
-// --- The model pipeline ---------------------------------------------------
-/**
- * Three slots, and each is checked separately, because a missing one fails in a
- * way that is hard to read from the outside: JARVIS answers normally until you
- * ask him to look at something, and then he describes the prompt instead of the
- * picture. Naming the slot at boot is what makes that diagnosable.
- */
-const MODEL_URL = (
-  process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
-).replace(/\/+$/, '')
+// --- RAM plan ------------------------------------------------------------
+const plan = AUTOPILOT_PLAN
+line(tick, `RAM planner: ${planSummary(plan)}`)
+line(info, 'Estimates only. The fixed split is 35% OS, 25% other apps and at most 40% JARVIS.')
 
-const PIPELINE = [
-  ['chat', process.env.JARVIS_MODEL_CHAT ?? 'huihui_ai/qwen2.5-abliterate:0.5b', 'conversation'],
-  ['vision', process.env.JARVIS_MODEL_VISION ?? 'huihui_ai/qwen2.5-vl-abliterated:3b', 'images'],
-  ['reason', process.env.JARVIS_MODEL_REASON ?? 'dagbs/qwen2.5-coder-7b-instruct-abliterated', 'tools and technical questions'],
-]
-
+// --- OpenAI-compatible model server --------------------------------------
+const MODEL_ENDPOINT = MODEL_URL.replace(/\/+$/, '')
 let reachable = false
 let loaded = []
 try {
-  const res = await fetch(`${MODEL_URL}/models`, {
-    signal: AbortSignal.timeout(4000),
-  })
-  if (res.ok) {
+  const response = await fetch(`${MODEL_ENDPOINT}/models`, { signal: AbortSignal.timeout(4000) })
+  if (response.ok) {
     reachable = true
-    loaded = ((await res.json())?.data ?? []).map((m) => m?.id).filter(Boolean)
+    loaded = ((await response.json())?.data ?? []).map((model) => model?.id).filter(Boolean)
   }
-} catch {
-  // Nothing there — the install advice below covers it.
-}
+} catch { /* a server may not be running yet */ }
 
 if (!reachable) {
-  line(warn, `No model server reachable at ${MODEL_URL}.`)
-  line(info, 'This is the one thing JARVIS cannot do without — it is the brain.')
-  line(info, 'Easiest option: install Ollama from https://ollama.com, then:')
-  for (const [, model] of PIPELINE) line(info, `  ollama pull ${model}`)
-  line(
-    info,
-    'Already running a model elsewhere (llama.cpp, LM Studio, vLLM)? Point',
-  )
-  line(info, 'JARVIS_MODEL_BASE_URL at it and this check will find it.')
+  line(warn, `No OpenAI-compatible model server is reachable at ${MODEL_ENDPOINT}.`)
+  line(info, 'The browser HUD and local bridge can still start, but local model inference will not answer until a server is available.')
+  line(info, 'This standalone preflight never installs software or models. The root build.ps1/build.sh scripts can install Ollama when the detected fitting local plan needs it.')
+  line(info, 'The build scripts install only this machine’s selected, fitting model tier; use MODEL STACK for a manual review or retry.')
 } else {
-  line(tick, `Model server reachable at ${MODEL_URL}${loaded.length ? ` — ${loaded.length} model${loaded.length === 1 ? '' : 's'} loaded` : ''}.`)
-  for (const [slot, model, purpose] of PIPELINE) {
-    // Ollama answers with the bare name, others with `namespace/name`.
-    const have =
-      loaded.length === 0 ||
-      loaded.some((id) => id === model || id.endsWith(`/${model}`))
+  line(tick, `Model server reachable at ${MODEL_ENDPOINT}${loaded.length ? ` — ${loaded.length} model${loaded.length === 1 ? '' : 's'} listed` : ''}.`)
+  for (const [slot, config] of Object.entries(PIPELINE)) {
+    if (!config.model) {
+      line(warn, `${slot.padEnd(7)} unavailable within the current RAM plan; no local model is selected.`)
+      continue
+    }
+    const have = loaded.length === 0 || loaded.some((id) => id === config.model || id.endsWith(`/${config.model}`))
     if (have) {
-      line(tick, `${slot.padEnd(7)} ${model} — ${purpose}`)
+      line(tick, `${slot.padEnd(7)} ${config.model}${config.fits === false ? ' (best-effort RAM override)' : ''}`)
+    } else if (config.fits === false) {
+      line(warn, `${slot.padEnd(7)} ${config.model} is not loaded and is outside the reserved-memory fit; it is not auto-downloaded.`)
     } else {
-      line(warn, `${slot.padEnd(7)} ${model} is NOT loaded — ${purpose} will not work.`)
-      line(info, `Pull it with: ollama pull ${model}`)
+      line(warn, `${slot.padEnd(7)} ${config.model} is not loaded.`)
+      line(info, 'Review the current plan in MODEL STACK before explicitly installing selected models.')
     }
   }
-  line(
-    info,
-    'All three defaults are abliterated — uncensored, and still able to call',
-  )
-  line(info, 'tools. See the pipeline note in the README.')
 }
 
-// --- MCP servers ---------------------------------------------------------
-/**
- * Optional, and worth saying so.
- *
- * The bridge reads ~/.claude.json for MCP servers because that is where they
- * already live on a machine that has ever run Claude Code — not because this
- * project needs Claude Code. JARVIS is perfectly useful with none of them: its
- * own display, camera, browser and interface tools are built into the bridge.
- */
+// --- Speech planning -----------------------------------------------------
+const whisper = plan.choices.speech
+if (!whisper?.fits) {
+  line(warn, 'Local Whisper STT does not fit this RAM plan; browser speech recognition remains the fallback.')
+} else {
+  const modelPath = join(process.cwd(), 'models', whisper.file)
+  const modelReady = await whisperFileReady(modelPath)
+  let runtimeReady = false
+  try { require.resolve('@lumen-labs-dev/whisper-node'); runtimeReady = true } catch { /* installed by the explicit installer */ }
+  if (modelReady && runtimeReady) {
+    line(tick, `Whisper STT ready: ${whisper.file} (multilingual).`)
+  } else {
+    line(warn, `Whisper plan: ${whisper.file} (multilingual); ${modelReady ? 'runtime missing' : 'model file missing or incomplete'}.`)
+    line(info, 'Use MODEL STACK to install the selected local speech runtime/model explicitly.')
+  }
+}
+
+const tts = plan.choices.tts
+line(tick, tts.engine === 'system'
+  ? 'TTS uses browser/OS SpeechSynthesis; no neural voice download is needed.'
+  : `TTS selects browser-local Kokoro ${tts.dtype}; it is cached by the browser on first use, not installed here.`)
+
+// --- Optional MCP servers ------------------------------------------------
 const claudeJsonPath = join(homedir(), '.claude.json')
 let mcpCount = 0
 try {
   const parsed = JSON.parse(readFileSync(claudeJsonPath, 'utf8'))
-  const servers =
-    parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers
-      ? parsed.mcpServers
-      : {}
+  const servers = parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers
+    ? parsed.mcpServers
+    : {}
   mcpCount = Object.keys(servers).length
-  if (mcpCount > 0) {
-    line(
-      tick,
-      `~/.claude.json found with ${mcpCount} MCP server${mcpCount === 1 ? '' : 's'} configured.`,
-    )
-  } else {
-    line(
-      info,
-      '~/.claude.json found, but no MCP servers are configured. JARVIS still answers and drives its own interface.',
-    )
-  }
-} catch {
-  line(
-    info,
-    'No ~/.claude.json found. Optional — JARVIS works with no MCP servers at all.',
-  )
+} catch { /* optional */ }
+if (mcpCount) {
+  line(tick, `~/.claude.json has ${mcpCount} optional MCP server${mcpCount === 1 ? '' : 's'}.`)
+} else {
+  line(info, 'No optional MCP servers configured; JARVIS still has its built-in interface and device tools.')
 }
 
-// --- Speech --------------------------------------------------------------
-// Nothing to check. It runs in the browser, on the user's machine, with no key
-// and no account. The only thing worth saying is what it needs, because it is
-// the most common surprise: the page must be open in a real browser window.
-line(
-  tick,
-  'Speech needs no key — it runs in the browser. Open the app in a real Chrome or Edge window (an embedded preview blocks the microphone).',
-)
-
-// --- How to run ----------------------------------------------------------
+// --- Browser and launch ---------------------------------------------------
+line(tick, 'Speech runs in the browser. Use a real Chrome or Edge window for microphone access; embedded previews block it.')
+line(info, `Detected host memory: ${(totalmem() / GB).toFixed(1)} GB. Planner figures are estimates, not runtime guarantees.`)
 console.log('')
-console.log('To run JARVIS, open two terminals:')
-console.log('  1)  npm run bridge      # the brain (your local models, above)')
-console.log('  2)  npm run dev         # the face (open http://localhost:5173 in Chrome)')
+console.log('This preflight installs nothing and downloads no models.')
+console.log('To start both local processes:  npm start')
+console.log('Or run the root build.ps1 / build.sh to check dependencies, build, and launch JARVIS.')
 console.log('')
-console.log('Then click INITIALISE and say "Hey Jarvis".')
-console.log(
-  'To let JARVIS take real actions (phone, browser, sending), run `npm run bridge:writes` instead of `npm run bridge`.',
-)
-console.log('')
-
 process.exit(0)

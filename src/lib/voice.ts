@@ -1,25 +1,16 @@
 import { getMic } from './audio'
+import { STT_ENGINE } from '../config'
 import { speakingNow, speakingSince } from './tts'
+import { checkLocalWhisper, transcribeWithWhisper } from './local-stt'
 import { startVad, type Vad } from './vad'
 
 /**
- * The voice loop.
+ * Voice input for the HUD.
  *
- * One recogniser, running for the life of the page. It is never torn down for
- * a turn, and that single fact is most of what separates this from a kiosk:
- * the microphone is still open while JARVIS is talking, so you can cut him off
- * the way you would cut off a person.
- *
- * The obvious design — one recogniser hunting for the wake word, a second one
- * capturing the command, stopping the first to start the second because the
- * browser only hands out one at a time — is what this replaces. It works, but
- * nothing is listening during an answer, so barge-in is impossible, and every
- * restart leaves a quarter-second of deafness that eats whole wake words.
- *
- * Keeping the mic open costs one thing: JARVIS hears himself through the
- * speakers. That is handled here in text rather than in acoustics — see
- * `isEcho` — because the browser gives SpeechRecognition its own capture and
- * won't let us put a canceller in front of it.
+ * `browser` mode keeps one SpeechRecognition session alive and uses the local
+ * VAD for barge-in. Optional `whisper` mode records short VAD segments, converts
+ * them to local WAV and sends them only to the local bridge. Both modes share
+ * endpointing, wake-word handling, echo rejection and the same VoiceHandlers.
  */
 
 export type VoiceMode =
@@ -53,6 +44,13 @@ export type Voice = {
   stop: () => void
   /** True while a recogniser is actually running. */
   live: () => boolean
+}
+
+let activeSttEngine: 'browser' | 'whisper' = STT_ENGINE === 'whisper' ? 'whisper' : 'browser'
+
+/** Set once from the local RAM plan before the continuous voice loop starts. */
+export function configureSttEngine(engine: 'browser' | 'whisper') {
+  activeSttEngine = engine
 }
 
 // ---------------------------------------------------------------------------
@@ -322,15 +320,12 @@ function isEcho(heard: string, spoken: string): boolean {
 /**
  * Live state of the voice loop, published on `window.__voice`.
  *
- * When someone says the wake word and nothing happens there are only a handful
- * of possible causes — the recogniser never started, it started and died, it is
- * running but hearing silence, or it is hearing you and transcribing the name
- * as something else. From outside the page those are indistinguishable, which
- * makes the failure impossible to report and impossible to fix. This tells them
- * apart in one glance.
+ * The selected input engine, local VAD and transcription errors are reported
+ * separately so a denied mic, unavailable bridge and missing Whisper model do
+ * not collapse into the same silent failure.
  */
 export const diag = {
-  /** Which input engine is running. There is one: 'browser'. */
+  /** Input path: browser SpeechRecognition or local Whisper. */
   engine: 'browser',
   /** Whether the microphone pipeline is live. */
   running: false,
@@ -372,21 +367,9 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * Pick the voice engine and start it.
- *
- * One engine: the browser's own SpeechRecognition, which detects and transcribes
- * in one step. It is the flakier of the two this file used to hold — Chrome
- * throttles it and it can go silent with no event to catch — so a heartbeat
- * watches it and forces a fresh session whenever it stops showing signs of
- * life. That guard is the difference between "the wake word stopped working
- * halfway through" and an assistant that keeps listening.
- *
- * The other engine was ElevenLabs Scribe behind a local voice-activity
- * detector: more reliable, and paid. It went when the rest of the paid
- * integrations did.
- *
- * The microphone is opened once here so a denied permission is reported loudly
- * rather than surfacing later as an unexplained deafness.
+ * Pick the configured speech input and start it. Browser recognition and local
+ * Whisper share the same microphone/VAD/handler contract; Whisper is never used
+ * as a silent fallback because the selected STT privacy mode should be explicit.
  */
 export async function startVoice(h: VoiceHandlers): Promise<Voice> {
   try {
@@ -400,8 +383,133 @@ export async function startVoice(h: VoiceHandlers): Promise<Voice> {
     )
     return { stop: () => {}, live: () => false }
   }
+  if (activeSttEngine === 'whisper') {
+    diag.engine = 'whisper'
+    const status = await checkLocalWhisper()
+    if (!status.ok) {
+      if (STT_ENGINE === 'auto') {
+        // RAM autopilot may have selected Whisper before its optional runtime or
+        // weights were installed. In auto mode, preserve voice input with the
+        // browser recognizer rather than stopping the whole assistant.
+        diag.engine = 'browser'
+        diag.lastError = 'whisper-fallback'
+        return await startBrowserVoice(h)
+      }
+      diag.lastError = 'whisper'
+      h.onError(`Local Whisper is unavailable — ${status.error ?? 'check the bridge and model installation.'}`)
+      return { stop: () => {}, live: () => false }
+    }
+    return await startWhisperVoice(h)
+  }
   diag.engine = 'browser'
   return await startBrowserVoice(h)
+}
+
+/** Always-local STT mode. Wake detection happens after each short audio segment. */
+async function startWhisperVoice(h: VoiceHandlers): Promise<Voice> {
+  let stopped = false
+  let lastWake = 0
+  let queue = Promise.resolve()
+  let vad: Vad | null = null
+  const assemble = makeAssembler({
+    emit: (text) => {
+      diag.dropped = ''
+      diag.accepted++
+      diag.holding = ''
+      h.onUtterance(text)
+    },
+    partial: (text) => h.onPartial(text),
+  })
+
+  try {
+    vad = await startVad({
+      onStart: () => {
+        const mode = h.mode()
+        diag.mode = mode
+        diag.sessions++
+        if (mode === 'wake') assemble.cancel()
+        if (mode === 'guard') {
+          const since = speakingSince()
+          if (since && Date.now() - since < SELF_GUARD_MS) {
+            diag.selfGuarded++
+            return
+          }
+          h.onSpeechStart()
+        }
+      },
+      onLevel: (level) => {
+        if (h.mode() !== 'command' || assemble.held()) return
+        h.onPartial(level > 0.04 ? '…' : '')
+      },
+      onEnd: (audio) => {
+        if (stopped || h.mode() === 'deaf') return
+        // Preserve speech order if a second segment ends while Whisper is still
+        // decoding the first. Each file is sent to the local bridge only.
+        queue = queue
+          .then(async () => {
+            if (stopped) return
+            const text = await transcribeWithWhisper(audio)
+            const mode = h.mode()
+            if (!text || mode === 'deaf') return
+            if (isEcho(text, speakingNow())) {
+              drop('echo of his own voice')
+              return
+            }
+            diag.heard = text
+            diag.heardAt = Date.now()
+            diag.lastError = ''
+            if (mode === 'wake') {
+              assemble.cancel()
+              if (WAKE.test(text) && Date.now() - lastWake > WAKE_DEBOUNCE) {
+                lastWake = Date.now()
+                diag.wakes++
+                diag.dropped = ''
+                diag.accepted++
+                h.onWake(afterWake(text))
+              } else {
+                drop(`heard "${text.slice(-40)}" — not his name`)
+              }
+              return
+            }
+            diag.dropped = ''
+            assemble.feed(text, false)
+          })
+          .catch((error) => {
+            if (stopped) return
+            diag.lastError = error instanceof Error ? error.message : String(error)
+            h.onError(`Local Whisper transcription failed — ${diag.lastError}`)
+          })
+      },
+      onError: (message) => {
+        diag.lastError = 'capture'
+        console.warn('[jarvis] local Whisper capture unavailable:', message)
+      },
+    })
+  } catch (error) {
+    diag.lastError = error instanceof Error ? error.message : String(error)
+    h.onError(`Local Whisper capture could not start — ${diag.lastError}`)
+    return { stop: () => {}, live: () => false }
+  }
+
+  if (!vad?.live()) {
+    diag.running = false
+    h.onError('Local Whisper could not open the microphone recorder in this browser.')
+    return { stop: () => {}, live: () => false }
+  }
+  diag.running = true
+  const guardPoll = setInterval(() => vad?.setGuard(h.mode() === 'guard'), 200)
+
+  return {
+    stop() {
+      if (stopped) return
+      stopped = true
+      clearInterval(guardPoll)
+      assemble.cancel()
+      vad?.stop()
+      diag.running = false
+    },
+    live: () => !stopped && (vad?.live() ?? false),
+  }
 }
 
 /* -------------------------------------------------------------------------- */

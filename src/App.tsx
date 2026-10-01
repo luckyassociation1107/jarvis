@@ -2,18 +2,17 @@ import { useEffect, useRef } from 'react'
 import { Scene } from './scene/Scene'
 import { Hud } from './ui/Hud'
 import { Boot } from './ui/Boot'
-import { Ignition } from './ui/Ignition'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
-import { startVoice, type Voice, type VoiceMode } from './lib/voice'
-import { createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
+import { configureSttEngine, startVoice, type Voice, type VoiceMode } from './lib/voice'
+import { configureTtsEngine, createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
 import { listenForClap } from './lib/clap'
 import * as camera from './lib/camera'
 import * as kokoro from './lib/kokoro'
-import { TTS_ENGINE } from './config'
+import { BRIDGE_HTTP_URL, KOKORO_DTYPE, STT_ENGINE, TTS_ENGINE } from './config'
 import { forTool, attention } from './lib/fillers'
 import {
   ask,
@@ -457,30 +456,53 @@ export default function App() {
     // backend to fall back to.
     const warming = warm().catch((err: Error) => s.setError(err.message))
 
-    // Pull the neural voice down during the boot sequence so the first
-    // "Hey Jarvis" isn't waiting on an 86MB download. Deliberately not awaited
-    // — if it's slow, JARVIS comes up on the system voice and swaps over the
-    // moment the model is ready.
-    if (TTS_ENGINE === 'kokoro') {
-      void kokoro.load()
-      voicePoll.current = setInterval(() => {
-        const p = kokoro.loadProgress()
-        if (kokoro.isReady() || kokoro.isUnavailable()) {
-          store.getState().setBootNote('')
-          if (voicePoll.current) clearInterval(voicePoll.current)
-          voicePoll.current = null
-        } else if (p > 0 && p < 1) {
-          store.getState().setBootNote(`voice ${Math.round(p * 100)}%`)
+    // Auto mode follows the bridge's RAM plan. A static GitHub Pages view cannot
+    // inspect localhost, so it remains on browser STT and system TTS instead of
+    // guessing host memory or claiming a local model is installed.
+    const speechSetup = (async () => {
+      let ttsEngine: 'system' | 'kokoro' = TTS_ENGINE === 'kokoro' ? 'kokoro' : 'system'
+      let ttsDtype: 'q8' | 'fp32' = KOKORO_DTYPE === 'fp32' ? 'fp32' : 'q8'
+      let sttEngine: 'browser' | 'whisper' = STT_ENGINE === 'whisper' ? 'whisper' : 'browser'
+
+      const needsPlan = TTS_ENGINE === 'auto' || STT_ENGINE === 'auto' || (TTS_ENGINE === 'kokoro' && KOKORO_DTYPE === 'auto')
+      if (needsPlan) {
+        try {
+          const response = await fetch(`${BRIDGE_HTTP_URL}/autopilot`, { cache: 'no-store', signal: AbortSignal.timeout(7500) })
+          if (!response.ok) throw new Error(`RAM planner returned HTTP ${response.status}`)
+          const data = await response.json() as { fits?: Array<{ id?: string; kind?: string; engine?: string; dtype?: string; fits?: boolean }> }
+          const ttsPlan = data.fits?.find((slot) => slot.id === 'tts')
+          const speechPlan = data.fits?.find((slot) => slot.id === 'speech')
+          if (TTS_ENGINE === 'auto') ttsEngine = ttsPlan?.engine === 'kokoro' ? 'kokoro' : 'system'
+          if (KOKORO_DTYPE === 'auto' && ttsPlan?.dtype === 'fp32') ttsDtype = 'fp32'
+          else if (KOKORO_DTYPE === 'auto' && ttsPlan?.dtype === 'q8') ttsDtype = 'q8'
+          if (STT_ENGINE === 'auto') sttEngine = speechPlan?.fits && speechPlan.kind === 'whisper' ? 'whisper' : 'browser'
+        } catch (error) {
+          console.info('[jarvis] local speech plan unavailable; using browser STT and system TTS.', error)
         }
-      }, 200)
-    }
+      }
+
+      configureTtsEngine(ttsEngine, ttsDtype)
+      configureSttEngine(sttEngine)
+      if (ttsEngine === 'kokoro') {
+        voicePoll.current = setInterval(() => {
+          const p = kokoro.loadProgress()
+          if (kokoro.isReady() || kokoro.isUnavailable()) {
+            store.getState().setBootNote('')
+            if (voicePoll.current) clearInterval(voicePoll.current)
+            voicePoll.current = null
+          } else if (p > 0 && p < 1) {
+            store.getState().setBootNote(`voice ${Math.round(p * 100)}%`)
+          }
+        }, 200)
+      }
+    })().catch((error) => console.warn('[jarvis] could not apply the speech plan:', error))
 
     // Long enough for the four-beat start-up sequence in Boot.tsx to play —
     // status bar, rings, suit schematic, reactor power-up — before the live
     // interface takes over. Kept a touch under the boot cue so the music is
     // still rising as the reactor lands.
     await new Promise((r) => setTimeout(r, 9200)) // boot sequence
-    await warming
+    await Promise.all([warming, speechSetup])
     store.getState().setConnected(connectedLabels())
     store.getState().setVoice(currentVoiceName())
 
@@ -681,10 +703,9 @@ export default function App() {
   return (
     <>
       <Scene />
-      <Hud />
+      <Hud onStart={() => void powerOn()} />
       <Boot />
       <Diagnostics />
-      <Ignition onStart={() => void powerOn()} />
     </>
   )
 }

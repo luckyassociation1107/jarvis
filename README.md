@@ -7,9 +7,9 @@ interface. The face is a web page (React + Vite + Three.js + custom GLSL). The
 brain is an open-weight model running on your own machine.
 
 **No hosted LLM account or API key is required.** Inference runs through a
-local Node bridge against your own model server. Initial model downloads come
+local Node bridge against your own model server. Model downloads come
 from their publishers, web tools fetch the pages you ask for, and browser
-speech-recognition behavior depends on Chrome or Edge. The one ongoing cost is
+speech-recognition behavior depends on the selected engine. The one ongoing cost is
 your own hardware and power.
 
 **How it all fits together:** [`WORKFLOW.md`](WORKFLOW.md) — the three layers,
@@ -27,189 +27,180 @@ effectful tools still have a separate default-deny permission gate.
 
 ---
 
-## Model slots and the multilingual workflow
+## Model slots and multilingual workflow
 
-The pipeline routes by capability, not by one big model doing everything:
+JARVIS routes each turn to a RAM-selected local model:
 
-| Slot | Model | Job |
+| Slot | Capability | RAM-selected model family |
 |---|---|---|
-| `chat` | `huihui_ai/qwen2.5-abliterate:0.5b` | conversation, and intent extraction |
-| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | optional image slot; not auto-downloaded |
-| `reason` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | writes and debugs code |
+| `chat` | multilingual conversation, intent extraction, English translation | abliterated Qwen2.5 instruct, 0.5B–14B |
+| `vision` | image understanding | supplied abliterated Qwen2.5-VL 3B/7B only; unavailable below its memory floor |
+| `reason` | English-only coding, tool use and technical reasoning | abliterated Qwen coder, including DAGBS 7B Q2/Q3/Q4 tags |
+| `speech` | local multilingual speech-to-text | quantized multilingual Whisper.cpp; never `.en`-only |
+| `tts` | spoken responses | system/browser voice at tight budgets; browser-cached Kokoro at tiers with headroom |
 
-`bridge/language.mjs` adds the piece that was absent: a **multilingual intent
-extractor and English translator**. Say "computer lo chrome close cheyyu" and it
-returns `{language: "te", intent: "close", target: "Chrome"}` plus an English
-rewrite, so the models downstream never see a language they were not trained for.
+`bridge/language.mjs` extracts intent and translates non-English requests into
+English before model/tool routing. English input skips translation. For example,
+a Telugu request can keep its original text while the downstream task gets an
+English rewrite. Real inference still requires the local bridge and model server;
+this environment has not completed a full Ollama-backed conversation.
 
-Two deliberate choices in there:
+## RAM autopilot and explicit installation
 
-**A separate slot, not the coder.** Intent extraction is classification, and a
-0.5b model does it in under a second. Routing it through the 7b coder would
-triple the latency of every command for no gain.
-
-**Soft failure.** If the model is unreachable or returns something unparseable,
-the caller gets the original text back with `language: null` and the router
-proceeds in English exactly as before. A feature that breaks the assistant when
-the model is down is not a feature.
-
-`runTurn` gained a `translate` step that rewrites the last user message in
-English, keeping the original visible to the model as well — so a mistranslation
-is recoverable in context rather than silently wrong. English input skips it
-entirely, so an English user pays no latency.
-
-## Automated model install, quantization-aware
-
-`GET /autopilot` reports what this machine can afford. `POST /autopilot/install`
-downloads it. They are separate endpoints because a 7 GB pull must never happen
-because something polled a URL.
-
-The budget is the design:
+The plan preserves the requested allocation:
 
 ```
-35%  the OS           not negotiable, and not ours to spend
-25%  everything else  browser, editor, and other running apps
-40%  models           what is left, and all we may touch
+35%  operating system
+25%  other running applications
+40%  maximum JARVIS allocation
 ```
 
-Those numbers are not arbitrary. A loaded model is *resident*, so a 7b model is
-not a 4.7 GB download, it is 4.7 GB permanently gone from everything else.
-Spending more than the leftover 40% is how you get a machine that swaps.
+Chat, vision, coding and Whisper run sequentially. The planner compares each
+model's estimated active-memory requirement (weights plus runtime/context
+headroom) with the same 40% ceiling; it does **not** add every downloaded file
+as if all models must stay loaded at once. The bridge asks Ollama to unload a
+model after a request. The model estimates are conservative guides, not hardware
+guarantees, and current free RAM can lower the selected tier further.
 
-The chat and coding ladders climb **round-robin**, and the planner skips a
-rung that does not fit instead of stopping at the first miss. That prevents one
-capability from taking the whole budget while another stays at its minimum.
-The speech model is selected separately from the remaining budget. Verified
-across the range:
+| Total RAM | JARVIS cap | Chat | Vision | Coding | Whisper STT | TTS | Selected assets* |
+|---:|---:|---|---|---|---|---|---:|
+| 500 MB | 0.20 GB | 0.5B best-effort; not installed | unavailable | 0.5B best-effort; not installed | unavailable | Browser/OS | 0.00 GB |
+| 1 GB | 0.40 GB | 0.5B best-effort; not installed | unavailable | 0.5B best-effort; not installed | multilingual base | Browser/OS | 0.06 GB |
+| 2 GB | 0.80 GB | 0.5B | unavailable | 0.5B | multilingual small | Browser/OS | 0.96 GB |
+| 4 GB | 1.60 GB | 1.5B | unavailable | 1.5B | large-v3-turbo | Browser/OS | 2.60 GB |
+| 8 GB | 3.20 GB | 3B | unavailable | 3B | large-v3-turbo | Kokoro Q8 | 4.42 GB |
+| 12 GB | 4.80 GB | 3B | Qwen2.5-VL 3B | DAGBS 7B Q3_K_M | large-v3-turbo | Browser/OS | 9.44 GB |
+| 16 GB | 6.40 GB | 7B | Qwen2.5-VL 3B | DAGBS 7B Q4_K_M | large-v3-turbo | Browser/OS | 13.14 GB |
+| 24 GB | 9.60 GB | 7B | Qwen2.5-VL 7B | DAGBS 7B Q4_K_M | large-v3-turbo | Kokoro FP32 | 16.26 GB |
+| 32 GB | 12.80 GB | 14B | Qwen2.5-VL 7B | abliterated coder 14B | large-v3-turbo | Kokoro FP32 | 24.86 GB |
 
-| RAM | Model budget | Gets |
-|---|---|---|
-| 1 GB | 0.4 GB | chat 0.5b |
-| 2 GB | 0.8 GB | chat 0.5b + whisper tiny |
-| 4 GB | 1.6 GB | chat 1.5b + code 0.5b + whisper small |
-| 6 GB | 2.4 GB | chat 1.5b + code 1.5b + whisper small |
-| 8 GB | 3.2 GB | chat 3b + code 1.5b + whisper small |
-| 12 GB | 4.8 GB | chat 3b + code 3b + whisper large-v3-turbo |
-| 16 GB | 6.4 GB | same, speech maxed |
-| 24 GB | 9.6 GB | chat 7b + code 7b |
-| 32 GB | 12.8 GB | chat 7b + code 7b + whisper large |
+The 1 GB profile is deliberately honest: the smallest abliterated Q4 chat and
+coder weights are about 398 MB each, but runtime estimates are about 510 MB and
+the whole JARVIS allowance is only 400 MB. Those two slots are shown as
+best-effort for comparison but are not auto-installed or treated as runnable.
+The smallest Whisper tier fits at 1 GB; at 500 MB even that local STT model is
+outside budget. The only local vision choices are the supplied abliterated
+Qwen2.5-VL variants: the 3B file is about 3.2 GB and estimates 4.1 GB resident,
+so it first fits at 12 GB total. No aligned low-memory VLM is substituted.
 
-Every model in both ladders is **abliterated**, from `huihui_ai/qwen2.5-abliterate`
-and `huihui_ai/qwen2.5-coder-abliterate`, each spanning 0.5b to 14b. Nothing else
-is downloaded. Vision is deliberately **excluded from the automatic RAM plan**:
-the smallest useful multimodal model has a ~950 MB floor and is not part of the
-chat-and-coding-only model ladder. The configurable vision slot remains optional;
-the autopilot does not download it.
+*Selected-asset totals include the chosen model weights and, where applicable,
+the browser-cached Kokoro asset (fetched on first use). They are maximum
+catalogue estimates before reusing anything already installed; downloads for
+other RAM tiers are never included. Actual live planning can step down when
+current free memory is lower than the reference profile.
 
-Whisper is exempt from the guard on purpose. It is a speech recogniser with no
-chat behaviour, so it has no alignment to remove. The exemption sits next to the
-rule rather than at the call site, so the two cannot drift apart.
+Chat and coding downloads are abliterated instruct models only; the planner
+refuses a non-abliterated chat/coding entry. Vision has its own explicitly
+multimodal ladder. Whisper is multilingual (not `.en`) and is not a chat model.
 
-Climbing is **round-robin, not best-first**. A best-first walk gives the whole
-budget to whichever capability is listed first, and on a 24 GB machine that means
-a 9 GB chat model beside a 0.4 GB coder — a machine that converses well and writes
-code badly. Round-robin takes one rung from each in turn, so they climb together
-and neither can starve the other.
+Open **MODEL STACK** in the HUD (or press **M**) to inspect the live RAM plan,
+all 33 reference tiers from 500 MB through 32 GB, selected models, estimates and
+limits. `GET /autopilot` is read-only. The panel's **INSTALL SELECTED STACK**
+button remains an explicit manual action. The root `build.ps1` / `build.sh`
+workflow instead automates first-run setup: it checks for Ollama, installs it
+from the official installer only when a fitting local Ollama model is selected,
+starts it if needed, then downloads only this machine's selected fitting chat,
+vision, coding and Whisper assets. Existing packages, model tags, runtime and
+Whisper files are reused; other RAM tiers and non-fitting best-effort weights are
+never bulk-downloaded. Kokoro is fetched and cached by the browser on first use
+when the RAM plan selects it. No desktop bundle or EXE is created. The separate
+`npm run setup` command remains a read-only preflight.
 
-The guard is verified to actually fire: replacing one entry with an aligned model
-makes `plan()` throw, with the offender named.
+## Setup and Windows controls
 
+After cloning or extracting the repository, run the platform script from its
+root folder:
 
-## Setup and RAM-based model selection
-
-`npm run setup` is an advisory preflight: it checks Node and the model server and
-prints what is missing. **It does not install Ollama or download models.** The
-RAM-aware download flow is explicit so a multi-gigabyte pull never happens just
-because the app started:
+```powershell
+.\build.ps1
+```
 
 ```bash
-npm install
-npm run setup       # check prerequisites; changes nothing
-npm start           # starts the local bridge and browser HUD
+bash ./build.sh
 ```
 
-With the bridge running, inspect the plan first, then choose whether to install
-it. These commands pull the models selected for the machine's available RAM:
+The scripts check for Node.js 20+ and npm. If Node is missing, `build.ps1`
+tries WinGet; `build.sh` uses a version manager/Homebrew or downloads and
+SHA-256-verifies a user-local Node 24 LTS binary. If Windows blocks the `.ps1`
+by execution policy, use `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
+The script then installs missing/stale npm packages from `package-lock.json`,
+vendors the hand-tracking runtime if needed, builds the **web UI**, and runs a
+read-only preflight. It then checks for Ollama and
+installs it only if this machine's RAM plan has a fitting local chat, vision or
+coding model. It checks/starts the local Ollama service, reuses existing model
+tags and Whisper files, installs only the selected fitting model tier plus the
+Whisper runtime when needed, then launches the local bridge and Vite app. Other
+RAM tiers are shown in the catalogue but are not downloaded. A high-memory
+machine can require over 24 GB of model downloads; the script prints the
+selected plan and size estimate before pulling. Keep the terminal open and press
+**Ctrl-C** to stop the processes.
 
-```bash
-curl http://localhost:8787/autopilot
-curl -X POST http://localhost:8787/autopilot/install
-```
+Use `bash ./build.sh --skip-ai-models` or `./build.ps1 -SkipAiModels` to build
+and launch without installing Ollama/model weights. Use `--no-launch` or
+`-NoLaunch` to finish setup/build/model checks without starting the local web
+servers. Neither entry point creates a desktop bundle or EXE.
 
-Ollama must already be installed and running. The install endpoint pulls the
-planned local models and the optional Whisper package; it does not install the
-model server itself. Review the plan before calling the `POST` endpoint because
-its downloads may be large.
+`npm run setup` is a standalone preflight only: it changes nothing. For manual
+workflows, `npm ci`, `npm run build`, `npm run models:plan`,
+`npm run models:install`, and `npm start` are separate commands. The browser
+STT/TTS choices default to RAM autopilot; Kokoro speech assets are fetched by the
+browser on first use when selected. Chrome or Edge still needs to be installed
+for the best microphone experience; the setup script does not replace the
+user's browser.
+
+The bridge includes a Windows window manager when run on Windows. Window
+inventory is read-only by default. Focus, minimize, maximize, restore, close
+(via the application's normal close message), and launching a small allowlist
+of apps require the explicit write-enabled bridge (`npm run bridge:writes`, or
+`npm start -- --writes`). It is not an unrestricted shell or a packaged Windows
+agent. GitHub Pages continues to host the UI only.
 
 ## Uncensored models, enforced
 
-A standing requirement, so it is *checked* rather than assumed. `plan()` calls
-`assertUncensored()`, which fails loudly if any catalogue entry is not from an
-abliterated / dolphin / hermes / nous family. Ollama's plain `qwen2.5` tags are
-the aligned originals and are exactly what must not be installed. moondream and
-the whisper files are out of scope — not chat models, no alignment to remove.
+A standing requirement for chat, coding and the supplied vision family, so it
+is checked rather than assumed. `plan()` refuses a chat, coder or vision
+catalogue entry without the `abliterat` marker. No aligned model is substituted
+when an abliterated rung does not fit. Whisper is a multilingual speech
+recogniser, not a chat model.
 
 
-## What has actually been run
+## Verification status
 
-Most of this repo has never been executed. The exceptions are below, and they
-were run on a real machine with a real Ollama, not simulated:
+Official Ollama catalogue entries and published model-size tags were checked
+while building the planner. `npm run test:autopilot` passes ten deterministic
+profiles from 0.5–32 GB and mocked checks for non-fitting skips, Ollama-tag
+idempotence, offline Whisper installation, incomplete-file rejection, and the
+browser-cached Kokoro path. `npm run smoke` exercises the bridge and tool loop,
+RAM-plan response shape and 33-tier catalogue/statuses, Telugu-to-English
+code-intent routing, and vision prompt fusion against a local stub model
+server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
+transcription/model download, or Windows desktop action has been verified in
+this workspace. GitHub Pages hosts the UI only.
 
-| | Result |
-|---|---|
-| Both model families exist on Ollama, every tag | verified, HTTP 200 |
-| Byte sizes in the ladders | 0.5b 397 MB *(est. 398)*, 3b 1.9 GB, 7b 4.7 GB, 14b 9.0 GB — all match |
-| `ollama pull` of the 0.5b | **succeeded**, 397 MB |
-| Inference on the abliterated model | **`JARVIS ONLINE`**, 5 tokens in 2.02 s on CPU |
-| `whisper-node@1.1.1` install | **succeeded** via npm |
-| Whisper model download | **succeeded**, 30.7 MB *(est. 31)*, GGML magic `0x67676d6c` verified |
-| `gpu()` on a machine with no GPU | correctly returned `null` |
-| Full `autopilot.install()` end to end | **3 of 3 installed** |
+## Model manager and local speech
 
-The full browser voice-to-model-to-tool loop has not yet been verified end to end.
+`GET /models` compares the dynamic chat/vision/coding slots with Ollama's
+installed tags. `GET /autopilot` reports the live RAM allocation, selected
+variants, estimated active memory, expected downloads and unsupported
+capabilities; it also exposes the full RAM-tier catalogue. The HUD's
+`POST /autopilot/install` action remains user-triggered. The root setup scripts
+handle Ollama installation and selected model setup automatically; the endpoint
+itself never launches a system installer.
 
-Two bugs came out of this and would never have come out of `node --check`:
+**Speech-to-text:** RAM autopilot selects local multilingual Whisper when it fits
+and has been installed; the root build scripts check/download the selected file
+and runtime. If it cannot fit or is unavailable, `auto` falls back to browser
+recognition, which depends on Chrome/Edge and may use the browser's recognition
+service. To force local-only input set `VITE_STT_ENGINE=whisper`; recorded audio
+is posted only to the local bridge's `/stt` endpoint. GitHub Pages cannot reach
+that bridge.
 
-- **The whisper binary URLs were invented.** Not merely wrong paths — whisper.cpp
-  publishes *no prebuilt binaries at all*, not on HuggingFace, not in its GitHub
-  releases (which have zero assets). The repo has also moved from
-  `ggerganov/whisper.cpp` to `ggml-org/whisper.cpp`. The first version 404'd on
-  every platform while reporting success.
-- **A "valid GGML" check that was wrong about byte order.** The magic reads
-  `lmgg` as ASCII and `0x67676d6c` as a little-endian uint32. Reading it the
-  obvious way says the file is corrupt when it is fine.
-
-## Model manager
-
-`GET /models` asks Ollama what it has and compares that against the three slots,
-so a missing model is named rather than surfacing as JARVIS silently failing to
-think. Matching is on the model name before the tag, so `qwen2.5:latest` counts
-as `qwen2.5:7b` — a user who pulled `:latest` should not be told they are missing
-weights they already have.
-
-`ensure(slot, {auto})` will pull, but only when asked. A 7 GB download should
-never start as a side effect of booting. Pulls stream progress, because a 7 GB
-download with no feedback is indistinguishable from a hang.
-
-## Speech
-
-**STT** can use the browser's SpeechRecognition API for the interactive HUD.
-That API's implementation and network behavior depend on the browser. For an
-explicit local path, `POST /stt` accepts a 16 kHz mono WAV and uses the optional
-whisper.cpp binary and model configured with `JARVIS_WHISPER_BIN` and
-`JARVIS_WHISPER_MODEL`.
-
-Point it at your install:
-
-```bash
-export JARVIS_WHISPER_BIN=~/whisper.cpp/build/bin/whisper-cli
-export JARVIS_WHISPER_MODEL=~/whisper.cpp/models/ggml-base.en.bin
-```
-
-Binary and model are checked separately, because those are two different problems
-with two different fixes and one boolean sends people looking in the wrong place.
-
-**TTS** is the narration net from earlier — local, no API, no key.
+**Text-to-speech:** RAM autopilot chooses browser-cached Kokoro when its
+estimated resident use fits alongside the largest selected model; otherwise it
+uses browser/OS SpeechSynthesis. Kokoro's selected `bm_` voice is English, while
+system voices and language coverage depend on the installed OS/browser. Kokoro
+weights are fetched and cached by the browser on first use; failures fall back
+to system speech.
 
 ## The shape of this repo
 
@@ -218,7 +209,8 @@ One browser HUD backed by a Node bridge and your own local models:
 ```
 src/ + index.html        browser HUD — voice, reactor, panels
 bridge/                  local Node bridge — model pipeline, tools, autopilot
-scripts/                 preflight and local start scripts
+scripts/                 preflight, RAM/model bootstrap, build assets, local start helpers
+build.ps1 / build.sh     platform setup, web build, selected model setup, and launch
 smoke.mjs                bridge checks
 ```
 
@@ -236,14 +228,17 @@ AI session.
 
 ## Requirements
 
-**In one line:** a local model server, Node.js, and Chrome or Edge. Ollama is the recommended model server.
+**In one line:** the root setup script, a supported local model runtime when
+models fit, and a real browser for microphone/WebGL. Ollama is recommended.
 
-- **A model server.** [Ollama](https://ollama.com) is the easiest option;
-  keep its local service running so the bridge can reach it. llama.cpp, LM Studio
-  and vLLM also work through their OpenAI-compatible endpoints. The RAM-aware
-  autopilot uses the model families listed above; the model server itself is
-  installed separately.
-- **Node.js 20 or newer** from <https://nodejs.org>. This is a Node web app, so it is the one unavoidable runtime.
+- **A model server.** [Ollama](https://ollama.com) is the default. The root
+  `build.ps1` / `build.sh` checks for it and installs it from the official
+  installer only when the detected RAM plan needs a fitting local Ollama model.
+  llama.cpp, LM Studio and vLLM remain available through their OpenAI-compatible
+  endpoints; custom endpoints are not overwritten by the Ollama bootstrap.
+- **Node.js 20 or newer** and the project npm packages. The root scripts check
+  and bootstrap Node where supported, then install missing/stale packages from
+  the lockfile.
 - **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
   embedded preview pane. Preview panes (including the one inside editors) block
   microphone access, so the page loads and looks right but never hears you.
@@ -254,24 +249,31 @@ AI session.
   it. With none configured he still answers, still talks, and still drives his
   own interface.
 
-`npm run setup` is a friendly preflight after cloning. It checks whether your model server is reachable and reports missing prerequisites; it does not install software or models.
+`npm run setup` is a friendly read-only preflight: it checks the RAM-selected
+plan and configured model server, but installs nothing. The root build scripts
+perform the automated first-run dependency and selected-model setup. Browser
+installation remains user-controlled; Chrome or Edge should already be
+available for microphone use.
 
 ---
 
 ## Quick start
 
-Install Ollama and start its local server first. Then, in the repository:
+The recommended first-run path is `build.ps1` on Windows or `build.sh` on
+macOS/Linux. If you prefer manual commands:
 
 ```bash
-npm install
+npm ci
+npm run build
 npm run setup       # advisory preflight; no downloads or system changes
 npm start           # local bridge + Vite browser HUD
 ```
 
-Open <http://localhost:5173> in Chrome or Edge, click **INITIALISE**, allow the
-microphone, and say **“Hey Jarvis”**. The default chat model must be pulled before
-it can answer; the RAM-aware autopilot offers a preview and explicit install
-through `GET /autopilot` and `POST /autopilot/install` on `localhost:8787`.
+Open the local Vite URL (normally <http://localhost:5173>) in Chrome or Edge,
+click **INITIALISE**, allow the microphone, and say **“Hey Jarvis”**. Local
+inference requires a running model server and a model that fits the selected
+RAM plan; review the plan and explicitly install fitting models from MODEL
+STACK. The endpoint is available at `localhost:8787` when the bridge is running.
 
 For separate terminals, use `npm run bridge` for the local AI/tool service and
 `npm run dev` for the HUD. The GitHub Pages page is only a static view; it does
@@ -305,19 +307,12 @@ WebSocket (plus a few HTTP endpoints) on `ws://localhost:8787`.
    than being inlined into a JavaScript bundle where anyone with devtools can
    read it.
 
-**The models.** Three of them, by default, chosen per question — see
-*The pipeline* below. `JARVIS_MODEL_BASE_URL` says where the server lives
-(Ollama's default is `http://localhost:11434/v1`), and on startup the bridge
-prints every slot and checks each is actually loaded, e.g.
-
-```
-[jarvis]   chat    huihui_ai/qwen2.5-abliterate:0.5b            @ http://localhost:11434/v1
-[jarvis]   vision  huihui_ai/qwen2.5-vl-abliterated:3b          @ http://localhost:11434/v1
-[jarvis]   reason  dagbs/qwen2.5-coder-7b-instruct-abliterated  @ http://localhost:11434/v1
-```
-
-A missing model is named at boot, with the `ollama run` line that fixes it,
-rather than discovered by you mid-sentence.
+**The model slots are chosen by RAM and request type.** `JARVIS_MODEL_BASE_URL`
+says where the server lives (Ollama's default is
+`http://localhost:11434/v1`). `chat`, `vision` and `reason` may select different
+model sizes and quantizations; unavailable slots are reported rather than
+substituted with a text-only model. The HUD's Model Stack and `/health` report
+missing or RAM-limited slots.
 
 ### The voice pipeline
 
@@ -327,19 +322,22 @@ The loop is designed so that nothing silently dies and barge-in feels natural.
   (`src/lib/vad.ts`) decides when you are speaking. It is instant, cannot quietly
   fail, and is what makes **barge-in** work — speak while JARVIS is talking and he
   stops, without waiting for a transcript to say so.
-- **Transcription** is the browser's own `SpeechRecognition` (Chrome/Edge),
-  guarded by a heartbeat so it recovers when Chrome throttles it. Chrome
-  throttling that API into silence with no event to catch is the failure this
-  guard exists for.
-- **Speaking** uses the browser's `speechSynthesis` by default. `VITE_TTS_ENGINE=kokoro`
-  switches to a neural voice that runs in the tab — better sound, nothing leaving
-  the machine, but it downloads ~86MB of weights and generates slower than
-  realtime. If the OS voice is broken it latches over to Kokoro for the rest of
-  the session, because a broken system voice fails identically every time and
-  retrying it per sentence is worse than a worse timbre.
+- **Transcription** defaults to RAM autopilot (`VITE_STT_ENGINE=auto`): local
+  multilingual Whisper when the selected model/runtime is installed and fits,
+  otherwise browser `SpeechRecognition` when available. Chrome/Edge browser
+  recognition may use the browser vendor's service. Set
+  `VITE_STT_ENGINE=whisper` to force local-only STT; recorded audio is converted
+  to 16 kHz mono WAV and sent only to the local bridge.
+- **Speaking** also follows RAM autopilot (`VITE_TTS_ENGINE=auto`). Tight
+  budgets use browser/OS `speechSynthesis`; tiers with sufficient headroom select
+  Kokoro in the tab. The browser downloads and caches its selected Q8 (~86 MB)
+  or FP32 (~330 MB) voice on first use. If Kokoro cannot load, speech falls back
+  to the system voice; unavailable system voices/languages depend on the browser
+  and operating system.
 
-So there is no key, no account and no flag: speech works on a fresh install.
-The one thing to know is that it has to be a real browser window.
+There is no hosted voice key or account. Browser speech capabilities vary, so
+use Chrome or Edge in a real browser window and allow microphone access; embedded
+previews block microphone access.
 
 ---
 
@@ -359,7 +357,9 @@ you have installed, that is roughly:
 
 These are all optional. With none of them configured JARVIS still answers, still
 talks, still looks through the camera, and still drives his own interface —
-those four are built into the bridge and cannot be missing.
+the built-in display, UI, camera, browser and Windows read-only inventory
+servers are part of the bridge. Windows control actions remain behind the
+explicit write gate.
 
 A few things you can say:
 
@@ -413,6 +413,7 @@ chose.
 | **Escape** | Stand down |
 | **D** | Live diagnostics panel |
 | **T** | One-line audio self-test |
+| **M** | RAM / Model Stack panel |
 
 ---
 
@@ -436,9 +437,10 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | Variable | Default | Effect |
 |---|---|---|
 | `JARVIS_MODEL_BASE_URL` | `http://localhost:11434/v1` | Where the model server listens |
-| `JARVIS_MODEL_CHAT` | `huihui_ai/qwen2.5-abliterate:0.5b` | The fast slot |
-| `JARVIS_MODEL_VISION` | `huihui_ai/qwen2.5-vl-abliterated:3b` | The slot that reads images |
-| `JARVIS_MODEL_REASON` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | The slot that calls tools |
+| `JARVIS_MODEL_CHAT` | RAM-selected | Override the planner's conversation/intent model |
+| `JARVIS_MODEL_VISION` | RAM-selected or unavailable | Override the planner's image model |
+| `JARVIS_MODEL_REASON` | RAM-selected | Override the planner's abliterated coding/tool model |
+| `JARVIS_OLLAMA_URL` | `http://localhost:11434` | Ollama management/download API root |
 | `JARVIS_MODEL_*_URL` | inherits the base URL | Move one slot to another machine |
 | `JARVIS_MODEL_NAME` | — | Pins every slot to one model |
 | `JARVIS_MODEL_API_KEY` | — | Only for servers that insist on a non-empty header |
@@ -456,64 +458,24 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | Variable | Effect |
 |---|---|
 | `VITE_BRIDGE_URL` | Where to reach the bridge |
-| `VITE_TTS_ENGINE` | `system` or `kokoro` |
+| `VITE_STT_ENGINE` | `auto`, `browser` or `whisper` |
+| `VITE_TTS_ENGINE` | `auto`, `system` or `kokoro` |
 | `VITE_KOKORO_VOICE` | Voice for the Kokoro engine |
 
 ### The pipeline
 
-One model is a compromise: a small one answers fast and cannot use tools, a
-large one uses tools and takes seconds per sentence. So JARVIS runs three, and
-picks per question.
+`bridge/autopilot.mjs` selects the model/quant rung from the RAM plan, unless a
+`JARVIS_MODEL_*` environment variable explicitly overrides that slot. Images
+route to `vision`; coding, technical and tool-shaped turns route to `reason`;
+ordinary conversation and multilingual intent translation use `chat`. A missing
+vision model produces a clear RAM-limit error rather than a confident guess from
+a text-only model. Ollama models are asked to unload after each request so the
+slots can be used sequentially.
 
-| Slot | Default | Reached for | RAM (Q4_K_M) |
-|---|---|---|---|
-| `chat` | `huihui_ai/qwen2.5-abliterate:0.5b` | Everything else. Conversation. | ~0.4 GB |
-| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | Any turn with an image in it. | ~2.0 GB |
-| `reason` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | Tool-shaped or technical questions. | ~4.7 GB |
-
-Roughly 7.1 GB resident, which leaves a 16 GB machine comfortable. All three
-usually share one Ollama; `JARVIS_MODEL_*_URL` moves one of them elsewhere if
-you need to.
-
-**All three are abliterated, and none of them are base models.** Those get
-conflated, so: *base* means a model that was never taught to follow
-instructions — it will not refuse you, and it will not understand you either,
-and it cannot emit a function call, so JARVIS would silently stop using every
-tool he has. *Abliterated* means an instruct build with the internal refusal
-direction surgically removed, so it answers without hedging and still calls
-tools. That is what uncensored should mean here, and it is what these are.
-
-The choice is made **before** anything is streamed, which is the whole design.
-Escalating afterwards would mean the browser had already spoken the smaller
-model's answer, and *"I can't do that"* followed by doing it is worse than a
-slightly slow answer. So it is a guess made up front, on three signals: an image
-in the conversation means vision; a question that names a tool or reads as
-technical means reason; everything else is the fast slot. The tool vocabulary is
-spelled out from the twenty-two tools that actually exist, and it errs wide on
-purpose — a false positive costs a second of latency, a false negative costs a
-JARVIS who talks confidently and does nothing.
-
-The slot is re-evaluated after every tool result, because a camera frame
-arriving as a result makes it a vision question — and only a vision model can
-read a photograph. A text model shown one describes the prompt instead, with
-total confidence.
-
-**And there is a net under the guess.** A small model asked to call a tool it
-cannot call will often narrate instead — *"I will now open the browser and
-search for that…"* — fluently, confidently, and with nothing whatsoever
-happening. That failure throws no error and logs nothing, so the chat slot's
-first few tokens are held back and checked. If it opens by announcing an action
-it never takes, the turn is re-run on the reason slot and the first answer is
-discarded. Nothing has been spoken yet, so the cost is a pause; the benefit is
-that a silent, total failure becomes a slow, correct answer. The smoke test
-covers it, because it is exactly the kind of thing that rots quietly.
-
-**On the 0.5B.** It is the fast slot and it is also the weak link. It will
-handle *"what's the weather"* and *"tell me a joke"*; it will not reliably
-choose between twenty-two tools. If JARVIS stops using his tools, set
-`JARVIS_MODEL_CHAT=qwen2.5-coder-7b-instruct-abliterated` and accept that every
-answer now costs a 7B's latency. That one line is the trade, and it is yours to
-make.
+All auto-selected chat and coding models are abliterated instruct builds. The
+vision and Whisper ladders are separate capabilities, not chat/coding substitutes.
+Model estimates and fit flags are shown in the Model Stack; they are not a
+promise that every model will run on every device.
 
 ### Adding a model server
 

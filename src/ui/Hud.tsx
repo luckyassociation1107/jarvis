@@ -132,7 +132,7 @@ function DecodeText({ text }: { text: string }) {
 
 /* --------------------------------------------------------------------- hud */
 
-export function Hud() {
+export function Hud({ onStart }: { onStart: () => void }) {
   const phase = useStore((s) => s.phase)
   const caption = useStore((s) => s.caption)
   const turns = useStore((s) => s.turns)
@@ -160,7 +160,7 @@ export function Hud() {
   return (
     <div className="hud" style={{ ['--accent' as string]: colour }}>
       {/* Instrument layer stays behind the live transcript and assistant surfaces. */}
-      <CommandDeck />
+      <CommandDeck onStart={onStart} />
       <BladeSweep />
 
       <AnimatePresence>
