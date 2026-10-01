@@ -192,5 +192,5 @@ String formatBytes(int? bytes) {
     unit++;
   }
   final digits = value >= 100 || unit == 0 ? 0 : 1;
-  return '${value.toStringAsFixed(digits)}${units[unit]}';
+  return '${value.toStringAsFixed(digits)} ${units[unit]}';
 }

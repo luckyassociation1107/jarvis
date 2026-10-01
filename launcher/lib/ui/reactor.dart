@@ -106,7 +106,7 @@ class _ReactorPainter extends CustomPainter {
     // --- radial ticks -------------------------------------------------------
     // 48 of them, every 7.5 degrees, alternating length. This is what makes it
     // read as an instrument rather than as a circle.
-    final ticks = 48;
+    const ticks = 48;
     for (var i = 0; i < ticks; i++) {
       final angle = (i / ticks) * 2 * math.pi + spin * 0.15;
       final long = i % 4 == 0;

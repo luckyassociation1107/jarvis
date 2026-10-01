@@ -1,5 +1,5 @@
 /// Fuzzy matching, and the scoring behind it.
-///
+library;
 
 /// Where a query matched inside a name, for highlighting.
 class MatchRange {

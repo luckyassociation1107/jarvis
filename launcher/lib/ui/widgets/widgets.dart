@@ -406,7 +406,7 @@ class MediaBody extends StatelessWidget {
 
 /// A count of applications, and the search hint.
 class AppListBody extends StatelessWidget {
-  const AppListBody({this.count = 0});
+  const AppListBody({super.key, this.count = 0});
 
   /// Defaults to zero rather than being required: the skin format has no field
   /// for it, and a widget that cannot be constructed from its own spec is a

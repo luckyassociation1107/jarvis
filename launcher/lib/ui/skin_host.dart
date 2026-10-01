@@ -39,7 +39,7 @@ class SkinHost extends StatelessWidget {
           if (spec.kind == 'reactor')
             // The reactor fills the space rather than sitting in its box — it is
             // a background element that happens to be placeable.
-            Positioned.fill(
+            const Positioned.fill(
               child: IgnorePointer(
                 child: Center(
                   child: ReactorBody(),
