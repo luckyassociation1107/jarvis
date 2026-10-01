@@ -58,6 +58,41 @@ English, keeping the original visible to the model as well — so a mistranslati
 is recoverable in context rather than silently wrong. English input skips it
 entirely, so an English user pays no latency.
 
+## Automated model install
+
+`GET /autopilot` reports what this machine can afford. `POST /autopilot/install`
+downloads it. They are separate endpoints because a 7 GB pull must never happen
+because something polled a URL.
+
+The budget is the design:
+
+```
+35%  the OS           not negotiable, and not ours to spend
+25%  everything else  browser, editor, the launcher itself
+40%  models           what is left, and all we may touch
+```
+
+Those numbers are not arbitrary. A loaded model is *resident*, so a 7b model is
+not a 4.7 GB download, it is 4.7 GB permanently gone from everything else.
+Spending more than the leftover 40% is how you get a machine that swaps.
+
+Selection is greedy by priority, not by size, and skips rather than stops — a
+6 GB machine cannot afford the coder but can still afford vision, and stopping
+at the first miss would throw that away. Verified across the range:
+
+| RAM | Model budget | Installs |
+|---|---|---|
+| 1 GB | 0.4 GB | chat 0.5b, whisper binary |
+| 2 GB | 0.8 GB | + whisper base |
+| 4 GB | 1.6 GB | + whisper small |
+| 8 GB | 3.2 GB | + vision 3b |
+| 24 GB | 9.6 GB | + coder 7b |
+| 32 GB | 12.8 GB | everything, including chat 7b |
+
+The 0.5b chat model is first because it is 398 MB and is the difference between
+an assistant and a paperweight. The 14b is 9 GB and is a nicer conversation.
+Order matters more than fit.
+
 ## Model manager
 
 `GET /models` asks Ollama what it has and compares that against the three slots,

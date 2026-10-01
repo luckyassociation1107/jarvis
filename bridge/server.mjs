@@ -24,6 +24,7 @@ import { WebSocketServer } from 'ws'
 import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
+import { plan as autopilotPlan, install as autopilotInstall, planSummary } from './autopilot.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -686,6 +687,45 @@ const handleRequest = async (req, res) => {
       res.writeHead(500, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }))
     }
+  }
+
+  // Autopilot: what this machine can afford, and install it.
+  //
+  // GET reports the plan without downloading. POST downloads. They are separate
+  // on purpose — a 7 GB pull must never happen because something polled an
+  // endpoint.
+  if (req.method === 'GET' && req.url === '/autopilot') {
+    const p = autopilotPlan()
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        summary: planSummary(),
+        ram: {
+          totalGb: +(p.budget.total / 1073741824).toFixed(2),
+          osGb: +(p.budget.os / 1073741824).toFixed(2),
+          appsGb: +(p.budget.apps / 1073741824).toFixed(2),
+          modelsGb: +(p.budget.models / 1073741824).toFixed(2),
+        },
+        fits: p.fits.map((f) => ({ id: f.id, kind: f.kind, gb: +(f.bytes / 1073741824).toFixed(2), why: f.why })),
+        skipped: p.skipped.map((x) => ({ id: x.id, gb: +(x.bytes / 1073741824).toFixed(2), shortfallGb: +(x.shortfall / 1073741824).toFixed(2) })),
+        usedGb: +(p.usedBytes / 1073741824).toFixed(2),
+      }),
+    )
+  }
+
+  if (req.method === 'POST' && req.url === '/autopilot/install') {
+    // Long by design: this can be a 7 GB download. The client should not time
+    // out on it, and the response is the full log either way.
+    const result = await autopilotInstall({ dir: 'models' })
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        installed: result.installed.length,
+        failed: result.log.filter((l) => !l.ok),
+        skipped: result.skipped.map((x) => x.id),
+        log: result.log,
+      }),
+    )
   }
 
   if (req.method === 'GET' && req.url === '/health') {
