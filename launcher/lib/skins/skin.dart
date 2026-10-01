@@ -80,6 +80,7 @@ class WidgetSpec {
     this.title,
     this.showTitle = true,
     this.opacity = 1.0,
+    this.accent,
   });
 
   /// Which widget to draw. See [WidgetKind].
@@ -99,7 +100,16 @@ class WidgetSpec {
   final bool showTitle;
   final double opacity;
 
+  /// This widget's accent, overriding the skin's. Null means use the skin's.
+  ///
+  /// Per-widget rather than per-skin because a skin that is one colour is a
+  /// colour scheme, and a skin that is a *palette* — clock in cyan, monitor in
+  /// magenta, calendar in amber — reads as an instrument panel rather than a
+  /// theme option. Rainmeter calls these Color1..Color5 for the same reason.
+  final String? accent;
+
   static WidgetSpec fromJson(Map<String, dynamic> json) => WidgetSpec(
+        accent: json['accent'] as String?,
         kind: json['kind'] as String,
         x: (json['x'] as num?)?.toDouble() ?? 24,
         y: (json['y'] as num?)?.toDouble() ?? 24,
@@ -119,6 +129,7 @@ class WidgetSpec {
         if (title != null) 'title': title,
         'showTitle': showTitle,
         'opacity': opacity,
+        if (accent != null) 'accent': accent,
       };
 }
 

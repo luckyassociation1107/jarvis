@@ -58,7 +58,7 @@ English, keeping the original visible to the model as well — so a mistranslati
 is recoverable in context rather than silently wrong. English input skips it
 entirely, so an English user pays no latency.
 
-## Automated model install
+## Automated model install, quantization-aware
 
 `GET /autopilot` reports what this machine can afford. `POST /autopilot/install`
 downloads it. They are separate endpoints because a 7 GB pull must never happen

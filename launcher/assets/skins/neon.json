@@ -1,0 +1,72 @@
+{
+  "id": "neon",
+  "name": "Neon",
+  "author": "JARVIS",
+  "description": "Five accents on near-black. Each widget its own colour, so the surface reads as an instrument panel rather than a theme.",
+  "accent": "#00E5FF",
+  "widgets": [
+    {
+      "kind": "clock",
+      "x": 28,
+      "y": 26,
+      "width": 300,
+      "height": 130,
+      "title": "Local time",
+      "accent": "#00E5FF"
+    },
+    {
+      "kind": "system",
+      "x": 28,
+      "y": 176,
+      "width": 300,
+      "height": 210,
+      "title": "Vitals",
+      "accent": "#FF2ED1"
+    },
+    {
+      "kind": "calendar",
+      "x": 352,
+      "y": 26,
+      "width": 300,
+      "height": 300,
+      "title": "Calendar",
+      "accent": "#FFB347"
+    },
+    {
+      "kind": "notes",
+      "x": 352,
+      "y": 346,
+      "width": 300,
+      "height": 180,
+      "title": "Notes",
+      "accent": "#B6FF3C"
+    },
+    {
+      "kind": "appcount",
+      "x": 28,
+      "y": 406,
+      "width": 300,
+      "height": 120,
+      "title": "Installed",
+      "accent": "#8C6BFF"
+    },
+    {
+      "kind": "media",
+      "x": 676,
+      "y": 26,
+      "width": 300,
+      "height": 150,
+      "title": "Now playing",
+      "accent": "#00FFA3"
+    },
+    {
+      "kind": "weather",
+      "x": 676,
+      "y": 196,
+      "width": 300,
+      "height": 150,
+      "title": "Conditions",
+      "accent": "#4DA6FF"
+    }
+  ]
+}
