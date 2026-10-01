@@ -13,6 +13,9 @@ to `localhost`. The one cost is your own hardware: the model is the heavy part,
 so a machine with a GPU and some RAM will give you a much better JARVIS than a
 laptop will.
 
+**How it all fits together:** [`WORKFLOW.md`](WORKFLOW.md) — the three layers,
+what happens when you speak, and what the whole thing is for.
+
 **What that trade actually costs.** A hosted frontier model reads a JSON schema
 and calls a tool correctly almost every time. An 8B model on a laptop does it
 perhaps half the time, and a small one mostly narrates what it would do instead.
