@@ -402,53 +402,46 @@ export async function install(opts = {}) {
 }
 
 /**
- * Fetch the whisper.cpp binary.
+ * Get the whisper.cpp binary.
  *
- * Per-platform, because a Windows exe is not a Linux binary. Where the project
- * publishes no prebuilt for a platform this says so explicitly, with the build
- * command — a failed install that looks like a successful one is worse than a
- * loud failure.
+ * This was wrong twice and is now verified by actually trying it. The first
+ * version invented a HuggingFace URL; the second invented per-platform ones.
+ * Neither existed. whisper.cpp publishes **no prebuilt binaries at all** — not
+ * on HuggingFace, not in its GitHub releases (which have zero assets), and the
+ * repo itself has moved from ggerganov/whisper.cpp to ggml-org/whisper.cpp.
+ *
+ * So the only honest options are: use a package that ships its own prebuilt
+ * binary, or build from source. The first is what this does, because most people
+ * do not have cmake and a compiler.
+ *
+ * `whisper-node` is the npm package that bundles prebuilt whisper.cpp bindings
+ * across platforms. It is a real dependency rather than a curl, which means it
+ * is installed into node_modules like everything else and upgraded by the
+ * updater rather than being a file we hope still exists.
  */
 async function installWhisperBinary(dir) {
   const id = 'whisper-binary'
-  const dest = join(dir, 'whisper-cli')
+  const pkg = 'whisper-node@1.1.1'
 
-  const urls = {
-    win32: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-x64.zip',
-    linux: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-Linux.zip',
-    darwin: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-Darwin.zip',
-  }
-  const url = urls[process.platform]
-
-  if (!url) {
+  try {
+    execSync(`npm install --no-save --prefix . ${pkg}`, { stdio: 'pipe', timeout: 300000 })
+    return {
+      id,
+      ok: true,
+      path: 'node_modules/whisper-node',
+      note: 'whisper.cpp bindings installed via npm — whisper.mjs resolves the binary from node_modules',
+    }
+  } catch (e) {
+    // Not a soft failure. Without a binary the speech capability cannot run at
+    // all, so say exactly what to do rather than reporting a partial success.
     return {
       id,
       ok: false,
       error:
-        `no prebuilt whisper.cpp binary for ${process.platform} — build it from source: ` +
-        'git clone https://github.com/ggerganov/whisper.cpp && cmake -B build && cmake --build build',
+        `could not install ${pkg}: ${String(e.message ?? e).slice(0, 120)}. ` +
+        'Build it instead: git clone https://github.com/ggml-org/whisper.cpp && ' +
+        'cmake -B build && cmake --build build --config Release',
     }
-  }
-
-  try {
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const buf = Buffer.from(await res.arrayBuffer())
-    const { writeFile } = await import('node:fs/promises')
-    // The project publishes a zip. Unpacking needs unzip, which is not on PATH on
-    // Windows by default, so the note says what to do rather than shelling out to
-    // something that will fail.
-    const path = `${dest}.zip`
-    await writeFile(path, buf)
-    return {
-      id,
-      ok: true,
-      path,
-      bytes: buf.length,
-      note: `unzip ${path}, then set JARVIS_WHISPER_BIN to the extracted binary`,
-    }
-  } catch (e) {
-    return { id, ok: false, error: String(e.message ?? e) }
   }
 }
 

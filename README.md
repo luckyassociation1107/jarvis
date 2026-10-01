@@ -167,6 +167,36 @@ tested by people who opted in, not pushed onto every machine that rebooted.
 `package.json` is the source of truth for the running version rather than a
 constant, so it cannot drift from what was published. It is now `1.0.0`.
 
+## What has actually been run
+
+Most of this repo has never been executed. The exceptions are below, and they
+were run on a real machine with a real Ollama, not simulated:
+
+| | Result |
+|---|---|
+| Both model families exist on Ollama, every tag | verified, HTTP 200 |
+| Byte sizes in the ladders | 0.5b 397 MB *(est. 398)*, 3b 1.9 GB, 7b 4.7 GB, 14b 9.0 GB — all match |
+| `ollama pull` of the 0.5b | **succeeded**, 397 MB |
+| Inference on the abliterated model | **`JARVIS ONLINE`**, 5 tokens in 2.02 s on CPU |
+| `whisper-node@1.1.1` install | **succeeded** via npm |
+| Whisper model download | **succeeded**, 30.7 MB *(est. 31)*, GGML magic `0x67676d6c` verified |
+| `gpu()` on a machine with no GPU | correctly returned `null` |
+| Full `autopilot.install()` end to end | **3 of 3 installed** |
+
+That is the entire verified surface. Everything else — the Flutter workspace, the
+window manager, the skins, the boot sequence — remains compile-checked only.
+
+Two bugs came out of this and would never have come out of `node --check`:
+
+- **The whisper binary URLs were invented.** Not merely wrong paths — whisper.cpp
+  publishes *no prebuilt binaries at all*, not on HuggingFace, not in its GitHub
+  releases (which have zero assets). The repo has also moved from
+  `ggerganov/whisper.cpp` to `ggml-org/whisper.cpp`. The first version 404'd on
+  every platform while reporting success.
+- **A "valid GGML" check that was wrong about byte order.** The magic reads
+  `lmgg` as ASCII and `0x67676d6c` as a little-endian uint32. Reading it the
+  obvious way says the file is corrupt when it is fine.
+
 ## Model manager
 
 `GET /models` asks Ollama what it has and compares that against the three slots,
