@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../models/app_entry.dart';
+import '../services/memory_budget.dart';
 import '../theme/jarvis_theme.dart';
 
 /// How an app icon is clipped into the JARVIS frame.
@@ -190,11 +191,19 @@ class _IconImage extends StatelessWidget {
     if (path == null || path.isEmpty || !_isImage(path)) {
       return _Monogram(entry: entry, size: size);
     }
+    // Decode to the budget's pixel ceiling, not the file's native size. A 256px
+    // icon shown at 56px costs 20x the memory it needs to, and with a few
+    // hundred apps installed that difference is the whole budget.
+    // cacheWidth is what actually caps the decode. Without it Flutter decodes
+    // the file at native resolution and scales at paint time, which is the
+    // single biggest memory cost in a launcher with a few hundred apps.
+    final cap = MemoryBudget.current.iconPixels;
     return Image.file(
       File(path),
       width: size,
       height: size,
       fit: BoxFit.contain,
+      cacheWidth: cap,
       // An icon that fails to decode must not take the tile down with it.
       errorBuilder: (_, __, ___) => _Monogram(entry: entry, size: size),
     );

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../platform/system_stats.dart';
+import '../../services/memory_budget.dart';
 import '../../theme/jarvis_theme.dart';
 
 /// CPU, memory and disk, as three bars and three readouts.
@@ -35,6 +36,10 @@ class _SystemMonitorState extends State<SystemMonitor> {
     final next = await SystemStats.sample(previous: _snap);
     if (!mounted) return;
     setState(() => _snap = next);
+    // The first real sample is when the app learns how much memory the machine
+    // actually has. Everything before it runs on the `standard` default, which
+    // is the tier the UI was designed against.
+    MemoryBudget.refresh(next.memoryTotalBytes);
   }
 
   @override

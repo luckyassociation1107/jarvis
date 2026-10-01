@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../../skins/skin.dart';
+import '../../services/memory_budget.dart';
 import '../../theme/jarvis_theme.dart';
 import '../../ui/reactor.dart';
 import 'system_monitor.dart';
@@ -29,32 +30,45 @@ class SkinWidget extends StatelessWidget {
       // from a rectangle with a border. A translucent fill on its own reads as
       // a washed-out box; blurring what is behind it reads as glass.
       //
+      // Each BackdropFilter costs a render surface, so on a machine that cannot
+      // afford it the panel falls back to a plain translucent fill. Same layout,
+      // same information, less glass — which is the right trade when the
+      // alternative is a slideshow.
+      //
       // ClipRRect first, or the blur would bleed past the rounded corners and
       // square off the whole panel.
+      final blur = MemoryBudget.current.blur;
       child: ClipRRect(
         borderRadius: BorderRadius.circular(2),
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-          child: Container(
-            decoration: BoxDecoration(
-              // A slightly lower alpha than before: the blur is now doing the
-              // work of separating panel from background, so the fill only has
-              // to tint it.
-              color: JarvisPalette.surface.withValues(alpha: 0.55),
-              border: Border.all(
-                color: JarvisPalette.interface_.withValues(alpha: 0.30),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (spec.showTitle)
-                  _Title(text: spec.title ?? _defaultTitle(spec.kind)),
-                Expanded(child: _body()),
-              ],
-            ),
-          ),
+        child: blur
+            ? BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                child: _panel(),
+              )
+            : _panel(),
+      ),
+    );
+  }
+
+  Widget _panel() {
+    return Container(
+      decoration: BoxDecoration(
+        // A slightly lower alpha than the old flat fill: the blur is now doing
+        // the work of separating panel from background, so the fill only has to
+        // tint it. On tiers without blur this is a touch thin, which is the
+        // honest cost of dropping the effect.
+        color: JarvisPalette.surface.withValues(alpha: 0.55),
+        border: Border.all(
+          color: JarvisPalette.interface_.withValues(alpha: 0.30),
         ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (spec.showTitle)
+            _Title(text: spec.title ?? _defaultTitle(spec.kind)),
+          Expanded(child: _body()),
+        ],
       ),
     );
   }

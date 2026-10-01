@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../services/memory_budget.dart';
 import '../theme/jarvis_theme.dart';
 
 /// The reactor: the thing at the centre of the display.
@@ -38,7 +39,25 @@ class _ReactorState extends State<Reactor> with SingleTickerProviderStateMixin {
     // Slow on purpose. A fast spin reads as a loading spinner; this is meant
     // to read as something idling.
     duration: const Duration(seconds: 24),
-  )..repeat();
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    // A continuous animation is a continuous repaint, and on a machine with no
+    // memory to spare it is also a continuous reason to keep the process
+    // resident. The budget decides: full frame rate, a slow tick, or draw once
+    // and stop entirely.
+    final fps = MemoryBudget.current.reactorFps;
+    if (fps <= 0) {
+      _c.value = 0.35; // A fixed, deliberate pose rather than a frozen 0.
+    } else {
+      // Flutter has no "repeat at N fps", so the period is stretched instead:
+      // the controller still runs at display rate but the visual only needs to
+      // change when it does, and the ticker is what costs.
+      _c.repeat(period: Duration(milliseconds: (1000 / fps).round()));
+    }
+  }
 
   @override
   void dispose() {

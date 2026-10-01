@@ -252,6 +252,33 @@ one that says it has no feed.
 
 ---
 
+## Memory: 500 MB to 32 GB
+
+The brief was that this has to work anywhere in that range, which is a
+thirty-two-fold spread that no single set of defaults can serve. A frosted-glass
+panel and a 60 fps reactor are free on a 32 GB desktop and ruin a 500 MB box.
+
+So the app asks the OS how much memory exists — one kernel32 call, the same one
+the system monitor already makes — and picks a tier:
+
+| Tier | RAM | Icon cache | Blur | Reactor | Icon decode |
+|---|---|---|---|---|---|
+| minimal | < 2 GB | 8 MB | off | static | 48 px |
+| low | 2–4 GB | 24 MB | off | 12 fps | 64 px |
+| standard | 4–8 GB | 64 MB | on | 30 fps | 96 px |
+| high | > 8 GB | 160 MB | on | 60 fps | 128 px |
+
+It starts at `standard` — the tier the UI was designed against, where being wrong
+costs smoothness rather than correctness — and refines the moment the first real
+sample lands.
+
+**The icon cache is the number that matters.** Flutter's own `ImageCache` is
+sized in *images* (default 1000) and knows nothing about bytes, so a thousand
+256px icons is 256 MB no matter what the machine has. `IconStore` is sized in
+bytes and evicts LRU. Separately, `cacheWidth` caps the decode itself: showing a
+256px icon at 56px otherwise costs twenty times the memory it needs to, and with
+a few hundred apps installed that difference *is* the budget.
+
 ## Known rough edges
 
 - No global hotkeys on Wayland. `Alt+Space` is registered through the platform
