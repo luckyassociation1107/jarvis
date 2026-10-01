@@ -21,7 +21,7 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, BRIDGE_MODEL_NAME, MODEL_URL } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -109,14 +109,6 @@ const ALLOW_WRITES = process.env.JARVIS_ALLOW_WRITES === '1'
 
 /**
  * Which model, and how it is reached. Both live in local-llm.mjs, which owns
- * everything about the model server; this file only ever needs the name, for
- * the boot line.
- *
- * Override with JARVIS_MODEL_NAME. A bigger model is the single biggest quality
- * win available — a 70B will use tools where an 8B mostly talks about them.
- */
-const MODEL = BRIDGE_MODEL_NAME
-
 /**
  * How many tool-calling rounds one question may take before the brain stops
  * and answers from what it has. A local model loops more than a hosted one
@@ -673,8 +665,9 @@ const handleRequest = async (req, res) => {
     return res.end(
       JSON.stringify({
         ok: model.ok,
-        model: model.model,
-        ...(model.error ? { error: model.error } : {}),
+        // Every slot, so the diagnostics panel can say which one is missing
+        // rather than only that something is.
+        models: model.slots,
       }),
     )
   }
@@ -838,18 +831,27 @@ const wss = new WebSocketServer({
 server.listen(PORT)
 
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
-console.log(`[jarvis] model ${MODEL} · max ${EFFORT} tool turns`)
+console.log(`[jarvis] max ${EFFORT} tool turns`)
+
+// The pipeline, named slot by slot. Printed because "which model just answered
+// that" is a fair question and the answer is three different ones.
+for (const [slot, spec] of Object.entries(PIPELINE)) {
+  console.log(`[jarvis]   ${slot.padEnd(7)} ${spec.model}  @ ${spec.url}`)
+}
+
 // Checked rather than assumed, because a bridge that starts happily and fails
 // on the first question is the worst shape it can take: the interface shows a
 // connected assistant that cannot think, and nothing says why.
 const model = await modelStatus()
 if (model.ok) {
-  console.log(`[jarvis] model reachable at ${MODEL_URL}`)
+  console.log('[jarvis] all models reachable')
 } else {
-  console.warn(`[jarvis] MODEL NOT REACHABLE — ${model.error}`)
+  for (const slot of model.slots.filter((s) => !s.ok)) {
+    console.warn(`[jarvis] ${slot.slot} MODEL NOT REACHABLE — ${slot.error}`)
+    console.warn(`[jarvis]   start it with: ollama run ${slot.model}`)
+  }
   console.warn(
-    `[jarvis] start one with: ollama run ${MODEL}` +
-      '   (or set JARVIS_MODEL_BASE_URL to wherever yours lives)',
+    '[jarvis]   (or set JARVIS_MODEL_*_URL / JARVIS_MODEL_BASE_URL to wherever yours lives)',
   )
 }
 console.log(
@@ -1132,7 +1134,7 @@ const handleConnection = async (socket) => {
         sendTurn({
           type: 'error',
           message: unreachable
-            ? `I cannot reach my model server at ${MODEL_URL}. Start it with \`ollama run ${MODEL}\` and ask me again.`
+            ? `I cannot reach my model server. Start it with \`ollama run ${BRIDGE_MODEL_NAME}\` and ask me again.`
             : String(err?.message ?? err),
         })
       }

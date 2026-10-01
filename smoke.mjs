@@ -22,6 +22,8 @@ const MODEL = 'stub-model'
 let calls = 0
 let sawToolAsk = false
 let sawToolResult = false
+/** The `model` field of every request, in order. Proves the routing. */
+const asked = []
 const http = createServer((req, res) => {
   if (req.url === '/v1/models') {
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -36,6 +38,7 @@ const http = createServer((req, res) => {
   req.on('data', (c) => body.push(c))
   req.on('end', () => {
     const payload = JSON.parse(Buffer.concat(body).toString())
+    asked.push(payload.model)
     const askedForTool = (payload.tools ?? []).length > 0
     const hasToolResult = (payload.messages ?? []).some((m) => m.role === 'tool')
 
@@ -90,7 +93,7 @@ let sawReady = false
 await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('timed out waiting for frames')), 20000)
   ws.on('open', () => {
-    ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Say good evening.' }))
+    ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Take a screenshot of my phone.' }))
   })
   ws.on('message', (raw) => {
     const f = JSON.parse(raw.toString())
@@ -131,15 +134,44 @@ const checks = [
   ['the tool result was fed back to the model', sawToolResult],
   ['the final answer streamed in pieces', text.length > 0],
   ['the answer is the model\'s second turn', Boolean(done?.text.includes('sir'))],
+  ['a tool-shaped question was sent to the reason slot', asked[0] === 'qwen2.5-coder:7b'],
 ]
 
+// Routing is a pure function of the conversation, so it is checked directly
+// rather than inferred from what a stub happened to be sent. One case per slot,
+// because the middle one fails silently: a text model shown a photograph
+// describes the prompt instead of the picture, with total confidence.
+const IMG = [{ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AA' } }]
+const routing = await import('./bridge/local-llm.mjs')
+  .then((m) => m.pickModel)
+  .catch(() => null)
+const routingChecks = routing
+  ? [
+      ['an image routes to the vision slot', routing([{ role: 'user', content: IMG }]) === 'vision'],
+      ['a technical question routes to the reason slot', routing([{ role: 'user', content: 'why does this regex fail?' }]) === 'reason'],
+      ['a tool-shaped question routes to the reason slot', routing([{ role: 'user', content: 'take a screenshot of my phone' }]) === 'reason'],
+      ['a plain greeting routes to the chat slot', routing([{ role: 'user', content: 'say good evening' }]) === 'chat'],
+      ['an image in a tool result also routes to vision', routing([
+        { role: 'user', content: 'look at me' },
+        { role: 'tool', tool_call_id: 'c', content: IMG },
+      ]) === 'vision'],
+    ]
+  : [['pickModel is exported', false]]
+
 let failed = 0
-console.log('')
 for (const [name, ok] of checks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
   if (!ok) failed++
 }
-console.log(`\n  ${checks.length - failed}/${checks.length} passed`)
+
+console.log(`\n  models asked, in order: ${asked.join(' -> ')}`)
+let routeFailed = 0
+for (const [name, ok] of routingChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) routeFailed++
+}
+console.log(`\n  ${checks.length - failed}/${checks.length} loop checks, ${routingChecks.length - routeFailed}/${routingChecks.length} routing checks`)
+if (routeFailed) failed += routeFailed
 
 ws.close()
 http.close()

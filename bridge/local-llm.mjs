@@ -28,17 +28,6 @@
  *   node bridge/server.mjs
  */
 
-/**
- * Which model. `llama3.1` because it is what `ollama run llama3.1` gives you and
- * it handles tool calling at all. Anything your runtime can load works here —
- * see the uncensored note in the README for the ones worth trying instead.
- */
-export const BRIDGE_MODEL_NAME = process.env.JARVIS_MODEL_NAME ?? 'llama3.1'
-
-/**
- * Where the model lives. Ollama's default, because it is the one command that
- * gets a working local model running on any machine.
- */
 /** Where the model server is, trailing slash trimmed. Exported for the banner. */
 export const MODEL_URL = (
   process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
@@ -46,6 +35,69 @@ export const MODEL_URL = (
 
 /** Some servers want *something* in the header even with no auth. */
 const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
+
+/**
+ * The model pipeline.
+ *
+ * One model is a compromise: a small one answers fast and cannot use tools, a
+ * large one uses tools and takes seconds per sentence. Three models split that
+ * compromise along the only axis that actually matters — what the question
+ * needs — and on a 16 GB machine they all fit resident at once.
+ *
+ * Every slot is an ordinary model name on the same server. Nothing here needs a
+ * router or three processes; Ollama loads and unloads them itself.
+ *
+ *   chat    the default. Small and fast. Handles conversation.
+ *   vision  reads images. Only this slot can answer "what am I holding".
+ *   reason  the large one. Reached for when the answer needs actual thought, or
+ *           when a tool has to be called correctly.
+ *
+ * Set JARVIS_MODEL_NAME to pin every slot to one model, which is the right
+ * thing to do if you only have one worth running.
+ *
+ * IMPORTANT — instruct, never base. A base model predicts the next token and
+ * has never been taught that a function call is a thing it can emit, so it will
+ * describe calling a tool instead of calling one. Ollama's default tags
+ * (`qwen2.5:0.5b`, `qwen2.5-coder:7b`) are the instruct builds; the `-base`
+ * variants are separate, explicitly-named tags and are the wrong ones here.
+ * `qwen2-vl` is the exception — its instruct builds carry the suffix.
+ */
+const SLOTS = {
+  chat: {
+    model: process.env.JARVIS_MODEL_CHAT ?? 'qwen2.5:0.5b',
+    url: process.env.JARVIS_MODEL_CHAT_URL,
+  },
+  vision: {
+    model: process.env.JARVIS_MODEL_VISION ?? 'qwen2-vl:2b-instruct',
+    url: process.env.JARVIS_MODEL_VISION_URL,
+  },
+  reason: {
+    model: process.env.JARVIS_MODEL_REASON ?? 'qwen2.5-coder:7b',
+    url: process.env.JARVIS_MODEL_REASON_URL,
+  },
+}
+
+/** Pin every slot to one model, for anyone who would rather not choose. */
+const PINNED = process.env.JARVIS_MODEL_NAME ?? null
+
+/** The model name for a slot, honouring the pin. */
+const modelFor = (slot) => PINNED ?? SLOTS[slot].model
+
+/** The server for a slot. A per-slot URL defaults to the shared one, so a big
+ *  model can live on another machine without the others moving. */
+const urlFor = (slot) =>
+  (PINNED ? null : SLOTS[slot].url)?.replace(/\/+$/, '') || MODEL_URL
+
+/** Every slot, for the boot banner and /health. */
+export const PIPELINE = Object.fromEntries(
+  Object.entries(SLOTS).map(([slot]) => [
+    slot,
+    { model: modelFor(slot), url: urlFor(slot) },
+  ]),
+)
+
+/** The name the boot line and error messages lead with. */
+export const BRIDGE_MODEL_NAME = modelFor('chat')
 
 /** Tool-use attempts per question before giving up and answering in prose. */
 const MAX_TURNS = Number(process.env.JARVIS_MODEL_MAX_TURNS ?? 8)
@@ -168,6 +220,72 @@ function parseArgs(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// Which model answers this
+// ---------------------------------------------------------------------------
+
+/** Does the conversation contain an image? Only a vision model can read one. */
+function hasImage(messages) {
+  return messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p?.type === 'image_url'),
+  )
+}
+
+/** The last thing the user actually said, as plain text. */
+function lastUserText(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role !== 'user') continue
+    if (typeof m.content === 'string') return m.content
+    if (Array.isArray(m.content)) {
+      return m.content.filter((p) => p?.type === 'text').map((p) => p.text).join(' ')
+    }
+  }
+  return ''
+}
+
+/**
+ * Words that mean "this needs a tool".
+ *
+ * Drawn from what JARVIS can actually do rather than from a general verb list,
+ * and bounded on purpose. A broad pattern would send every question to the slow
+ * model and the pipeline would stop being a pipeline — the whole point of the
+ * fast slot is that most questions do not need it.
+ */
+const NEEDS_A_TOOL =
+  /\b(screenshot|screen ?shot|my phone|phone|tab|browser|camera|look at|watch me|watch this|image|picture|photo|orbit|theme|display|show me|search|google|find|fetch|open|read|summari[sz]e|notifications?|calendar|weather|news|hacker news)\b/i
+
+/**
+ * Words that mean "this needs thinking".
+ *
+ * The reason slot is a code model, so it is at its best on anything shaped like
+ * a technical question — which is also where a 0.5B is at its worst.
+ */
+const TECHNICAL =
+  /\b(code|function|bug|error|stack ?trace|refactor|typescript|javascript|python|java|rust|sql|regex|api|json|schema|compile|build|test|debug|explain how|how does|why does|algorithm|complexity|optimise|optimize|architecture|library|framework|dependency|docker|linux|git)\b/i
+
+/**
+ * Pick the model for this turn.
+ *
+ * Decided before anything is streamed, and that ordering is the whole design.
+ * Escalating afterwards would mean the browser had already spoken the smaller
+ * model's answer, and "I can't do that" followed by doing it is worse than a
+ * slightly slow answer. So this is a guess made up front, and it is a guess —
+ * the two patterns above are exactly what it guesses on.
+ *
+ * @param {Array<{role: string, content: unknown}>} messages
+ * @returns {'chat' | 'vision' | 'reason'}
+ */
+export function pickModel(messages) {
+  // An image is the one unambiguous signal. A text-only model shown a picture
+  // will describe the prompt instead of the picture, confidently.
+  if (hasImage(messages)) return 'vision'
+  const text = lastUserText(messages)
+  if (TECHNICAL.test(text)) return 'reason'
+  if (NEEDS_A_TOOL.test(text)) return 'reason'
+  return 'chat'
+}
+
+// ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------
 
@@ -181,15 +299,15 @@ function parseArgs(raw) {
  *
  * @returns {Promise<{ text: string, toolCalls: object[] }>}
  */
-async function streamChat({ messages, tools, signal, onDelta }) {
-  const res = await fetch(`${MODEL_URL}/chat/completions`, {
+async function streamChat({ messages, tools, signal, onDelta, slot }) {
+  const res = await fetch(`${urlFor(slot)}/chat/completions`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${API_KEY}`,
     },
     body: JSON.stringify({
-      model: BRIDGE_MODEL_NAME,
+      model: modelFor(slot),
       messages,
       ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
       temperature: TEMPERATURE,
@@ -307,12 +425,23 @@ export async function runTurn({
     ),
   )
 
+  /**
+   * Chosen once per turn, before anything is streamed.
+   *
+   * Re-evaluated each round rather than fixed for the turn, because the signal
+   * changes: a camera frame arriving as a tool result makes this a vision
+   * question, and only a vision model can read it. That is the one case where
+   * switching mid-turn is not a preference but a requirement.
+   */
+  let slot = pickModel(messages)
+
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const { text, toolCalls } = await streamChat({
       messages,
       tools,
       signal,
       onDelta,
+      slot,
     })
 
     // No tool call means the model is done, whatever else it said.
@@ -390,6 +519,10 @@ export async function runTurn({
       onToolEnd?.(call.name, result?.isError === true)
       messages.push(toolResultMessage(call.id, result))
     }
+
+    // A tool result may have changed what the question needs — most often by
+    // putting an image in the conversation.
+    slot = pickModel(messages)
   }
 
   // Ran out of turns. Answering from what is already gathered is better than
@@ -406,53 +539,73 @@ export async function runTurn({
 // ---------------------------------------------------------------------------
 
 /**
- * Is the model actually there?
+ * Is every slot in the pipeline actually there?
  *
  * Asked once at boot and reported on `/health`, because a bridge that starts
  * happily and then fails on the first question is the worst possible shape:
  * the browser shows a connected assistant that cannot think, and nothing says
- * why. A missing model is the most common first-run problem, so it is named
- * here rather than discovered by the user mid-sentence.
+ * why. A missing model is the most common first-run problem, so each slot is
+ * named rather than discovered by the user mid-sentence.
  *
- * @returns {Promise<{ ok: boolean, model: string, error?: string }>}
+ * All three slots usually share one server, so the reachability check is done
+ * once and the per-model check is done against that one response.
+ *
+ * @returns {Promise<{ ok: boolean, slots: object[], error?: string }>}
  */
 export async function modelStatus() {
   const started = Date.now()
-  try {
-    const res = await fetch(`${MODEL_URL}/models`, {
-      headers: { authorization: `Bearer ${API_KEY}` },
-      signal: AbortSignal.any([
-        AbortSignal.timeout(CONNECT_TIMEOUT_MS),
-      ]),
-    })
-    if (!res.ok) {
-      return {
-        ok: false,
-        model: BRIDGE_MODEL_NAME,
-        error: `${res.status} ${res.statusText}`,
+  // Slots sharing a server share a probe; distinct URLs each get their own.
+  const byUrl = new Map()
+  for (const [slot, spec] of Object.entries(PIPELINE)) {
+    const list = byUrl.get(spec.url) ?? []
+    list.push(slot)
+    byUrl.set(spec.url, list)
+  }
+
+  const slots = []
+  for (const [url, names] of byUrl) {
+    let ids = []
+    let reachError = null
+    try {
+      const res = await fetch(`${url}/models`, {
+        headers: { authorization: `Bearer ${API_KEY}` },
+        signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+      })
+      if (!res.ok) {
+        reachError = `${res.status} ${res.statusText}`
+      } else {
+        ids = ((await res.json())?.data ?? []).map((m) => m?.id).filter(Boolean)
       }
+    } catch (err) {
+      reachError = String(err?.message ?? err)
     }
-    const body = await res.json()
-    const ids = (body?.data ?? []).map((m) => m?.id).filter(Boolean)
-    // Ollama answers with the bare name, others with `namespace/name`. Compare
-    // on the tail so both shapes count as a match.
-    const have = ids.some((id) => id === BRIDGE_MODEL_NAME || id.endsWith(`/${BRIDGE_MODEL_NAME}`))
-    return {
-      ok: have || ids.length === 0,
-      model: BRIDGE_MODEL_NAME,
-      error: have || ids.length === 0
-        ? undefined
-        : `model not loaded — available: ${ids.slice(0, 8).join(', ')}`,
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      model: BRIDGE_MODEL_NAME,
-      error: `${err?.message ?? err} (is the model server running on ${MODEL_URL}?)`,
-    }
-  } finally {
-    if (process.env.JARVIS_DEBUG === '1') {
-      console.log(`[jarvis] model probe took ${Date.now() - started}ms`)
+
+    for (const slot of names) {
+      const model = modelFor(slot)
+      if (reachError) {
+        slots.push({ slot, model, url, ok: false, error: reachError })
+        continue
+      }
+      // Ollama answers with the bare name, others with `namespace/name`.
+      // Compare on the tail so both shapes count as a match.
+      const have = ids.some((id) => id === model || id.endsWith(`/${model}`))
+      slots.push({
+        slot,
+        model,
+        url,
+        // An empty list means the server does not enumerate — assume it knows
+        // what it is doing rather than failing a working setup.
+        ok: have || ids.length === 0,
+        error:
+          have || ids.length === 0
+            ? undefined
+            : `not loaded — available: ${ids.slice(0, 8).join(', ')}`,
+      })
     }
   }
+
+  if (process.env.JARVIS_DEBUG === '1') {
+    console.log(`[jarvis] model probe took ${Date.now() - started}ms`)
+  }
+  return { ok: slots.every((s) => s.ok), slots }
 }

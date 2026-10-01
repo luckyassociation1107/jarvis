@@ -41,64 +41,66 @@ try {
   line(warn, 'Could not read the Node.js version. JARVIS needs Node 20 or newer.')
 }
 
-// --- A model server ------------------------------------------------------
+// --- The model pipeline ---------------------------------------------------
 /**
- * Is anything listening on a local model server?
- *
- * Ollama is the default target and the easiest thing to get running, so it is
- * checked first and its absence is the one line in this script that comes with
- * an install command. A server on another port or from another runtime is fine
- * too — JARVIS_MODEL_BASE_URL points at it — but there is no way to guess where,
- * so only the default is probed.
+ * Three slots, and each is checked separately, because a missing one fails in a
+ * way that is hard to read from the outside: JARVIS answers normally until you
+ * ask him to look at something, and then he describes the prompt instead of the
+ * picture. Naming the slot at boot is what makes that diagnosable.
  */
 const MODEL_URL = (
   process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
 ).replace(/\/+$/, '')
-const MODEL_NAME = process.env.JARVIS_MODEL_NAME ?? 'llama3.1'
 
-let modelReachable = false
-let modelDetail = ''
+const PIPELINE = [
+  ['chat', process.env.JARVIS_MODEL_CHAT ?? 'qwen2.5:0.5b', 'conversation'],
+  ['vision', process.env.JARVIS_MODEL_VISION ?? 'qwen2-vl:2b-instruct', 'images'],
+  ['reason', process.env.JARVIS_MODEL_REASON ?? 'qwen2.5-coder:7b', 'tools and technical questions'],
+]
+
+let reachable = false
+let loaded = []
 try {
   const res = await fetch(`${MODEL_URL}/models`, {
     signal: AbortSignal.timeout(4000),
   })
   if (res.ok) {
-    modelReachable = true
-    const body = await res.json()
-    const ids = (body?.data ?? []).map((m) => m?.id).filter(Boolean)
-    modelDetail = ids.length
-      ? ` — ${ids.length} model${ids.length === 1 ? '' : 's'} loaded`
-      : ''
-    // Ollama answers with the bare name; others use `namespace/name`.
-    const have = ids.some(
-      (id) => id === MODEL_NAME || id.endsWith(`/${MODEL_NAME}`),
-    )
-    if (ids.length && !have) {
-      line(
-        warn,
-        `Model server is up, but "${MODEL_NAME}" is not loaded. Available: ${ids.slice(0, 8).join(', ')}`,
-      )
-      line(info, `Pull it with: ollama pull ${MODEL_NAME}`)
-    }
-  } else {
-    modelDetail = ` (replied ${res.status})`
+    reachable = true
+    loaded = ((await res.json())?.data ?? []).map((m) => m?.id).filter(Boolean)
   }
 } catch {
   // Nothing there — the install advice below covers it.
 }
 
-if (modelReachable) {
-  line(tick, `Model server reachable at ${MODEL_URL}${modelDetail}.`)
-} else {
-  line(warn, `No model server reachable at ${MODEL_URL}${modelDetail}.`)
+if (!reachable) {
+  line(warn, `No model server reachable at ${MODEL_URL}.`)
   line(info, 'This is the one thing JARVIS cannot do without — it is the brain.')
   line(info, 'Easiest option: install Ollama from https://ollama.com, then:')
-  line(info, `  ollama run ${MODEL_NAME}`)
+  for (const [, model] of PIPELINE) line(info, `  ollama pull ${model}`)
   line(
     info,
     'Already running a model elsewhere (llama.cpp, LM Studio, vLLM)? Point',
   )
   line(info, 'JARVIS_MODEL_BASE_URL at it and this check will find it.')
+} else {
+  line(tick, `Model server reachable at ${MODEL_URL}${loaded.length ? ` — ${loaded.length} model${loaded.length === 1 ? '' : 's'} loaded` : ''}.`)
+  for (const [slot, model, purpose] of PIPELINE) {
+    // Ollama answers with the bare name, others with `namespace/name`.
+    const have =
+      loaded.length === 0 ||
+      loaded.some((id) => id === model || id.endsWith(`/${model}`))
+    if (have) {
+      line(tick, `${slot.padEnd(7)} ${model} — ${purpose}`)
+    } else {
+      line(warn, `${slot.padEnd(7)} ${model} is NOT loaded — ${purpose} will not work.`)
+      line(info, `Pull it with: ollama pull ${model}`)
+    }
+  }
+  line(
+    info,
+    'If JARVIS stops using his tools, the fast chat slot is usually why — see',
+  )
+  line(info, 'the pipeline note in the README.')
 }
 
 // --- MCP servers ---------------------------------------------------------
@@ -149,7 +151,7 @@ line(
 // --- How to run ----------------------------------------------------------
 console.log('')
 console.log('To run JARVIS, open two terminals:')
-console.log(`  1)  npm run bridge      # the brain (your local model: ${MODEL_NAME})`)
+console.log('  1)  npm run bridge      # the brain (your local models, above)')
 console.log('  2)  npm run dev         # the face (open http://localhost:5173 in Chrome)')
 console.log('')
 console.log('Then click INITIALISE and say "Hey Jarvis".')

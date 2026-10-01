@@ -122,12 +122,19 @@ WebSocket (plus a few HTTP endpoints) on `ws://localhost:8787`.
    than being inlined into a JavaScript bundle where anyone with devtools can
    read it.
 
-**The model.** `llama3.1` by default, overridable with `JARVIS_MODEL_NAME`, and
-`JARVIS_MODEL_BASE_URL` says where it lives (Ollama's default is
-`http://localhost:11434/v1`). On startup the bridge prints its choice and checks
-the server is actually reachable, e.g. `[jarvis] model llama3.1 · max 8 tool
-turns`. If it is not, you get a line telling you to run `ollama run llama3.1`
-rather than a bridge that starts happily and fails on your first question.
+**The models.** Three of them, by default, chosen per question — see
+*The pipeline* below. `JARVIS_MODEL_BASE_URL` says where the server lives
+(Ollama's default is `http://localhost:11434/v1`), and on startup the bridge
+prints every slot and checks each is actually loaded, e.g.
+
+```
+[jarvis]   chat    qwen2.5:0.5b           @ http://localhost:11434/v1
+[jarvis]   vision  qwen2-vl:2b-instruct   @ http://localhost:11434/v1
+[jarvis]   reason  qwen2.5-coder:7b       @ http://localhost:11434/v1
+```
+
+A missing model is named at boot, with the `ollama run` line that fixes it,
+rather than discovered by you mid-sentence.
 
 ### The voice pipeline
 
@@ -265,19 +272,47 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `VITE_TTS_ENGINE` | `system` or `kokoro` |
 | `VITE_KOKORO_VOICE` | Voice for the Kokoro engine |
 
-### Choosing a model
+### The pipeline
 
-The default `llama3.1` is what `ollama run llama3.1` gives you, and it handles
-tool calling. Two things are worth knowing when you pick your own:
+One model is a compromise: a small one answers fast and cannot use tools, a
+large one uses tools and takes seconds per sentence. So JARVIS runs three, and
+picks per question.
 
-- **Bigger is the whole game.** Tool use is where a small model struggles most.
-  A 70B will call a tool correctly most of the time; an 8B mostly narrates what
-  it would do instead. Take the largest model your machine will hold.
-- **For vision, you need a vision model.** `look` and `watch` return images, and
-  only a model trained on images can read them. `llama3.2-vision`,
-  `qwen2.5-vl` and `gemma3` all work. On a text-only model the image is dropped
-  and the words beside it are kept, so the tool still answers — just not about
-  what it saw.
+| Slot | Default | Reached for | RAM (Q4_K_M) |
+|---|---|---|---|
+| `chat` | `qwen2.5:0.5b` | Everything else. Conversation. | ~0.4 GB |
+| `vision` | `qwen2-vl:2b-instruct` | Any turn with an image in it. | ~1.6 GB |
+| `reason` | `qwen2.5-coder:7b` | Tool-shaped or technical questions. | ~4.7 GB |
+
+Roughly 6.7 GB resident, which leaves a 16 GB machine comfortable. All three
+usually share one Ollama; `JARVIS_MODEL_*_URL` moves one of them elsewhere if
+you need to.
+
+The choice is made **before** anything is streamed, which is the whole design.
+Escalating afterwards would mean the browser had already spoken the smaller
+model's answer, and *"I can't do that"* followed by doing it is worse than a
+slightly slow answer. So it is a guess, and it is a guess on two things: an
+image in the conversation means vision, and a question that names a tool or
+reads as technical means reason. Everything else is the fast slot.
+
+The slot is re-evaluated after every tool result, because a camera frame
+arriving as a result makes it a vision question — and only a vision model can
+read a photograph. A text model shown one describes the prompt instead, with
+total confidence.
+
+**⚠️ Instruct, never base.** A base model predicts the next token and has never
+been taught that a function call is something it can emit, so it *describes*
+calling a tool instead of calling one. JARVIS will look like he is ignoring
+everything he can do. Ollama's default tags are the instruct builds —
+`qwen2.5:0.5b`, `qwen2.5-coder:7b` — and the `-base` variants are separate,
+explicitly-named tags you have to go looking for. `qwen2-vl` is the exception:
+its instruct builds carry the suffix.
+
+**On the 0.5B.** It is the fast slot and it is also the weak link. It will
+handle *"what's the weather"* and *"make it red"*; it will not reliably choose
+between twenty-two tools. If JARVIS stops using his tools, set
+`JARVIS_MODEL_CHAT=qwen2.5-coder:7b` and accept that every answer now costs a
+7B's latency. That one line is the trade, and it is yours to make.
 
 ### Adding a model server
 
