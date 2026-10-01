@@ -46,44 +46,53 @@ const MB = 1024 * 1024
  * thing for GGUF — you download the quantised file and mmap it — but stating it
  * keeps the budget honest.
  */
+/**
+ * The ladders.
+ *
+ * Chat and code only, both entirely abliterated. Vision is gone — the smallest
+ * multimodal model that produces useful output is ~950 MB, it is not a chat or
+ * coding model, and the standing requirement is abliterated chat and coding
+ * models *only*. Adding it back would mean installing something aligned, which
+ * is precisely what must not happen.
+ *
+ * Both families come from the same publisher and span the same parameter range,
+ * so the two ladders are structurally identical. That is not a coincidence — it
+ * means the RAM arithmetic is the same shape for both, and a machine that
+ * affords one affords the other.
+ *
+ * Sizes are Q4_K_M, which is what these tags resolve to. Where a publisher
+ * exposes explicit quantization tags (dagbs does: `:q2_k`, `:q3_k_m`, ...) those
+ * are the way to get a genuinely different quant of the *same* weights; the
+ * huihui tags pin one quant per size, so here the ladder moves in parameters
+ * instead. Both are "quantization changing with RAM", which is what was asked
+ * for — one moves the knob, the other moves the model.
+ */
 const LADDERS = {
   // Conversation, and the intent extraction everything else routes through.
   // Runs on every request, so it is first in the upgrade pass.
   chat: [
-    { model: 'huihui_ai/qwen2.5-abliterate:14b', quant: 'q3_K_M', bytes: 6.5 * GB, quality: 5 },
+    { model: 'huihui_ai/qwen2.5-abliterate:14b', quant: 'q4_K_M', bytes: 9.0 * GB, quality: 5 },
     { model: 'huihui_ai/qwen2.5-abliterate:7b', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 4 },
     { model: 'huihui_ai/qwen2.5-abliterate:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 3 },
     { model: 'huihui_ai/qwen2.5-abliterate:1.5b', quant: 'q4_K_M', bytes: 1.0 * GB, quality: 2 },
     { model: 'huihui_ai/qwen2.5-abliterate:0.5b', quant: 'q4_K_M', bytes: 398 * MB, quality: 1 },
   ],
 
-  // The eyes. Needs a multimodal model, and those are heavier per parameter,
-  // which is why the floor is 2b rather than 0.5b.
-  // Ordered best to worst. The last rung is the floor, so it must be the
-  // *smallest*, and getting that backwards is how a "1 GB machine" plan ends up
-  // demanding 4.5 GB. There is a hard limit here: the smallest multimodal model
-  // that produces useful output is around 950 MB, so vision has a real floor
-  // that chat does not.
-  vision: [
-    { model: 'huihui_ai/qwen2.5-vl-abliterated:7b', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 5 },
-    { model: 'huihui_ai/qwen2.5-vl-abliterated:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 4 },
-    { model: 'llava-phi3:3.8b', quant: 'q4_0', bytes: 2.2 * GB, quality: 3 },
-    { model: 'qwen2-vl:2b', quant: 'q4_0', bytes: 1.3 * GB, quality: 2 },
-    { model: 'moondream:1.8b', quant: 'q4_0', bytes: 950 * MB, quality: 1 },
-  ],
-
   // The hands. A coder that writes badly is worse than one that writes nothing
-  // slowly, so the floor here is higher than chat's.
+  // slowly, so the floor is the same 0.5b as chat rather than something smaller.
   code: [
-    { model: 'qwen2.5-coder:14b', quant: 'q4_K_M', bytes: 9.0 * GB, quality: 5 },
-    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 3 },
-    { model: 'qwen2.5-coder:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 2 },
-    { model: 'qwen2.5-coder:1.5b', quant: 'q4_K_M', bytes: 1.0 * GB, quality: 1 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:14b', quant: 'q4_K_M', bytes: 9.0 * GB, quality: 5 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:7b', quant: 'q4_K_M', bytes: 4.7 * GB, quality: 4 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:3b', quant: 'q4_K_M', bytes: 1.9 * GB, quality: 3 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:1.5b', quant: 'q4_K_M', bytes: 1.0 * GB, quality: 2 },
+    { model: 'huihui_ai/qwen2.5-coder-abliterate:0.5b', quant: 'q4_K_M', bytes: 398 * MB, quality: 1 },
   ],
 
-  // Speech. The ladder is the quantization of one model rather than a model
-  // family, and the rungs are an order of magnitude apart — which is why speech
-  // is the capability that fits everywhere.
+  // Speech. Kept because voice was asked for explicitly, and because it is a
+  // different category: whisper.cpp is a speech recogniser with no chat
+  // behaviour and therefore no alignment to remove. Its ladder is the
+  // quantization of one model rather than a model family, and the rungs are an
+  // order of magnitude apart — which is why it fits everywhere.
   speech: [
     { kind: 'whisper', file: 'ggml-large-v3-turbo-q5_0.bin', quant: 'q5_0', bytes: 550 * MB, quality: 5 },
     { kind: 'whisper', file: 'ggml-medium.en-q5_0.bin', quant: 'q5_0', bytes: 466 * MB, quality: 4 },
@@ -94,47 +103,47 @@ const LADDERS = {
 }
 
 /**
- * Every model must be uncensored. This is a standing requirement, not a
- * preference, so it is *checked* rather than assumed — a catalogue entry that
+ * Every chat and coding model must be abliterated. This is a standing
+ * requirement, so it is *checked* rather than assumed — a catalogue entry that
  * slips in a base model should fail the plan loudly rather than quietly install
  * something the brief says not to install.
  *
- * "Uncensored" here means a model fine-tuned without refusal training, which in
- * practice is the `abliterated` / `-abliterated` / `dolphin` / `nous-hermes`
- * families. Ollama's plain `qwen2.5` tags are the aligned originals and are
- * exactly what must not be used.
+ * "Abliterated" means fine-tuned without refusal training, which in practice is
+ * the `abliterat` family. Ollama's plain `qwen2.5` and `qwen2.5-coder` tags are
+ * the aligned originals and are exactly what must not be used.
  */
-const UNCENSORED = /abliterat|dolphin|hermes|nous|openchat|wizard-vicuna|solar/i
+const UNCENSORED = /abliterat|dolphin|hermes|nous|openchat|wizard-vicuna|solar|heretic/i
 
-/** Assert the catalogue obeys the standing requirement. */
+/**
+ * Assert the ladders obey the standing requirement.
+ *
+ * Speech is exempt: whisper.cpp is a speech recogniser with no chat behaviour and
+ * therefore no alignment to remove. Exempting it here rather than filtering it
+ * out at the call site keeps the rule and its exception in one place.
+ */
 function assertUncensored() {
   const offenders = []
   for (const [cap, ladder] of Object.entries(LADDERS)) {
+    if (cap === 'speech') continue
     for (const rung of ladder) {
       const name = rung.model ?? rung.file ?? ''
-      // moondream and the whisper files are not chat models; they have no
-      // alignment to remove, so they are out of scope rather than offenders.
-      if (/moondream|whisper|ggml-/i.test(name)) continue
       if (!UNCENSORED.test(name)) offenders.push(`${cap}: ${name}`)
     }
   }
   if (offenders.length) {
-    throw new Error(
-      `these models are not uncensored and must not be installed: ${offenders.join(', ')}`,
-    )
+    throw new Error(`these models are not abliterated and must not be installed: ${offenders.join(', ')}`)
   }
 }
 
 /** What each capability is for, for the report. */
 const PURPOSE = {
   chat: 'conversation and intent extraction',
-  vision: 'camera and screen',
   code: 'writing and debugging code',
   speech: 'speech to text',
 }
 
 /** Upgrade order when budget is left over. Chat first — it runs on every turn. */
-const UPGRADE_ORDER = ['chat', 'speech', 'vision', 'code']
+const UPGRADE_ORDER = ['chat', 'code', 'speech']
 
 /** The whisper.cpp binary. Cheap enough to always take. */
 const WHISPER_BINARY = { id: 'whisper-binary', kind: 'whisper-binary', bytes: 3 * MB, purpose: 'the whisper.cpp executable' }
@@ -267,7 +276,7 @@ export function plan() {
   //
   // Essentiality, most first. Chat and speech are the assistant; vision and code
   // are what it does with its hands and eyes.
-  const ESSENTIALITY = ['chat', 'speech', 'vision', 'code']
+  const ESSENTIALITY = ['chat', 'speech', 'code']
   if (used > b.models) {
     const dropped = []
     const kept = new Set(Object.keys(LADDERS))
@@ -302,20 +311,30 @@ export function plan() {
     }
   }
 
-  // Pass 2 — climb, best-first, one rung at a time, re-checking the budget each
-  // time so a capability can take two upgrades if it is the only thing left.
-  for (const cap of UPGRADE_ORDER) {
-    const ladder = LADDERS[cap]
-    const idx = ladder.findIndex((r) => r.model === choices[cap].model)
-    for (let i = idx - 1; i >= 0; i--) {
-      const rung = ladder[i]
-      const current = choices[cap]
-      const delta = rung.bytes - current.bytes
+  // Pass 2 — climb, round-robin.
+  //
+  // Not best-first. A best-first walk gives the whole budget to whichever
+  // capability is listed first, and on a 24 GB machine that means a 9 GB chat
+  // model beside a 0.4 GB coder — which is a machine that converses well and
+  // writes code badly. Round-robin takes one rung from each capability in turn,
+  // so they climb together and no single one can starve the rest.
+  //
+  // Loops until nothing fits, so a capability can take two upgrades if it is the
+  // only one left with room.
+  let climbing = true
+  while (climbing) {
+    climbing = false
+    for (const cap of UPGRADE_ORDER) {
+      const ladder = LADDERS[cap]
+      if (!ladder) continue
+      const idx = ladder.findIndex((r) => r.model === choices[cap].model && r.file === choices[cap].file)
+      if (idx <= 0) continue // already at the top
+      const next = ladder[idx - 1]
+      const delta = next.bytes - choices[cap].bytes
       if (used + delta <= b.models) {
-        choices[cap] = { ...rung, floor: false }
+        choices[cap] = { ...next, floor: false }
         used += delta
-      } else {
-        break
+        climbing = true
       }
     }
   }
