@@ -197,7 +197,7 @@ class IconStore {
   /// Diagnostics for the system-monitor widget.
   String get summary =>
       '${(bytes / 1048576).toStringAsFixed(1)}/${(maxBytes / 1048576).toStringAsFixed(0)}MB '
-      '${count} icons ${_hits}h/${_misses}m';
+      '$count icons ${_hits}h/${_misses}m';
 }
 
 class _Entry {

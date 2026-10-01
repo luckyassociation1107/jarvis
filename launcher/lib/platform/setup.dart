@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -122,27 +122,60 @@ class AutoTheme {
 
   static const _fallback = '#00E5FF';
 
+  /// Decode and sample. Returns raw RGBA pixels, or null if anything goes wrong.
+  ///
+  /// Null on failure rather than a throw, because a wallpaper we cannot read is a
+  /// cosmetic problem and a first run that crashes on it is not.
   static Future<List<int>?> _decode(Uint8List bytes) async {
-    // Left as an extension point: swap in ui.instantiateImageCodec and read the
-    // corner samples. Kept null-safe so a codec that throws degrades to the
-    // fallback rather than crashing a first run.
-    return null;
+    try {
+      // 64px on purpose. A wallpaper is 3840px wide and we need the palette, not
+      // the detail — decoding at full size to read a handful of corner pixels is
+      // the same mistake as decoding a 256px icon at native resolution.
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 64, targetHeight: 64);
+      final frame = await codec.getNextFrame();
+      final data = await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      frame.image.dispose();
+      if (data == null) return null;
+      return data.buffer.asUint8List();
+    } catch (e) {
+      debugPrint('wallpaper decode failed: $e');
+      return null;
+    }
   }
 
   /// The colour with the most contrast against near-black.
-  static String _pickAccent(List<int> pixels) {
+  static String _pickAccent(List<int> rgba) {
     var best = _fallback;
     var bestScore = -1.0;
-    for (final px in pixels) {
-      final r = (px >> 16) & 0xff;
-      final g = (px >> 8) & 0xff;
-      final b = px & 0xff;
+
+    // Stride in whole pixels. rawRgba is four bytes per pixel, so stepping by
+    // 4*8 samples every eighth pixel — 1024 samples from a 64x64 decode, which is
+    // far more than a palette needs.
+    for (var i = 0; i + 3 < rgba.length; i += 4 * 8) {
+      final r = rgba[i];
+      final g = rgba[i + 1];
+      final b = rgba[i + 2];
+
       // Relative luminance, the WCAG formula. Cheap, and the right answer for
       // "which of these is visible on black".
       final lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-      if (lum > bestScore) {
-        bestScore = lum;
-        best = '#${(px & 0xffffff).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+      // Skip near-black and near-white. Both are useless as an accent: black is
+      // invisible on the background and white is grey with better self-esteem.
+      if (lum < 0.08 || lum > 0.95) continue;
+
+      // Prefer saturated colours. A desaturated mid-tone has fine contrast but
+      // reads as mud; weighting saturation breaks ties toward the colour that
+      // actually looks like an accent.
+      final max = [r, g, b].reduce((a, b) => a > b ? a : b);
+      final min = [r, g, b].reduce((a, b) => a < b ? a : b);
+      final sat = max == 0 ? 0.0 : (max - min) / max;
+      final score = lum * 0.6 + sat * 0.4;
+
+      if (score > bestScore) {
+        bestScore = score;
+        final hex = ((r << 16) | (g << 8) | b).toRadixString(16).padLeft(6, '0');
+        best = '#${hex.toUpperCase()}';
       }
     }
     return best;
