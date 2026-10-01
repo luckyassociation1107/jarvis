@@ -119,29 +119,21 @@ class _AppTileState extends State<_AppTile> with SingleTickerProviderStateMixin 
 /// Delegates to [AppIcon], which clips, backs, tints and frames the raw icon.
 /// The tile itself no longer knows anything about how icons are presented.
 class _TileIcon extends StatelessWidget {
-  const _TileIcon({
-    required this.entry,
-    required this.hovered,
-    this.selected = false,
-  });
+  const _TileIcon({required this.entry, required this.hovered});
 
   final AppEntry entry;
   final bool hovered;
-  final bool selected;
 
   @override
   Widget build(BuildContext context) {
+    // Hover lifts the wash and the frame. There is no selection state yet —
+    // the workspace handles arrow keys but does not track which tile they
+    // point at, and inventing a parameter for it here would be dead code.
+    // Wiring keyboard selection is the next thing this grid needs.
     return AppIcon(
       entry: entry,
       size: 56,
-      // Selection lifts the wash and the frame; hover is a lighter version of
-      // the same thing, so the grid has one visual language for "this one".
-      intensity: selected ? 1.6 : (hovered ? 1.25 : 1.0),
-      accent: selected
-          ? JarvisPalette.listening
-          : (hovered
-              ? JarvisPalette.interface_.withValues(alpha: 1)
-              : null),
+      intensity: hovered ? 1.25 : 1.0,
     );
   }
 }
