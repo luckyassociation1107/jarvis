@@ -137,7 +137,7 @@ class _TileIcon extends StatelessWidget {
       child: Center(
         child: loadable
             ? Image.file(
-                File(path!),
+                File(path),
                 width: 52,
                 height: 52,
                 fit: BoxFit.contain,

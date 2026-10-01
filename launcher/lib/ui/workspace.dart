@@ -198,7 +198,9 @@ class _WorkspaceState extends State<Workspace> {
                       ),
                     ),
                     if (_loading)
-                      const Center(
+                      // Not const: JarvisType.label is a static method call,
+                      // and a method call is not a constant expression.
+                      Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -304,7 +306,7 @@ class _TopRail extends StatelessWidget {
                 padding: const EdgeInsets.only(left: 40, right: 40, top: 4),
                 child: SearchField(
                   controller: searchController,
-                  focusNode: _focus,
+                  focusNode: focusNode,
                 ),
               ),
             )

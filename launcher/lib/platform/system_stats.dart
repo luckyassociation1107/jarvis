@@ -1,7 +1,9 @@
+import 'dart:ffi';
 import 'dart:io';
 
-// package:ffi re-exports dart:ffi, so this one import is enough for
-// DynamicLibrary, Pointer, Uint64 and the calloc/Utf16 helpers alike.
+// Types come from dart:ffi, which ships with the SDK and cannot fail to
+// resolve. The allocator (calloc), the null pointer constant, and the Utf16
+// converter live in package:ffi, which is a real dependency and can.
 import 'package:ffi/ffi.dart';
 
 /// Real system statistics, read straight out of kernel32.
@@ -18,19 +20,19 @@ abstract final class SystemStats {
       Platform.isWindows ? DynamicLibrary.open('kernel32.dll') : null;
 
   // GlobalMemoryStatusEx(BOOL) — fills a MEMORYSTATUSEX.
-  static late final _globalMemoryStatusEx = _kernel32!
+  static final _globalMemoryStatusEx = _kernel32!
       .lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
           'GlobalMemoryStatusEx');
 
   // GetDiskFreeSpaceExW(LPCWSTR, PULARGE_INTEGER x3)
-  static late final _getDiskFreeSpaceEx = _kernel32!.lookupFunction<
+  static final _getDiskFreeSpaceEx = _kernel32!.lookupFunction<
       Int32 Function(
           Pointer<Utf16>, Pointer<Uint64>, Pointer<Uint64>, Pointer<Uint64>),
       int Function(Pointer<Utf16>, Pointer<Uint64>, Pointer<Uint64>,
           Pointer<Uint64>)>('GetDiskFreeSpaceExW');
 
   // GetSystemTimes(LPFILETIME x3) — three 64-bit values, so Uint64 works.
-  static late final _getSystemTimes = _kernel32!.lookupFunction<
+  static final _getSystemTimes = _kernel32!.lookupFunction<
       Int32 Function(Pointer<Uint64>, Pointer<Uint64>, Pointer<Uint64>),
       int Function(Pointer<Uint64>, Pointer<Uint64>, Pointer<Uint64>)>(
       'GetSystemTimes');
@@ -58,8 +60,8 @@ abstract final class SystemStats {
   /// boots from anywhere else.
   static String get _root {
     final exe = Platform.resolvedExecutable;
-    final sep = exe.indexOf(r'\');
-    return sep <= 0 ? r'C:\' : '${exe.substring(0, sep + 1)}';
+    final sep = exe.indexOf('\\');
+    return sep <= 0 ? 'C:\\' : exe.substring(0, sep + 1);
   }
 
   /// A snapshot of the machine.
@@ -116,7 +118,10 @@ abstract final class SystemStats {
         final idleDelta = idleNow - previous.cpuIdle!;
         final busyDelta = busyNow - previous.cpuBusy!;
         final span = idleDelta + busyDelta;
-        cpuPercent = span <= 0 ? null : (100 - (idleDelta * 100 / span)).clamp(0, 100);
+        // Division promotes to double, so this has to be rounded explicitly:
+        // clamp on a double yields num, which will not assign to an int?.
+        cpuPercent =
+            span <= 0 ? null : ((100 * busyDelta / span).clamp(0, 100)).round();
       }
 
       return SystemSnapshot(

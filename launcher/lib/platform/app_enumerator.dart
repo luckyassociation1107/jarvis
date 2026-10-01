@@ -212,7 +212,7 @@ abstract final class AppEnumerator {
       if (!await resources.exists()) return null;
       await for (final f in resources.list()) {
         if (f is File && f.path.toLowerCase().endsWith('.icns')) {
-          return IconExtractor.decode(f.path, cacheDir: await _cacheDir);
+          return await IconExtractor.decode(f.path, cacheDir: await _cacheDir);
         }
       }
     } catch (_) {

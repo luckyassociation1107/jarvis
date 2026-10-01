@@ -49,10 +49,6 @@ class SearchField extends StatelessWidget {
               cursorColor: JarvisPalette.interface_,
               backgroundCursorColor: JarvisPalette.interface_,
               cursorWidth: 2,
-              // A solid block, not a blinking bar. A blinking bar is a text
-              // editor; a block is a terminal.
-              cursorOpacityAnimator: (visible) =>
-                  AlwaysStoppedAnimation(visible ? 1.0 : 0.0),
               maxLines: 1,
             ),
           ),

@@ -58,13 +58,39 @@ jobs:
       - name: Restore platform overrides
         run: |
           git checkout -- android/app/src/main/AndroidManifest.xml
-          git checkout -- android/app/src/main/kotlin/com/jarvis/launcher/MainActivity.kt
+          git checkout -- android/app/src/main/kotlin/com/jarvis/jarvis_launcher/MainActivity.kt
+
+      # flutter create writes a test/widget_test.dart that pumps `MyApp`,
+      # which this project does not have — it would fail analyze forever.
+      # The repo ships test/workspace_test.dart instead.
+      - name: Drop the generated default test
+        run: rm -f test/widget_test.dart
 
       - name: flutter pub get
         run: flutter pub get
 
+      # The analyzer resolves imports through .dart_tool/package_config.json,
+      # not through pubspec.yaml. If package:ffi is absent from that file, every
+      # DynamicLibrary/Pointer/calloc name comes back undefined no matter what
+      # pubspec says — which is exactly what happened on the first run.
+      - name: Confirm package:ffi is available to the analyzer
+        run: |
+          if grep -q '"name":"ffi"' .dart_tool/package_config.json; then
+            echo "package:ffi is in package_config.json"
+          else
+            echo "::error::package:ffi is MISSING from .dart_tool/package_config.json"
+            echo "--- resolved packages ---"
+            grep -o '"name":"[^"]*"' .dart_tool/package_config.json | sort -u
+            exit 1
+          fi
+
       - name: Analyze
         run: flutter analyze --no-fatal-infos
+
+      # The pure-Dart logic: byte formatting and the fuzzy matcher. No platform
+      # channel and no binding, so these run on the Linux runner.
+      - name: Test
+        run: flutter test
 
       # Informational only. The code was written without a formatter, so this
       # will almost certainly list files; it does not fail the build.
@@ -99,7 +125,7 @@ jobs:
       - name: Restore platform overrides
         run: |
           git checkout -- android/app/src/main/AndroidManifest.xml
-          git checkout -- android/app/src/main/kotlin/com/jarvis/launcher/MainActivity.kt
+          git checkout -- android/app/src/main/kotlin/com/jarvis/jarvis_launcher/MainActivity.kt
 
       # hotkey.cpp is a plain C++ module with no Flutter dependency, so it has
       # to be added to the generated build by hand. Without this line the

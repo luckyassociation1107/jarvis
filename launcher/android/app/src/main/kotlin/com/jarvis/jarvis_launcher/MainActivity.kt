@@ -1,4 +1,4 @@
-package com.jarvis.launcher
+package com.jarvis.jarvis_launcher
 
 import android.content.Intent
 import android.content.pm.PackageManager

@@ -22,13 +22,18 @@ before you install it, because it is short and it will save you an hour.
 # 1. host scaffolding — you generate this, it is not in the repo
 flutter create --project-name jarvis_launcher --platforms=android,windows,macos,linux --org com.jarvis .
 
-# 2. copy the platform files that must not be generated
-copy android\app\src\main\kotlin\com\jarvis\launcher\MainActivity.kt .
-copy android\app\src\main\AndroidManifest.xml .
+# 2. restore the platform files the repo ships, which step 1 just overwrote
+git checkout -- android/app/src/main/AndroidManifest.xml
+git checkout -- android/app/src/main/kotlin/com/jarvis/jarvis_launcher/MainActivity.kt
 
 # 3. build the .exe and the installer
 powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
+
+`--org com.jarvis --project-name jarvis_launcher` puts the Kotlin package at
+`com.jarvis.jarvis_launcher`, which is why `MainActivity.kt` lives there and not
+under `com/jarvis/launcher/`. The method channel `com.jarvis.launcher/apps` is a
+plain string and is unaffected by any of this.
 
 `installer\build.ps1` runs `flutter pub get`, then
 `flutter build windows --release`, then compiles `installer\jarvis.iss` with
@@ -47,6 +52,19 @@ the channel silently never connects and the app list comes back empty.
 the exe comes out as `launcher.exe` while the installer script and the CI
 artifact both expect `jarvis_launcher.exe`. The flag is what keeps those three
 names in agreement.
+
+### Tests
+
+`test/workspace_test.dart` covers the pure-Dart logic — byte formatting and the
+fuzzy matcher. No platform channel, no Flutter binding, so it runs anywhere.
+
+`flutter create` also writes a `test/widget_test.dart` that pumps `MyApp`, which
+this project does not have. Delete it, or the analyzer will fail forever:
+
+```powershell
+Remove-Item test\widget_test.dart
+flutter test
+```
 
 The generated `AndroidManifest.xml` has no `QUERY_ALL_PACKAGES`. Without it,
 Android 11+ returns an empty application list. That is why the file is copied

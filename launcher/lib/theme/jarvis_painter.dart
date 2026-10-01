@@ -97,18 +97,31 @@ class JarvisRule extends StatelessWidget {
     super.key,
     this.color = JarvisPalette.interface_,
     this.glow = true,
+    this.length,
+    this.thickness = 1,
   });
 
   final Color color;
   final bool glow;
 
+  /// Explicit width. Null lets it fill whatever the parent gives it, which is
+  /// what a full-width rule under a heading wants.
+  final double? length;
+
+  /// Height. A rule is 1px by default because anything thicker reads as a
+  /// block rather than a line.
+  final double thickness;
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 1,
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.5),
-        boxShadow: glow ? JarvisGlow.edge(color, strength: 0.6) : null,
+    return SizedBox(
+      width: length,
+      height: thickness,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.5),
+          boxShadow: glow ? JarvisGlow.edge(color, strength: 0.6) : null,
+        ),
       ),
     );
   }

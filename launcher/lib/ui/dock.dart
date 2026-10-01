@@ -117,7 +117,7 @@ class _DockIconState extends State<_DockIcon> with SingleTickerProviderStateMixi
             path.toLowerCase().endsWith('.webp'));
     if (loadable) {
       return Image.file(
-        File(path!),
+        File(path),
         width: 26,
         height: 26,
         fit: BoxFit.contain,
