@@ -17,6 +17,12 @@ import { WebSocket } from 'ws'
 const PORT = 8791
 const MODEL_PORT = 11499
 const MODEL = 'stub-model'
+// The pipeline's real defaults. The stub answers /v1/models with only its own
+// name, so the bridge's slot check reports them all missing — which is correct
+// behaviour and also why the turn still runs: the model name is passed through
+// regardless of what is loaded.
+const CHAT = 'huihui_ai/qwen2.5-abliterate:0.5b'
+const REASON = 'dagbs/qwen2.5-coder-7b-instruct-abliterated'
 
 // --- the stub model server -------------------------------------------------
 let calls = 0
@@ -24,6 +30,10 @@ let sawToolAsk = false
 let sawToolResult = false
 /** The `model` field of every request, in order. Proves the routing. */
 const asked = []
+/** How many times the chat slot has been asked. It gets one chance to fail. */
+let chatHits = 0
+/** Set when the chat slot narrates instead of acting. */
+let sawChatNarrate = false
 const http = createServer((req, res) => {
   if (req.url === '/v1/models') {
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -41,6 +51,8 @@ const http = createServer((req, res) => {
     asked.push(payload.model)
     const askedForTool = (payload.tools ?? []).length > 0
     const hasToolResult = (payload.messages ?? []).some((m) => m.role === 'tool')
+    const isChat = payload.model === CHAT
+    const wantsTool = /screenshot/i.test(lastText(payload.messages))
 
     res.writeHead(200, {
       'content-type': 'text/event-stream',
@@ -49,9 +61,15 @@ const http = createServer((req, res) => {
     })
     const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
 
-    // Turn 2: the model asks for a tool, split across chunks the way real
+    // The chat slot's one chance to fail: narrate a tool call instead of
+    // making it. This is the failure that is invisible — fluent, confident,
+    // and completely inert, with no error anywhere.
+    if (isChat && chatHits++ === 0 && askedForTool) {
+      send({ choices: [{ delta: { content: 'I will now open the browser and search for that. First I will change the theme to match your request, and then I will display the result on your HUD.' } }] })
+      sawChatNarrate = true
+    } else if (wantsTool && !hasToolResult) {
+      // Turn 2: the model asks for a tool, split across chunks the way real
     // servers split it, so the accumulator is exercised.
-    if (askedForTool && !hasToolResult) {
       // Split across two chunks, the way real servers split it, so the
       // accumulator is exercised rather than assumed.
       send({
@@ -74,6 +92,19 @@ const http = createServer((req, res) => {
     res.end()
   })
 })
+/** The last thing the user actually said, so the stub can tell turns apart. */
+const lastText = (messages = []) => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role !== 'user') continue
+    if (typeof m.content === 'string') return m.content
+    if (Array.isArray(m.content)) {
+      return m.content.filter((p) => p?.type === 'text').map((p) => p.text).join(' ')
+    }
+  }
+  return ''
+}
+
 await new Promise((r) => http.listen(MODEL_PORT, r))
 
 // --- the bridge, pointed at the stub ---------------------------------------
@@ -134,7 +165,36 @@ const checks = [
   ['the tool result was fed back to the model', sawToolResult],
   ['the final answer streamed in pieces', text.length > 0],
   ['the answer is the model\'s second turn', Boolean(done?.text.includes('sir'))],
-  ['a tool-shaped question was sent to the reason slot', asked[0] === 'qwen2.5-coder:7b'],
+  ['a tool-shaped question was sent to the reason slot', asked[0] === 'dagbs/qwen2.5-coder-7b-instruct-abliterated'],
+]
+
+// --- phase two: the chat slot narrating instead of acting -------------------
+// Phase one routes to the reason slot, so it never exercises the fast one. This
+// does. It asks a question with no tool words, gets an inert answer, and the
+// net has to catch it before the browser hears a word of it.
+const ws2 = new WebSocket(`ws://localhost:${PORT}`)
+const frames2 = []
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('timed out waiting for frames (phase 2)')), 20000)
+  ws2.on('open', () => ws2.send(JSON.stringify({ type: 'ask', id: 'q2', text: 'good evening' })))
+  ws2.on('message', (raw) => {
+    const f = JSON.parse(raw.toString())
+    frames2.push(f)
+    if (f.type === 'done') { clearTimeout(timer); resolve() }
+    if (f.type === 'error') { clearTimeout(timer); reject(new Error(f.message)) }
+  })
+  ws2.on('error', reject)
+})
+const spoken2 = frames2.filter((f) => f.type === 'text').map((f) => f.delta).join('')
+const done2 = frames2.find((f) => f.type === 'done')
+const asked2 = asked.slice(2) // everything after phase one's two requests
+
+const netChecks = [
+  ['the chat slot narrated instead of acting', sawChatNarrate],
+  ['a tool-free question still went to the fast slot first', asked2[0] === CHAT],
+  ['the turn was retried on the reason slot', asked2[1] === REASON],
+  ['the inert answer never reached the browser', !spoken2.includes('I will now open the browser')],
+  ['a real answer was spoken in its place', done2?.text?.includes('sir') ?? false],
 ]
 
 // Routing is a pure function of the conversation, so it is checked directly
@@ -170,9 +230,18 @@ for (const [name, ok] of routingChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
   if (!ok) routeFailed++
 }
-console.log(`\n  ${checks.length - failed}/${checks.length} loop checks, ${routingChecks.length - routeFailed}/${routingChecks.length} routing checks`)
+let netFailed = 0
+for (const [name, ok] of netChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) netFailed++
+}
+if (netFailed) failed += netFailed
 if (routeFailed) failed += routeFailed
 
+const loopPassed = checks.length - (failed - netFailed - routeFailed)
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net`)
+
 ws.close()
+ws2.close()
 http.close()
 process.exit(failed ? 1 : 0)

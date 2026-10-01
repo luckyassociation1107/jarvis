@@ -20,10 +20,9 @@
  *
  * What is given up by leaving a hosted model, stated plainly: tool use. A
  * frontier model reads a JSON schema and calls a tool correctly almost every
- * time. A 8B model running on a laptop does it perhaps half the time, and a
- * small one mostly narrates what it would do instead. The tools are all here
- * and the loop is correct — the model is the variable. Pick the largest one
- * your machine will hold; that is the whole tuning knob.
+ * time. A small model running on a laptop does it perhaps half the time, and
+ * the smallest mostly narrate what they would do instead. The tools are all
+ * here and the loop is correct — the model is the variable.
  *
  *   node bridge/server.mjs
  */
@@ -47,32 +46,40 @@ const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
  * Every slot is an ordinary model name on the same server. Nothing here needs a
  * router or three processes; Ollama loads and unloads them itself.
  *
- *   chat    the default. Small and fast. Handles conversation.
+ *   chat    the default. Small and fast. Conversation.
  *   vision  reads images. Only this slot can answer "what am I holding".
- *   reason  the large one. Reached for when the answer needs actual thought, or
- *           when a tool has to be called correctly.
+ *   reason  the large one. Anything shaped like a tool call or a technical
+ *           question, because a small model mishandles both.
+ *
+ * All three defaults are ABLITERATED builds — the refusal direction has been
+ * surgically removed from the weights, so they answer without hedging, and
+ * because the ablation is applied to an instruct build they still follow
+ * instructions and still call tools. Roughly 7 GB resident in total.
  *
  * Set JARVIS_MODEL_NAME to pin every slot to one model, which is the right
  * thing to do if you only have one worth running.
  *
- * IMPORTANT — instruct, never base. A base model predicts the next token and
- * has never been taught that a function call is a thing it can emit, so it will
- * describe calling a tool instead of calling one. Ollama's default tags
- * (`qwen2.5:0.5b`, `qwen2.5-coder:7b`) are the instruct builds; the `-base`
- * variants are separate, explicitly-named tags and are the wrong ones here.
- * `qwen2-vl` is the exception — its instruct builds carry the suffix.
+ * IMPORTANT — instruct, never base, and abliterated is not base. A base model
+ * predicts the next token and has never been taught that a function call is a
+ * thing it can emit, so it will describe calling a tool instead of calling one,
+ * and JARVIS will look like he is ignoring everything he can do. "Uncensored"
+ * and "base" get conflated constantly; they are not the same thing. Base means
+ * unaligned and also unteachable — it will not refuse you, and it will not
+ * understand you either. Ollama's default tags are the instruct builds; the
+ * `-base` variants are separate, explicitly-named tags and are the wrong ones
+ * here. `qwen2-vl` is the exception — its instruct builds carry the suffix.
  */
 const SLOTS = {
   chat: {
-    model: process.env.JARVIS_MODEL_CHAT ?? 'qwen2.5:0.5b',
+    model: process.env.JARVIS_MODEL_CHAT ?? 'huihui_ai/qwen2.5-abliterate:0.5b',
     url: process.env.JARVIS_MODEL_CHAT_URL,
   },
   vision: {
-    model: process.env.JARVIS_MODEL_VISION ?? 'qwen2-vl:2b-instruct',
+    model: process.env.JARVIS_MODEL_VISION ?? 'huihui_ai/qwen2.5-vl-abliterated:3b',
     url: process.env.JARVIS_MODEL_VISION_URL,
   },
   reason: {
-    model: process.env.JARVIS_MODEL_REASON ?? 'qwen2.5-coder:7b',
+    model: process.env.JARVIS_MODEL_REASON ?? 'dagbs/qwen2.5-coder-7b-instruct-abliterated',
     url: process.env.JARVIS_MODEL_REASON_URL,
   },
 }
@@ -250,6 +257,12 @@ function lastUserText(messages) {
  * and bounded on purpose. A broad pattern would send every question to the slow
  * model and the pipeline would stop being a pipeline — the whole point of the
  * fast slot is that most questions do not need it.
+ *
+ * The second half is the JARVIS-specific half: the imperative UI and device
+ * commands his own tools answer. These are not general verbs — they are the
+ * vocabulary of twenty-two specific tools, spelled out. It is worth the list,
+ * because a chat slot that is asked to call a tool will not call it, and the
+ * user sees nothing happen.
  */
 const NEEDS_A_TOOL =
   /\b(screenshot|screen ?shot|my phone|phone|tab|browser|camera|look at|watch me|watch this|image|picture|photo|orbit|theme|display|show me|search|google|find|fetch|open|read|summari[sz]e|notifications?|calendar|weather|news|hacker news)\b/i
@@ -264,13 +277,75 @@ const TECHNICAL =
   /\b(code|function|bug|error|stack ?trace|refactor|typescript|javascript|python|java|rust|sql|regex|api|json|schema|compile|build|test|debug|explain how|how does|why does|algorithm|complexity|optimise|optimize|architecture|library|framework|dependency|docker|linux|git)\b/i
 
 /**
+ * The same idea, from the other end: his own interface, named directly.
+ *
+ * This list is not guessed. It is the vocabulary of the twenty-two tools that
+ * actually exist — ui_theme, ui_reactor, ui_orbit, ui_chrome, ui_effect,
+ * ui_screen, ui_reset, display, blade, probe_url, look, watch, and the
+ * chrome_* set — written the way a person would say them out loud.
+ *
+ * The bias is deliberate and it is toward the slow slot. A false positive costs
+ * a second of latency on one answer; a false negative costs the user a JARVIS
+ * who talks confidently and does nothing, with no error anywhere to explain
+ * why. Those are not the same size of mistake, so the list errs wide.
+ */
+const IS_JARVIS_ACTION =
+  /\b((ui_|the )?(theme|reactor|orbit|chrome|effect|screen|blade|display|hud|core|panel)|make it|set (it |the )?|change (it |the )?|turn (it |the )?|dim|brighten|brighter|darker|colour|color|red|blue|green|purple|gold|hide|minimi[sz]e|maximi[sz]e|close the|send|message|call|play|volume|mute|unmute|scroll|swipe|tap|click|type|navigate|go to|take a|record|clip|screenshot)\b/i
+
+/**
+ * The chrome_* and eyes tools, from the user's side of the microphone.
+ *
+ * Built as a list rather than one long alternation: each line is one thing a
+ * person might say, and the next person to touch this can add a line without
+ * re-deriving where the groups close.
+ */
+const IS_DEVICE_QUERY = new RegExp(
+  [
+    '\\b(the )?(browser|tab|tabs|page|console|network|battery|history|bookmark|downloads?)\\b',
+    '\\bmy (screen|phone|desktop|machine|battery)\\b',
+    '\\bon my (screen|phone|machine)\\b',
+    "\\bwhat('s| is) (on|open|showing)\\b",
+    '\\bscroll (to|down|up|back)\\b',
+    '\\bread (this|the) (page|screen|article)\\b',
+    '\\bfind (on|in) the page\\b',
+    '\\bopen (a |an )?(new )?tab\\b',
+    '\\bswitch (to )?(the )?tab\\b',
+    '\\bwhat (version|time|date) is it\\b',
+  ].join('|'),
+  'i',
+)
+
+/**
+ * Phrases a model emits when it is about to act — the tell that it has decided
+ * to call a tool but cannot.
+ *
+ * This is the failure that is invisible. A small model shown a tool schema and
+ * asked to "make it red" will happily explain how one might change the colour,
+ * at length, with total confidence, and JARVIS will simply sit there. No error
+ * is thrown, nothing is logged, and the user concludes the microphone is
+ * broken.
+ *
+ * So the chat slot's first tokens are held back and checked. If it opens by
+ * announcing an action it never takes, and tools were on offer, the turn is
+ * re-run on the reason slot and the first answer is discarded — nothing has
+ * been spoken yet, because nothing is forwarded until the check passes.
+ */
+const NARRATES_INSTEAD =
+  /^\s*(i('ll| will| am going to|'m going to) (now )?(show|open|change|set|take|display|run|search|fetch|look|turn|make|close|send|play|scroll)|let me (show|open|change|set|take|display|run|search|fetch|look|turn|make|close|send|play|scroll|check)|sure,? here('s| is) how|first,? i)/i
+
+/** How many characters to hold back before deciding. The longest opener above
+ *  is "I am going to show", so this leaves plenty of room and costs a few
+ *  milliseconds on a 0.5B. */
+const NARRATION_WINDOW = 48
+
+/**
  * Pick the model for this turn.
  *
  * Decided before anything is streamed, and that ordering is the whole design.
  * Escalating afterwards would mean the browser had already spoken the smaller
  * model's answer, and "I can't do that" followed by doing it is worse than a
  * slightly slow answer. So this is a guess made up front, and it is a guess —
- * the two patterns above are exactly what it guesses on.
+ * the patterns above are exactly what it guesses on.
  *
  * @param {Array<{role: string, content: unknown}>} messages
  * @returns {'chat' | 'vision' | 'reason'}
@@ -282,6 +357,8 @@ export function pickModel(messages) {
   const text = lastUserText(messages)
   if (TECHNICAL.test(text)) return 'reason'
   if (NEEDS_A_TOOL.test(text)) return 'reason'
+  if (IS_JARVIS_ACTION.test(text)) return 'reason'
+  if (IS_DEVICE_QUERY.test(text)) return 'reason'
   return 'chat'
 }
 
@@ -313,7 +390,10 @@ async function streamChat({ messages, tools, signal, onDelta, slot }) {
       temperature: TEMPERATURE,
       stream: true,
     }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(TURN_TIMEOUT_MS)]),
+    // signal is optional, and AbortSignal.any rejects anything that is not one.
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(TURN_TIMEOUT_MS)])
+      : AbortSignal.timeout(TURN_TIMEOUT_MS),
   })
 
   if (!res.ok) {
@@ -335,6 +415,13 @@ async function streamChat({ messages, tools, signal, onDelta, slot }) {
   let text = ''
   /** Tool calls, keyed by stream index — they arrive split across chunks. */
   const calls = new Map()
+  /**
+   * The chat slot's opening tokens, held until it is clear it is answering
+   * rather than announcing. Only armed when tools are on offer: with no tools
+   * there is nothing to narrate, and holding back would be pure latency.
+   */
+  const HOLD = slot === 'chat' && tools.length > 0
+  let held = ''
 
   for (;;) {
     const { done, value } = await reader.read()
@@ -363,7 +450,21 @@ async function streamChat({ messages, tools, signal, onDelta, slot }) {
 
       if (typeof delta.content === 'string' && delta.content) {
         text += delta.content
-        onDelta?.(delta.content)
+        if (HOLD && !calls.size) {
+          held += delta.content
+          // Announced an action it has not taken. Stop reading: the answer is
+          // worthless and the browser has heard none of it.
+          if (NARRATES_INSTEAD.test(held)) {
+            return { text: '', toolCalls: [], narrated: true }
+          }
+          // Enough to tell it is a real answer — release and carry on.
+          if (held.length >= NARRATION_WINDOW) {
+            onDelta?.(held)
+            held = ''
+          }
+        } else {
+          onDelta?.(delta.content)
+        }
       }
 
       for (const tc of delta.tool_calls ?? []) {
@@ -376,12 +477,25 @@ async function streamChat({ messages, tools, signal, onDelta, slot }) {
         if (tc.function?.name) slot.name += tc.function.name
         if (tc.function?.arguments) slot.args += tc.function.arguments
         calls.set(i, slot)
+        if (held) {
+          onDelta?.(held)
+          held = ''
+        }
       }
     }
   }
 
+  // Whatever is still held is an honest answer that simply never got long
+  // enough to pass the window. Without this, a short reply — "Good evening,
+  // sir." — is swallowed whole and JARVIS falls silent.
+  if (held) {
+    onDelta?.(held)
+    held = ''
+  }
+
   return {
     text,
+    narrated: false,
     toolCalls: [...calls.values()]
       .filter((c) => c.name)
       .map((c) => ({ id: c.id, name: c.name, arguments: c.args })),
@@ -436,13 +550,20 @@ export async function runTurn({
   let slot = pickModel(messages)
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const { text, toolCalls } = await streamChat({
-      messages,
-      tools,
-      signal,
-      onDelta,
-      slot,
-    })
+    const first = await streamChat({ messages, tools, signal, onDelta, slot })
+
+    // The fast slot announced an action it never took. Nothing has been spoken
+    // yet, so this costs the user a pause and nothing else — and it turns a
+    // silent, total failure into a slow, correct answer.
+    if (first.narrated && slot === 'chat') {
+      slot = 'reason'
+      const retry = await streamChat({ messages, tools, signal, onDelta, slot })
+      if (retry.narrated) return '' // it will not act; better silence than fiction
+      if (!retry.toolCalls.length) return retry.text
+      Object.assign(first, retry)
+    }
+
+    const { text, toolCalls } = first
 
     // No tool call means the model is done, whatever else it said.
     if (!toolCalls.length) return text

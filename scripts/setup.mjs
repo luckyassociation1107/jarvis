@@ -53,9 +53,9 @@ const MODEL_URL = (
 ).replace(/\/+$/, '')
 
 const PIPELINE = [
-  ['chat', process.env.JARVIS_MODEL_CHAT ?? 'qwen2.5:0.5b', 'conversation'],
-  ['vision', process.env.JARVIS_MODEL_VISION ?? 'qwen2-vl:2b-instruct', 'images'],
-  ['reason', process.env.JARVIS_MODEL_REASON ?? 'qwen2.5-coder:7b', 'tools and technical questions'],
+  ['chat', process.env.JARVIS_MODEL_CHAT ?? 'huihui_ai/qwen2.5-abliterate:0.5b', 'conversation'],
+  ['vision', process.env.JARVIS_MODEL_VISION ?? 'huihui_ai/qwen2.5-vl-abliterated:3b', 'images'],
+  ['reason', process.env.JARVIS_MODEL_REASON ?? 'dagbs/qwen2.5-coder-7b-instruct-abliterated', 'tools and technical questions'],
 ]
 
 let reachable = false
@@ -98,9 +98,9 @@ if (!reachable) {
   }
   line(
     info,
-    'If JARVIS stops using his tools, the fast chat slot is usually why — see',
+    'All three defaults are abliterated — uncensored, and still able to call',
   )
-  line(info, 'the pipeline note in the README.')
+  line(info, 'tools. See the pipeline note in the README.')
 }
 
 // --- MCP servers ---------------------------------------------------------

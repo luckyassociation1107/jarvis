@@ -128,9 +128,9 @@ WebSocket (plus a few HTTP endpoints) on `ws://localhost:8787`.
 prints every slot and checks each is actually loaded, e.g.
 
 ```
-[jarvis]   chat    qwen2.5:0.5b           @ http://localhost:11434/v1
-[jarvis]   vision  qwen2-vl:2b-instruct   @ http://localhost:11434/v1
-[jarvis]   reason  qwen2.5-coder:7b       @ http://localhost:11434/v1
+[jarvis]   chat    huihui_ai/qwen2.5-abliterate:0.5b            @ http://localhost:11434/v1
+[jarvis]   vision  huihui_ai/qwen2.5-vl-abliterated:3b          @ http://localhost:11434/v1
+[jarvis]   reason  dagbs/qwen2.5-coder-7b-instruct-abliterated  @ http://localhost:11434/v1
 ```
 
 A missing model is named at boot, with the `ollama run` line that fixes it,
@@ -253,7 +253,11 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | Variable | Default | Effect |
 |---|---|---|
 | `JARVIS_MODEL_BASE_URL` | `http://localhost:11434/v1` | Where the model server listens |
-| `JARVIS_MODEL_NAME` | `llama3.1` | Which model to ask for |
+| `JARVIS_MODEL_CHAT` | `huihui_ai/qwen2.5-abliterate:0.5b` | The fast slot |
+| `JARVIS_MODEL_VISION` | `huihui_ai/qwen2.5-vl-abliterated:3b` | The slot that reads images |
+| `JARVIS_MODEL_REASON` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | The slot that calls tools |
+| `JARVIS_MODEL_*_URL` | inherits the base URL | Move one slot to another machine |
+| `JARVIS_MODEL_NAME` | — | Pins every slot to one model |
 | `JARVIS_MODEL_API_KEY` | — | Only for servers that insist on a non-empty header |
 | `JARVIS_MODEL_TEMPERATURE` | `0.6` | Sampling temperature |
 | `JARVIS_MODEL_MAX_TURNS` | `8` | Tool-calling rounds per question |
@@ -280,39 +284,53 @@ picks per question.
 
 | Slot | Default | Reached for | RAM (Q4_K_M) |
 |---|---|---|---|
-| `chat` | `qwen2.5:0.5b` | Everything else. Conversation. | ~0.4 GB |
-| `vision` | `qwen2-vl:2b-instruct` | Any turn with an image in it. | ~1.6 GB |
-| `reason` | `qwen2.5-coder:7b` | Tool-shaped or technical questions. | ~4.7 GB |
+| `chat` | `huihui_ai/qwen2.5-abliterate:0.5b` | Everything else. Conversation. | ~0.4 GB |
+| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | Any turn with an image in it. | ~2.0 GB |
+| `reason` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | Tool-shaped or technical questions. | ~4.7 GB |
 
-Roughly 6.7 GB resident, which leaves a 16 GB machine comfortable. All three
+Roughly 7.1 GB resident, which leaves a 16 GB machine comfortable. All three
 usually share one Ollama; `JARVIS_MODEL_*_URL` moves one of them elsewhere if
 you need to.
+
+**All three are abliterated, and none of them are base models.** Those get
+conflated, so: *base* means a model that was never taught to follow
+instructions — it will not refuse you, and it will not understand you either,
+and it cannot emit a function call, so JARVIS would silently stop using every
+tool he has. *Abliterated* means an instruct build with the internal refusal
+direction surgically removed, so it answers without hedging and still calls
+tools. That is what uncensored should mean here, and it is what these are.
 
 The choice is made **before** anything is streamed, which is the whole design.
 Escalating afterwards would mean the browser had already spoken the smaller
 model's answer, and *"I can't do that"* followed by doing it is worse than a
-slightly slow answer. So it is a guess, and it is a guess on two things: an
-image in the conversation means vision, and a question that names a tool or
-reads as technical means reason. Everything else is the fast slot.
+slightly slow answer. So it is a guess made up front, on three signals: an image
+in the conversation means vision; a question that names a tool or reads as
+technical means reason; everything else is the fast slot. The tool vocabulary is
+spelled out from the twenty-two tools that actually exist, and it errs wide on
+purpose — a false positive costs a second of latency, a false negative costs a
+JARVIS who talks confidently and does nothing.
 
 The slot is re-evaluated after every tool result, because a camera frame
 arriving as a result makes it a vision question — and only a vision model can
 read a photograph. A text model shown one describes the prompt instead, with
 total confidence.
 
-**⚠️ Instruct, never base.** A base model predicts the next token and has never
-been taught that a function call is something it can emit, so it *describes*
-calling a tool instead of calling one. JARVIS will look like he is ignoring
-everything he can do. Ollama's default tags are the instruct builds —
-`qwen2.5:0.5b`, `qwen2.5-coder:7b` — and the `-base` variants are separate,
-explicitly-named tags you have to go looking for. `qwen2-vl` is the exception:
-its instruct builds carry the suffix.
+**And there is a net under the guess.** A small model asked to call a tool it
+cannot call will often narrate instead — *"I will now open the browser and
+search for that…"* — fluently, confidently, and with nothing whatsoever
+happening. That failure throws no error and logs nothing, so the chat slot's
+first few tokens are held back and checked. If it opens by announcing an action
+it never takes, the turn is re-run on the reason slot and the first answer is
+discarded. Nothing has been spoken yet, so the cost is a pause; the benefit is
+that a silent, total failure becomes a slow, correct answer. The smoke test
+covers it, because it is exactly the kind of thing that rots quietly.
 
 **On the 0.5B.** It is the fast slot and it is also the weak link. It will
-handle *"what's the weather"* and *"make it red"*; it will not reliably choose
-between twenty-two tools. If JARVIS stops using his tools, set
-`JARVIS_MODEL_CHAT=qwen2.5-coder:7b` and accept that every answer now costs a
-7B's latency. That one line is the trade, and it is yours to make.
+handle *"what's the weather"* and *"tell me a joke"*; it will not reliably
+choose between twenty-two tools. If JARVIS stops using his tools, set
+`JARVIS_MODEL_CHAT=qwen2.5-coder-7b-instruct-abliterated` and accept that every
+answer now costs a 7B's latency. That one line is the trade, and it is yours to
+make.
 
 ### Adding a model server
 
