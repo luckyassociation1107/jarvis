@@ -25,6 +25,7 @@ import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { plan as autopilotPlan, install as autopilotInstall, planSummary } from './autopilot.mjs'
+import { check as updateCheck, apply as updateApply, banner as updateBanner, currentVersion } from './updater.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -726,6 +727,31 @@ const handleRequest = async (req, res) => {
         log: result.log,
       }),
     )
+  }
+
+  // Updates. GET reports; POST applies. Separate for the same reason as
+  // autopilot: applying exits this process, so it must never be a side effect
+  // of something that merely looked.
+  if (req.method === 'GET' && req.url === '/update') {
+    const r = await updateCheck()
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        current: r.current,
+        latest: r.latest,
+        available: r.available,
+        error: r.error ?? null,
+        assets: r.release ? r.release.assets.map((a) => ({ name: a.name, size: a.size })) : [],
+      }),
+    )
+  }
+
+  if (req.method === 'POST' && req.url === '/update/apply') {
+    // Exits the process on success on Windows. The client should treat a closed
+    // connection as the expected outcome, not a failure.
+    const r = await updateApply({ auto: true })
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify(r))
   }
 
   if (req.method === 'GET' && req.url === '/health') {

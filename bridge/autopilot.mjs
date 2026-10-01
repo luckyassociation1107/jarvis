@@ -93,6 +93,38 @@ const LADDERS = {
   ],
 }
 
+/**
+ * Every model must be uncensored. This is a standing requirement, not a
+ * preference, so it is *checked* rather than assumed — a catalogue entry that
+ * slips in a base model should fail the plan loudly rather than quietly install
+ * something the brief says not to install.
+ *
+ * "Uncensored" here means a model fine-tuned without refusal training, which in
+ * practice is the `abliterated` / `-abliterated` / `dolphin` / `nous-hermes`
+ * families. Ollama's plain `qwen2.5` tags are the aligned originals and are
+ * exactly what must not be used.
+ */
+const UNCENSORED = /abliterat|dolphin|hermes|nous|openchat|wizard-vicuna|solar/i
+
+/** Assert the catalogue obeys the standing requirement. */
+function assertUncensored() {
+  const offenders = []
+  for (const [cap, ladder] of Object.entries(LADDERS)) {
+    for (const rung of ladder) {
+      const name = rung.model ?? rung.file ?? ''
+      // moondream and the whisper files are not chat models; they have no
+      // alignment to remove, so they are out of scope rather than offenders.
+      if (/moondream|whisper|ggml-/i.test(name)) continue
+      if (!UNCENSORED.test(name)) offenders.push(`${cap}: ${name}`)
+    }
+  }
+  if (offenders.length) {
+    throw new Error(
+      `these models are not uncensored and must not be installed: ${offenders.join(', ')}`,
+    )
+  }
+}
+
 /** What each capability is for, for the report. */
 const PURPOSE = {
   chat: 'conversation and intent extraction',
@@ -210,6 +242,7 @@ export function budget() {
  * @returns {{choices:object, budget:object, usedBytes:number, notes:string[]}}
  */
 export function plan() {
+  assertUncensored()
   const b = budget()
   const notes = []
   const choices = {}
