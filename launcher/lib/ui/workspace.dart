@@ -49,6 +49,12 @@ class _WorkspaceState extends State<Workspace> {
 
   List<ScoredApp> _results = const [];
   List<AppEntry> _all = const [];
+
+  /// Which result the keyboard points at. -1 means "nothing yet", which is the
+  /// honest default: highlighting the first app before the user has touched
+  /// anything is a guess dressed up as a feature.
+  int _selected = -1;
+  final _gridScroll = ScrollController();
   int _appCount = 0;
   bool _loading = true;
   bool _searching = false;
@@ -84,7 +90,14 @@ class _WorkspaceState extends State<Workspace> {
     }
   }
 
-  void _onQuery() => setState(() => _results = _index.search(_search.text));
+  void _onQuery() {
+    setState(() {
+      _results = _index.search(_search.text);
+      // A new result list invalidates the old index. Keeping it would point at
+      // whatever now occupies that slot, which is how you launch the wrong app.
+      _selected = -1;
+    });
+  }
 
   void _launch(AppEntry entry) async {
     try {
@@ -145,7 +158,64 @@ class _WorkspaceState extends State<Workspace> {
       JarvisWindow.setFullScreen();
       return KeyEventResult.handled;
     }
+
+    // Arrow keys move the selection, Enter launches it. This is what turns the
+    // grid from a picture into something you can drive without the mouse, which
+    // is the difference between a launcher and a desktop wallpaper.
+    if (_results.isEmpty) return KeyEventResult.ignored;
+    final columns = _columnsFor(context);
+
+    final delta = switch (key) {
+      LogicalKeyboardKey.arrowLeft => -1,
+      LogicalKeyboardKey.arrowRight => 1,
+      LogicalKeyboardKey.arrowUp => -columns,
+      LogicalKeyboardKey.arrowDown => columns,
+      _ => 0,
+    };
+    if (delta != 0) {
+      final next = (_selected + delta).clamp(0, _results.length - 1);
+      // Wrapping is deliberately absent. Left from the first item landing on
+      // the last one is disorienting in a 6-wide grid; clamping is predictable.
+      if (next != _selected) {
+        setState(() => _selected = next);
+        _scrollSelectionIntoView();
+      }
+      return KeyEventResult.handled;
+    }
+
+    if ((key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) &&
+        _selected >= 0 &&
+        _selected < _results.length) {
+      _launch(_results[_selected].entry);
+      return KeyEventResult.handled;
+    }
     return KeyEventResult.ignored;
+  }
+
+  /// Keeps the selected tile visible. Without this a keyboard walk down a long
+  /// list silently moves the highlight off-screen.
+  void _scrollSelectionIntoView() {
+    if (_selected < 0 || !_gridScroll.hasClients) return;
+    const rowHeight = 104.0 + 12.0; // mainAxisExtent + mainAxisSpacing
+    final row = _selected ~/ _columnsFor(context);
+    final target = row * rowHeight;
+    final viewport = _gridScroll.position.viewportDimension;
+    final offset = _gridScroll.offset;
+    if (target < offset || target + rowHeight > offset + viewport) {
+      _gridScroll.animateTo(
+        (target - viewport / 2).clamp(0.0, _gridScroll.position.maxScrollExtent),
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  /// Columns, derived from width so the arrow keys match what is on screen.
+  int _columnsFor(BuildContext context) {
+    final w = MediaQuery.sizeOf(context).width;
+    if (w < 700) return 3;
+    if (w < 1100) return 5;
+    return 7;
   }
 
   @override
@@ -153,6 +223,7 @@ class _WorkspaceState extends State<Workspace> {
     _search.removeListener(_onQuery);
     _search.dispose();
     _focus.dispose();
+    _gridScroll.dispose();
     _index.dispose();
     super.dispose();
   }
@@ -219,6 +290,8 @@ class _WorkspaceState extends State<Workspace> {
                     else
                       AppGrid(
                         apps: _results,
+                        selected: _selected,
+                        scrollController: _gridScroll,
                         columns: 7,
                         onLaunch: _launch,
                       ),

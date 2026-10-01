@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 
 import '../models/app_entry.dart';
@@ -23,17 +22,28 @@ class AppGrid extends StatelessWidget {
     required this.apps,
     required this.onLaunch,
     this.columns = 6,
+    this.selected = -1,
+    required this.scrollController,
   });
 
   final List<ScoredApp> apps;
   final void Function(AppEntry entry) onLaunch;
   final int columns;
 
+  /// Which tile the keyboard points at, or -1 for none. Owned by the workspace,
+  /// not the grid, because the search field and the grid must agree on it.
+  final int selected;
+
+  /// So a keyboard-driven selection scrolls into view instead of vanishing
+  /// below the fold.
+  final ScrollController scrollController;
+
   @override
   Widget build(BuildContext context) {
     if (apps.isEmpty) return const _EmptyGrid();
 
     return GridView.builder(
+      controller: scrollController,
       padding: const EdgeInsets.fromLTRB(40, 8, 40, 32),
       // Never scrollable horizontally: a desktop that scrolls sideways is a
       // phone, and the phone already has one.
@@ -51,6 +61,7 @@ class AppGrid extends StatelessWidget {
         entry: apps[i].entry,
         ranges: apps[i].ranges,
         onLaunch: onLaunch,
+        selected: i == selected,
       ),
     );
   }
@@ -117,23 +128,31 @@ class _AppTileState extends State<_AppTile> with SingleTickerProviderStateMixin 
 /// The icon, wrapped so it belongs to this interface.
 ///
 /// Delegates to [AppIcon], which clips, backs, tints and frames the raw icon.
-/// The tile itself no longer knows anything about how icons are presented.
+/// The tile no longer knows anything about how icons are presented — that is the
+/// skin's job, and the skin reaches it through [IconStyleScope].
 class _TileIcon extends StatelessWidget {
-  const _TileIcon({required this.entry, required this.hovered});
+  const _TileIcon({
+    required this.entry,
+    required this.hovered,
+    this.selected = false,
+  });
 
   final AppEntry entry;
   final bool hovered;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    // Hover lifts the wash and the frame. There is no selection state yet —
-    // the workspace handles arrow keys but does not track which tile they
-    // point at, and inventing a parameter for it here would be dead code.
-    // Wiring keyboard selection is the next thing this grid needs.
+    // Three states, one visual language: idle, hovered, keyboard-selected.
+    // Selection is the strongest because it is the state whose cause the user
+    // cannot see — they pressed a key, so the response has to be unmistakable.
     return AppIcon(
       entry: entry,
       size: 56,
-      intensity: hovered ? 1.25 : 1.0,
+      intensity: selected ? 1.8 : (hovered ? 1.25 : 1.0),
+      accent: selected
+          ? JarvisPalette.listening
+          : (hovered ? JarvisPalette.interface_ : null),
     );
   }
 }

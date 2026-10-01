@@ -206,10 +206,18 @@ boundaries, so `vs` finds *Visual Studio* before *Svr*.
 | | |
 |---|---|
 | `Alt+Space` | summon / dismiss the workspace |
-| `↑` `↓` | move through the grid |
-| `Enter` | launch |
+| `↑` `↓` `←` `→` | move the selection through the grid |
+| `Enter` | launch the selected app |
 | `/` or type | filter |
 | `Esc` | clear the filter |
+| `F11` | toggle full-screen |
+
+Selection starts at nothing. Highlighting the first app before you have touched
+anything is a guess dressed up as a feature, so the highlight only appears once
+you actually move. Arrow keys clamp rather than wrap — left from the first item
+landing on the last one is disorienting in a seven-wide grid — and the selection
+scrolls itself into view, because a keyboard walk that silently moves the
+highlight off-screen is worse than no keyboard at all.
 
 `JARVIS_WORKSPACE_WIDTH` / `JARVIS_WORKSPACE_HEIGHT` override the window size.
 

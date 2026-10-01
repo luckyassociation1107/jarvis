@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import '../../skins/skin.dart';
@@ -22,17 +24,36 @@ class SkinWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     return Opacity(
       opacity: spec.opacity.clamp(0.0, 1.0),
-      child: Container(
-        decoration: BoxDecoration(
-          color: JarvisPalette.surface.withValues(alpha: 0.72),
-          border: Border.all(color: JarvisPalette.interface_.withValues(alpha: 0.28)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (spec.showTitle) _Title(text: spec.title ?? _defaultTitle(spec.kind)),
-            Expanded(child: _body()),
-          ],
+      // Frosted glass. The blur samples whatever is behind the panel — the
+      // reactor, the grid, the scanlines — which is what separates a HUD panel
+      // from a rectangle with a border. A translucent fill on its own reads as
+      // a washed-out box; blurring what is behind it reads as glass.
+      //
+      // ClipRRect first, or the blur would bleed past the rounded corners and
+      // square off the whole panel.
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: Container(
+            decoration: BoxDecoration(
+              // A slightly lower alpha than before: the blur is now doing the
+              // work of separating panel from background, so the fill only has
+              // to tint it.
+              color: JarvisPalette.surface.withValues(alpha: 0.55),
+              border: Border.all(
+                color: JarvisPalette.interface_.withValues(alpha: 0.30),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (spec.showTitle)
+                  _Title(text: spec.title ?? _defaultTitle(spec.kind)),
+                Expanded(child: _body()),
+              ],
+            ),
+          ),
         ),
       ),
     );
