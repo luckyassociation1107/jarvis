@@ -1,0 +1,33 @@
+name: jarvis_launcher
+description: A JARVIS-themed quick launcher for Android, Windows, macOS and Linux.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Pure-Dart filesystem enumeration needs nothing extra. These two are the
+  # only third-party packages, and both are chosen because they are stable and
+  # do their one job:
+  #   path_provider — where to cache the app index
+  #   window_manager — frameless, full-screen, correctly-placed workspace
+  path_provider: ^2.1.4
+  window_manager: ^0.4.3
+  # For the kernel32 system-stat calls. dart:ffi is in the SDK; this package
+  # supplies calloc and the Utf16 helpers on top of it.
+  ffi: ^2.1.0
+  # A monospace face that exists on all four targets. Not bundled: bundling a
+  # font means a binary asset and a pubspec entry that must match exactly, and
+  # this is the one part of the theme that degrades gracefully without it.
+  # Add google_fonts here if you want the real thing.
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

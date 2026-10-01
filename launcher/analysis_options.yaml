@@ -1,0 +1,13 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # The platform layer is full of `dart:io` and `Platform.isX` branches that
+    # only compile on some targets. Being strict here would mean wrapping every
+    # one of them in ignore comments, which hides the real mistakes.
+    unused_import: warning
+
+linter:
+  rules:
+    - prefer_const_constructors
+    - prefer_final_locals

@@ -24,6 +24,34 @@ exactly the same way, and JARVIS imposes no restrictions of its own.
 
 ---
 
+## Two front-ends, one brain
+
+This repo holds two interfaces to the same local model:
+
+```
+src/ + bridge/ + index.html     the browser HUD  — voice, holographic face
+launcher/                       the desktop workspace — Flutter, jarvis.exe
+```
+
+`launcher/` is a full-screen Flutter desktop app: an application launcher, a
+Rainmeter-style skin engine with live CPU/RAM/disk readouts, and a panel for
+local agent chat. It builds to a single installable `jarvis.exe`.
+
+It is a separate build with its own dependencies — nothing in `launcher/` needs
+Node, and nothing in `src/` needs Flutter. Build whichever one you want:
+
+```powershell
+# desktop workspace
+cd launcher
+flutter create --platforms=windows --org com.jarvis .
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```
+
+See [`launcher/README.md`](launcher/README.md) for the skin format, the widget
+list, and what the desktop app deliberately does not do.
+
+---
+
 ## Requirements
 
 **In one line:** a local model, plus two free things every computer can have —

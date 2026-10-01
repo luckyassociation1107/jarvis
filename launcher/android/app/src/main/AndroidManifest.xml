@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Android manifest.
+
+  QUERY_ALL_PACKAGES is the permission that makes app enumeration possible at
+  all on API 30+, and it is the one thing on this platform that will stop the
+  launcher working if it is missing. Google Play restricts it to apps that
+  genuinely need it — a launcher is the canonical case, but a Play release will
+  need a declaration. Sideloading needs nothing.
+
+  The ASSIST intent is what lets JARVIS be summoned by the gesture or the
+  long-press-home on most Android builds, which is the closest thing Android
+  has to a global hotkey.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:label="JARVIS Launcher"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Summoned by the assistant gesture. -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Flutter's embedding reads this to find the plugin registrant. -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>
