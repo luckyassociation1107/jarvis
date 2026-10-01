@@ -73,14 +73,19 @@ jobs:
       # not through pubspec.yaml. If package:ffi is absent from that file, every
       # DynamicLibrary/Pointer/calloc name comes back undefined no matter what
       # pubspec says — which is exactly what happened on the first run.
+      # The analyzer resolves imports through .dart_tool/package_config.json,
+      # not through pubspec.yaml. Note the \s* in the pattern: pub writes
+      # pretty-printed JSON, so it is `"name": "ffi"` with a space. A pattern
+      # without it matches nothing and reports a false failure.
       - name: Confirm package:ffi is available to the analyzer
         run: |
-          if grep -q '"name":"ffi"' .dart_tool/package_config.json; then
-            echo "package:ffi is in package_config.json"
+          ls -la .dart_tool/package_config.json
+          if grep -qE '"name":\s*"ffi"' .dart_tool/package_config.json; then
+            echo "package:ffi IS available to the analyzer"
           else
-            echo "::error::package:ffi is MISSING from .dart_tool/package_config.json"
-            echo "--- resolved packages ---"
-            grep -o '"name":"[^"]*"' .dart_tool/package_config.json | sort -u
+            echo "::error::package:ffi is NOT in .dart_tool/package_config.json"
+            echo "--- every package the analyzer can see ---"
+            grep -oE '"name":\s*"[^"]*"' .dart_tool/package_config.json | sort -u
             exit 1
           fi
 
