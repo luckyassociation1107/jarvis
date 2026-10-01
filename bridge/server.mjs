@@ -25,7 +25,7 @@ import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { plan as autopilotPlan, install as autopilotInstall, planSummary } from './autopilot.mjs'
-import { check as updateCheck, apply as updateApply, banner as updateBanner, currentVersion } from './updater.mjs'
+import { check as updateCheck, apply as updateApply, banner as updateBanner } from './updater.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -755,6 +755,10 @@ const handleRequest = async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/health') {
+    // The update line goes in health so one poll tells you everything, including
+    // whether a restart is warranted. It is a separate endpoint from /update
+    // because reporting is free and applying is not.
+    const updateLine = await updateBanner().catch(() => 'update: unknown')
     // The browser reads this at boot to know the bridge is alive, and the
     // diagnostics panel reads it to say why it is not. Speech needs no flag
     // any more — it runs on the browser's own recogniser and voice, on the

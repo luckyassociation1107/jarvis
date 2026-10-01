@@ -146,7 +146,7 @@ const PURPOSE = {
 const UPGRADE_ORDER = ['chat', 'code', 'speech']
 
 /** The whisper.cpp binary. Cheap enough to always take. */
-const WHISPER_BINARY = { id: 'whisper-binary', kind: 'whisper-binary', bytes: 3 * MB, purpose: 'the whisper.cpp executable' }
+const WHISPER_BINARY = { id: 'whisper-binary', kind: 'whisper-binary', bytes: 3 * MB }
 
 /**
  * Total RAM.
@@ -376,6 +376,11 @@ export async function install(opts = {}) {
 
   await mkdir(dir, { recursive: true })
 
+  // The whisper binary first. plan() charges its 3 MB against the budget, so
+  // install() has to actually spend it — otherwise the budget counts a download
+  // that never happens and the speech capability is left without its executable.
+  log.push(await installWhisperBinary(dir))
+
   for (const [cap, rung] of Object.entries(p.choices)) {
     if (rung.kind === 'whisper') {
       onStep({ phase: 'whisper', cap, file: rung.file })
@@ -394,6 +399,57 @@ export async function install(opts = {}) {
   }
 
   return { log, plan: p, installed: log.filter((l) => l.ok) }
+}
+
+/**
+ * Fetch the whisper.cpp binary.
+ *
+ * Per-platform, because a Windows exe is not a Linux binary. Where the project
+ * publishes no prebuilt for a platform this says so explicitly, with the build
+ * command — a failed install that looks like a successful one is worse than a
+ * loud failure.
+ */
+async function installWhisperBinary(dir) {
+  const id = 'whisper-binary'
+  const dest = join(dir, 'whisper-cli')
+
+  const urls = {
+    win32: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-x64.zip',
+    linux: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-Linux.zip',
+    darwin: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-bin-Darwin.zip',
+  }
+  const url = urls[process.platform]
+
+  if (!url) {
+    return {
+      id,
+      ok: false,
+      error:
+        `no prebuilt whisper.cpp binary for ${process.platform} — build it from source: ` +
+        'git clone https://github.com/ggerganov/whisper.cpp && cmake -B build && cmake --build build',
+    }
+  }
+
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const buf = Buffer.from(await res.arrayBuffer())
+    const { writeFile } = await import('node:fs/promises')
+    // The project publishes a zip. Unpacking needs unzip, which is not on PATH on
+    // Windows by default, so the note says what to do rather than shelling out to
+    // something that will fail.
+    const path = `${dest}.zip`
+    await writeFile(path, buf)
+    return {
+      id,
+      ok: true,
+      path,
+      bytes: buf.length,
+      note: `unzip ${path}, then set JARVIS_WHISPER_BIN to the extracted binary`,
+    }
+  } catch (e) {
+    return { id, ok: false, error: String(e.message ?? e) }
+  }
 }
 
 async function downloadWhisperModel(file, dir) {
