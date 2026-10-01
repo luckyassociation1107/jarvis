@@ -1,8 +1,8 @@
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import '../models/app_entry.dart';
+import 'app_icon.dart';
 import '../services/app_index.dart';
 import '../services/fuzzy.dart';
 import '../theme/jarvis_theme.dart';
@@ -114,63 +114,34 @@ class _AppTileState extends State<_AppTile> with SingleTickerProviderStateMixin 
   }
 }
 
-/// The icon, 56px.
+/// The icon, wrapped so it belongs to this interface.
+///
+/// Delegates to [AppIcon], which clips, backs, tints and frames the raw icon.
+/// The tile itself no longer knows anything about how icons are presented.
 class _TileIcon extends StatelessWidget {
-  const _TileIcon({required this.entry, required this.hovered});
+  const _TileIcon({
+    required this.entry,
+    required this.hovered,
+    this.selected = false,
+  });
 
   final AppEntry entry;
   final bool hovered;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    final path = entry.iconPath;
-    final loadable = path != null &&
-        path.isNotEmpty &&
-        (path.toLowerCase().endsWith('.png') ||
-            path.toLowerCase().endsWith('.jpg') ||
-            path.toLowerCase().endsWith('.jpeg') ||
-            path.toLowerCase().endsWith('.webp'));
-
-    return SizedBox(
-      width: 56,
-      height: 56,
-      child: Center(
-        child: loadable
-            ? Image.file(
-                File(path),
-                width: 52,
-                height: 52,
-                fit: BoxFit.contain,
-                // An icon that fails to load must not take the tile with it.
-                // The fallback is the monogram, same as everywhere else.
-                errorBuilder: (_, __, ___) => _monogram(),
-              )
-            : _monogram(),
-      ),
-    );
-  }
-
-  Widget _monogram() {
-    final trimmed = entry.name.trim();
-    final initial = trimmed.isEmpty ? '?' : trimmed.substring(0, 1).toUpperCase();
-    return Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: JarvisPalette.surfaceHigh,
-        border: Border.all(
-          color: JarvisPalette.interface_.withValues(alpha: hovered ? 0.9 : 0.45),
-        ),
-        boxShadow: JarvisGlow.edge(JarvisPalette.interface_, strength: 0.5),
-      ),
-      child: Center(
-        child: Text(
-          initial,
-          style: JarvisType.readout(JarvisPalette.interface_, size: 20).copyWith(
-            shadows: JarvisGlow.text(JarvisPalette.interface_),
-          ),
-        ),
-      ),
+    return AppIcon(
+      entry: entry,
+      size: 56,
+      // Selection lifts the wash and the frame; hover is a lighter version of
+      // the same thing, so the grid has one visual language for "this one".
+      intensity: selected ? 1.6 : (hovered ? 1.25 : 1.0),
+      accent: selected
+          ? JarvisPalette.listening
+          : (hovered
+              ? JarvisPalette.interface_.withValues(alpha: 1)
+              : null),
     );
   }
 }

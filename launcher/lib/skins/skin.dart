@@ -19,6 +19,8 @@ class Skin {
     required this.description,
     required this.widgets,
     this.accent,
+    this.iconShape = 'chamfer',
+    this.iconAccent,
   });
 
   final String id;
@@ -30,12 +32,23 @@ class Skin {
   /// Overrides the interface cyan for this skin. Null means the default.
   final String? accent;
 
+  /// How every application icon is clipped: square, chamfer, hexagon, shield.
+  ///
+  /// A skin that changes the widgets but leaves the icons framed identically is
+  /// a skin that only half works — the grid is the largest thing on screen.
+  final String iconShape;
+
+  /// Per-skin accent for the icon frames. Falls back to [accent].
+  final String? iconAccent;
+
   static Skin fromJson(Map<String, dynamic> json) => Skin(
         id: json['id'] as String,
         name: json['name'] as String,
         author: json['author'] as String? ?? 'unknown',
         description: json['description'] as String? ?? '',
         accent: json['accent'] as String?,
+        iconShape: json['iconShape'] as String? ?? 'chamfer',
+        iconAccent: json['iconAccent'] as String?,
         widgets: (json['widgets'] as List? ?? [])
             .cast<Map<String, dynamic>>()
             .map(WidgetSpec.fromJson)
@@ -48,6 +61,8 @@ class Skin {
         'author': author,
         'description': description,
         if (accent != null) 'accent': accent,
+        'iconShape': iconShape,
+        if (iconAccent != null) 'iconAccent': iconAccent,
         'widgets': widgets.map((w) => w.toJson()).toList(),
       };
 

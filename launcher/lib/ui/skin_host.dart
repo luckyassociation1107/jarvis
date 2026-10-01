@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../skins/skin.dart';
 import '../theme/jarvis_theme.dart';
+import 'app_icon.dart';
 import 'widgets/widgets.dart';
 
 /// Renders a skin: its widgets, placed at the coordinates the skin specifies.
@@ -32,9 +33,15 @@ class SkinHost extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        child,
+    // The skin decides how every application icon is framed. Wrapping here
+    // rather than threading a parameter through the grid means a skin change
+    // restyles the grid for free, which is the entire point of a skin.
+    return IconStyleScope(
+      shape: _shapeOf(skin.iconShape),
+      accent: _parseHex(skin.iconAccent ?? skin.accent),
+      child: Stack(
+        children: [
+          child,
         for (final spec in skin.widgets)
           if (spec.kind == 'reactor')
             // The reactor fills the space rather than sitting in its box — it is
@@ -58,8 +65,28 @@ class SkinHost extends StatelessWidget {
                 child: _PassThrough(spec: spec, appCount: appCount),
               ),
             ),
-      ],
+        ],
+      ),
     );
+  }
+
+  static IconShape _shapeOf(String name) => switch (name) {
+        'square' => IconShape.square,
+        'hexagon' => IconShape.hexagon,
+        'shield' => IconShape.shield,
+        _ => IconShape.chamfer,
+      };
+
+  /// Parses #rrggbb. Anything unparseable returns null, which the icon reads as
+  /// "use the theme cyan" — a bad hex in a hand-edited skin should never crash
+  /// the workspace, it should just be ignored.
+  static Color? _parseHex(String? hex) {
+    if (hex == null) return null;
+    var h = hex.replaceFirst('#', '');
+    if (h.length == 6) h = 'FF$h';
+    if (h.length != 8) return null;
+    final v = int.tryParse(h, radix: 16);
+    return v == null ? null : Color(v);
   }
 }
 

@@ -124,9 +124,45 @@ the clock goes top-right, and a flow layout would rearrange it the moment the
 window changed size.
 
 Eight widgets ship: `clock`, `systemMonitor`, `calendar`, `notes`, `weather`,
-`media`, `appList`, `reactor`. Three skins ship: **Arc Reactor** (the default),
-**Workshop** (dense, four readouts), **Quiet** (reactor and clock only). Switch
-between them from the `SKIN` control in the top rail.
+`media`, `appList`, `reactor`. Seven skins ship. Switch between them from the
+`SKIN` control in the top rail.
+
+### Ported skins
+
+Four of the seven are ported from real Rainmeter skins, with the palettes read
+out of their `Variables.inc` and `Color/*.inc` rather than eyeballed:
+
+| Skin | Source | What was taken |
+|---|---|---|
+| **Iron Man** | `iron-man-mark-7.rmskin` | `204,204,204` on black, shield-clipped icons |
+| **Glass Shards** | `glass-shards.rmskin` | `0,255,255` cyan + `228,129,255` violet |
+| **Neon Space** | `neon-space.rmskin` | `Cloudcolor=0,50,255` deep electric blue |
+| **Shield OS** | `jarvis-shield-os.rmskin` | WP7 Metro, `ColorSkin=27,161,226`, square tiles |
+
+The frost in Glass Shards is the one thing that did not port — a blur layer per
+pane is a different rendering model, and faking it with a translucent fill looks
+worse than not trying. The palette and the chamfer survived.
+
+### Icons are wrapped, not pasted
+
+Every application icon is clipped into the skin's shape, backed by the theme
+surface, washed very slightly toward the accent, and framed with a border that
+follows the same path plus corner brackets. Four shapes: `square`, `chamfer`,
+`hexagon`, `shield`.
+
+That 7% accent wash is what does the work. Windows hands you icons drawn for a
+light background in a dozen different visual languages; a faint accent wash over
+all of them is what makes the grid read as one instrument panel instead of a
+folder of pictures.
+
+A skin sets it with two fields:
+
+```json
+{
+  "iconShape": "hexagon",
+  "iconAccent": "#4d7cff"
+}
+```
 
 ### Writing your own
 
