@@ -13,7 +13,7 @@
  * The budget arithmetic:
  *
  *     35%  the OS           not negotiable, and not ours to spend
- *     25%  everything else  browser, editor, the launcher itself
+ *     25%  everything else  browser, editor, and other running apps
  *     40%  models           what is left, and all we may touch
  *
  * Plus, when there is a GPU: its VRAM, counted separately and conservatively,
@@ -33,7 +33,7 @@ import { mkdir } from 'node:fs/promises'
 import { totalmem } from 'node:os'
 import { join } from 'node:path'
 
-/** The split. Exported so the UI shows the same numbers the installer used. */
+/** The split. Exported so the UI shows the same numbers the model planner uses. */
 export const BUDGET = { os: 0.35, apps: 0.25, models: 0.40 }
 
 const GB = 1024 * 1024 * 1024
@@ -268,14 +268,13 @@ export function plan() {
     used += rung.bytes
   }
 
-  // If even the floor does not fit, something has to go. Drop the least
-  // essential capability first, one at a time, until it fits — rather than
-  // hardcoding which two survive. A 1 GB machine keeps speech and chat; a 4 GB
-  // machine keeps everything except vision, because vision's floor is ~950 MB
-  // and chat's is 398 MB.
+  // If even the floor does not fit, drop the least essential managed
+  // capability first, one at a time, until it fits. Chat is the core; the code
+  // ladder is dropped before speech. Tiny machines may keep chat alone, while
+  // larger budgets retain chat, code, and a Whisper rung.
   //
-  // Essentiality, most first. Chat and speech are the assistant; vision and code
-  // are what it does with its hands and eyes.
+  // Essentiality, most first. The array is traversed in reverse when dropping:
+  // code first, then speech, and chat last.
   const ESSENTIALITY = ['chat', 'speech', 'code']
   if (used > b.models) {
     const dropped = []
@@ -379,7 +378,7 @@ export async function install(opts = {}) {
   // The whisper binary first. plan() charges its 3 MB against the budget, so
   // install() has to actually spend it — otherwise the budget counts a download
   // that never happens and the speech capability is left without its executable.
-  log.push(await installWhisperBinary(dir))
+  log.push(await installWhisperBinary())
 
   for (const [cap, rung] of Object.entries(p.choices)) {
     if (rung.kind === 'whisper') {
@@ -415,11 +414,10 @@ export async function install(opts = {}) {
  * do not have cmake and a compiler.
  *
  * `whisper-node` is the npm package that bundles prebuilt whisper.cpp bindings
- * across platforms. It is a real dependency rather than a curl, which means it
- * is installed into node_modules like everything else and upgraded by the
- * updater rather than being a file we hope still exists.
+ * across platforms. The autopilot installs this pinned npm package only when
+ * the user explicitly requests the model plan; it is not guessed from a URL.
  */
-async function installWhisperBinary(dir) {
+async function installWhisperBinary() {
   const id = 'whisper-binary'
   const pkg = 'whisper-node@1.1.1'
 

@@ -25,7 +25,6 @@ import { runTurn, modelStatus, PIPELINE } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { plan as autopilotPlan, install as autopilotInstall, planSummary } from './autopilot.mjs'
-import { check as updateCheck, apply as updateApply, banner as updateBanner } from './updater.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -39,7 +38,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
-import { probeUrl, renderPage } from './page.mjs'
+import { renderPage } from './page.mjs'
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 
@@ -707,8 +706,21 @@ const handleRequest = async (req, res) => {
           appsGb: +(p.budget.apps / 1073741824).toFixed(2),
           modelsGb: +(p.budget.models / 1073741824).toFixed(2),
         },
-        fits: p.fits.map((f) => ({ id: f.id, kind: f.kind, gb: +(f.bytes / 1073741824).toFixed(2), why: f.why })),
-        skipped: p.skipped.map((x) => ({ id: x.id, gb: +(x.bytes / 1073741824).toFixed(2), shortfallGb: +(x.shortfall / 1073741824).toFixed(2) })),
+        fits: Object.entries(p.choices).map(([id, rung]) => ({
+          id,
+          kind: rung.kind ?? 'model',
+          model: rung.model ?? rung.file,
+          quant: rung.quant ?? null,
+          gb: +(rung.bytes / 1073741824).toFixed(2),
+          floor: Boolean(rung.floor),
+        })),
+        skipped: (p.dropped ?? []).map((x) => ({
+          id: x.cap,
+          needsGb: x.needsGb,
+          why: `${x.cap} was dropped to keep the remaining selected capabilities within the RAM budget.`,
+        })),
+        notes: p.notes,
+        salvaged: Boolean(p.salvaged),
         usedGb: +(p.usedBytes / 1073741824).toFixed(2),
       }),
     )
@@ -723,42 +735,13 @@ const handleRequest = async (req, res) => {
       JSON.stringify({
         installed: result.installed.length,
         failed: result.log.filter((l) => !l.ok),
-        skipped: result.skipped.map((x) => x.id),
+        skipped: (result.plan.dropped ?? []).map((x) => x.cap),
         log: result.log,
       }),
     )
   }
 
-  // Updates. GET reports; POST applies. Separate for the same reason as
-  // autopilot: applying exits this process, so it must never be a side effect
-  // of something that merely looked.
-  if (req.method === 'GET' && req.url === '/update') {
-    const r = await updateCheck()
-    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(
-      JSON.stringify({
-        current: r.current,
-        latest: r.latest,
-        available: r.available,
-        error: r.error ?? null,
-        assets: r.release ? r.release.assets.map((a) => ({ name: a.name, size: a.size })) : [],
-      }),
-    )
-  }
-
-  if (req.method === 'POST' && req.url === '/update/apply') {
-    // Exits the process on success on Windows. The client should treat a closed
-    // connection as the expected outcome, not a failure.
-    const r = await updateApply({ auto: true })
-    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify(r))
-  }
-
   if (req.method === 'GET' && req.url === '/health') {
-    // The update line goes in health so one poll tells you everything, including
-    // whether a restart is warranted. It is a separate endpoint from /update
-    // because reporting is free and applying is not.
-    const updateLine = await updateBanner().catch(() => 'update: unknown')
     // The browser reads this at boot to know the bridge is alive, and the
     // diagnostics panel reads it to say why it is not. Speech needs no flag
     // any more — it runs on the browser's own recogniser and voice, on the

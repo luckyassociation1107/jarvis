@@ -6,12 +6,11 @@ searches the web, drives your phone, reads your screen, controls his own
 interface. The face is a web page (React + Vite + Three.js + custom GLSL). The
 brain is an open-weight model running on your own machine.
 
-**Nothing here is billed and nothing here phones home.** No API keys, no
-accounts, no subscriptions. The model runs locally behind a small Node bridge,
-the voice runs in your browser, and the only network calls the bridge makes are
-to `localhost`. The one cost is your own hardware: the model is the heavy part,
-so a machine with a GPU and some RAM will give you a much better JARVIS than a
-laptop will.
+**No hosted LLM account or API key is required.** Inference runs through a
+local Node bridge against your own model server. Initial model downloads come
+from their publishers, web tools fetch the pages you ask for, and browser
+speech-recognition behavior depends on Chrome or Edge. The one ongoing cost is
+your own hardware and power.
 
 **How it all fits together:** [`WORKFLOW.md`](WORKFLOW.md) — the three layers,
 what happens when you speak, and what the whole thing is for.
@@ -22,19 +21,20 @@ perhaps half the time, and a small one mostly narrates what it would do instead.
 Everything in this project works with any model you can run — pick the largest
 one your machine will hold, because that is the whole tuning knob. If you want a
 model with no content filter, look for the "abliterated" or "dolphin" builds:
-they are ordinary open-weight models with the refusal training removed, they run
-exactly the same way, and JARVIS imposes no restrictions of its own.
+they are ordinary open-weight models with refusal training removed and run
+through the same local interface. JARVIS adds no model-level refusal layer;
+effectful tools still have a separate default-deny permission gate.
 
 ---
 
-## Three models, and the one that was missing
+## Model slots and the multilingual workflow
 
 The pipeline routes by capability, not by one big model doing everything:
 
 | Slot | Model | Job |
 |---|---|---|
 | `chat` | `huihui_ai/qwen2.5-abliterate:0.5b` | conversation, and intent extraction |
-| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | sees the camera and the screen |
+| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | optional image slot; not auto-downloaded |
 | `reason` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | writes and debugs code |
 
 `bridge/language.mjs` adds the piece that was absent: a **multilingual intent
@@ -68,7 +68,7 @@ The budget is the design:
 
 ```
 35%  the OS           not negotiable, and not ours to spend
-25%  everything else  browser, editor, the launcher itself
+25%  everything else  browser, editor, and other running apps
 40%  models           what is left, and all we may touch
 ```
 
@@ -76,9 +76,11 @@ Those numbers are not arbitrary. A loaded model is *resident*, so a 7b model is
 not a 4.7 GB download, it is 4.7 GB permanently gone from everything else.
 Spending more than the leftover 40% is how you get a machine that swaps.
 
-Selection is greedy by priority, not by size, and skips rather than stops — a
-6 GB machine cannot afford the coder but can still afford vision, and stopping
-at the first miss would throw that away. Verified across the range:
+The chat and coding ladders climb **round-robin**, and the planner skips a
+rung that does not fit instead of stopping at the first miss. That prevents one
+capability from taking the whole budget while another stays at its minimum.
+The speech model is selected separately from the remaining budget. Verified
+across the range:
 
 | RAM | Model budget | Gets |
 |---|---|---|
@@ -94,10 +96,10 @@ at the first miss would throw that away. Verified across the range:
 
 Every model in both ladders is **abliterated**, from `huihui_ai/qwen2.5-abliterate`
 and `huihui_ai/qwen2.5-coder-abliterate`, each spanning 0.5b to 14b. Nothing else
-is downloaded. Vision is gone: the smallest multimodal model that produces useful
-output is ~950 MB, it is not a chat or coding model, and the requirement is
-abliterated chat and coding models only — adding it back would mean installing
-something aligned, which is exactly what must not happen.
+is downloaded. Vision is deliberately **excluded from the automatic RAM plan**:
+the smallest useful multimodal model has a ~950 MB floor and is not part of the
+chat-and-coding-only model ladder. The configurable vision slot remains optional;
+the autopilot does not download it.
 
 Whisper is exempt from the guard on purpose. It is a speech recogniser with no
 chat behaviour, so it has no alignment to remove. The exemption sits next to the
@@ -113,28 +115,31 @@ The guard is verified to actually fire: replacing one entry with an aligned mode
 makes `plan()` throw, with the offender named.
 
 
-## First run, automated
+## Setup and RAM-based model selection
 
-Double-tap the installer and the rest is meant to happen without you. Three
-steps, in this order, because permissions asked *after* the engine starts look
-like a second install rather than a finishing touch:
+`npm run setup` is an advisory preflight: it checks Node and the model server and
+prints what is missing. **It does not install Ollama or download models.** The
+RAM-aware download flow is explicit so a multi-gigabyte pull never happens just
+because the app started:
 
-1. **Ask to start with the machine** — auto-start, through
-   `com.jarvis.launcher/setup`. Every platform but Windows returns `false` and
-   the app still runs; it just does not start itself.
-2. **Start the engine and download its models** — the autopilot above.
-3. **Match the theme to your wallpaper** — the accent is the corner pixel with
-   the most luminance contrast against the near-black the surface already uses.
-   Not the most *common* colour, which in a photograph is usually a mid-tone grey
-   that reads as mud on black.
+```bash
+npm install
+npm run setup       # check prerequisites; changes nothing
+npm start           # starts the local bridge and browser HUD
+```
 
-A declined step is not fatal and is not hidden: `SetupReport.declined` carries
-exactly what was skipped so the UI can say so. Silently degraded and broken look
-identical from the outside.
+With the bridge running, inspect the plan first, then choose whether to install
+it. These commands pull the models selected for the machine's available RAM:
 
-`launcher/lib/platform/setup.dart` is a channel, not a widget, so it runs from
-`main()` before the first frame rather than from an `initState` that has already
-painted something.
+```bash
+curl http://localhost:8787/autopilot
+curl -X POST http://localhost:8787/autopilot/install
+```
+
+Ollama must already be installed and running. The install endpoint pulls the
+planned local models and the optional Whisper package; it does not install the
+model server itself. Review the plan before calling the `POST` endpoint because
+its downloads may be large.
 
 ## Uncensored models, enforced
 
@@ -144,28 +149,6 @@ abliterated / dolphin / hermes / nous family. Ollama's plain `qwen2.5` tags are
 the aligned originals and are exactly what must not be installed. moondream and
 the whisper files are out of scope — not chat models, no alignment to remove.
 
-## Auto-update
-
-`GET /update` reports. `POST /update/apply` applies. Separate endpoints for the
-same reason as autopilot: applying *exits this process*, so it must never be a
-side effect of something that merely looked.
-
-The hard part is that this process is the thing being updated. Windows holds the
-executable open while it runs, so the swap has to be staged and deferred:
-
-1. ask GitHub for the newest release
-2. download the installer beside the running one
-3. spawn it `/VERYSILENT` and exit — the installer cannot replace files this
-   process has open, so the only safe moment is after we are gone
-
-`apply({auto:false})` stages and reports without touching anything, which is the
-default. Version comparison only accepts `vMAJOR.MINOR.PATCH`; a SHA tag is newer
-in time but not in version, and comparing one to a version number produces
-nonsense. Pre-releases are excluded — someone publishing `v1.3.0-beta.1` wants it
-tested by people who opted in, not pushed onto every machine that rebooted.
-
-`package.json` is the source of truth for the running version rather than a
-constant, so it cannot drift from what was published. It is now `1.0.0`.
 
 ## What has actually been run
 
@@ -183,8 +166,7 @@ were run on a real machine with a real Ollama, not simulated:
 | `gpu()` on a machine with no GPU | correctly returned `null` |
 | Full `autopilot.install()` end to end | **3 of 3 installed** |
 
-That is the entire verified surface. Everything else — the Flutter workspace, the
-window manager, the skins, the boot sequence — remains compile-checked only.
+The full browser voice-to-model-to-tool loop has not yet been verified end to end.
 
 Two bugs came out of this and would never have come out of `node --check`:
 
@@ -211,10 +193,11 @@ download with no feedback is indistinguishable from a hang.
 
 ## Speech
 
-**STT** is local, via whisper.cpp — `POST /stt` takes a 16 kHz mono WAV and
-returns a transcript. The browser recogniser stays for the web front-end, but it
-needs Chrome, needs a network connection, and sends audio to Google, which is
-disqualinating for something meant to run on your own machine.
+**STT** can use the browser's SpeechRecognition API for the interactive HUD.
+That API's implementation and network behavior depend on the browser. For an
+explicit local path, `POST /stt` accepts a 16 kHz mono WAV and uses the optional
+whisper.cpp binary and model configured with `JARVIS_WHISPER_BIN` and
+`JARVIS_WHISPER_MODEL`.
 
 Point it at your install:
 
@@ -228,46 +211,39 @@ with two different fixes and one boolean sends people looking in the wrong place
 
 **TTS** is the narration net from earlier — local, no API, no key.
 
-## Two front-ends, one brain
+## The shape of this repo
 
-This repo holds two interfaces to the same local model:
+One browser HUD backed by a Node bridge and your own local models:
 
 ```
-src/ + bridge/ + index.html     the browser HUD  — voice, holographic face
-launcher/                       the desktop workspace — Flutter, jarvis.exe
+src/ + index.html        browser HUD — voice, reactor, panels
+bridge/                  local Node bridge — model pipeline, tools, autopilot
+scripts/                 preflight and local start scripts
+smoke.mjs                bridge checks
 ```
 
-`launcher/` is a full-screen Flutter desktop app: an application launcher, a
-Rainmeter-style skin engine with live CPU/RAM/disk readouts, and a panel for
-local agent chat. It builds to a single installable `jarvis.exe`.
+The browser is the interface; the bridge is the AI runtime and tool host. They
+run together locally with `npm start`. There is no second desktop front-end or
+separate app build.
 
-It is a separate build with its own dependencies — nothing in `launcher/` needs
-Node, and nothing in `src/` needs Flutter. Build whichever one you want:
-
-```powershell
-# desktop workspace
-cd launcher
-flutter create --platforms=windows --org com.jarvis .
-powershell -ExecutionPolicy Bypass -File installer\build.ps1
-```
-
-See [`launcher/README.md`](launcher/README.md) for the skin format, the widget
-list, and what the desktop app deliberately does not do.
+GitHub Pages publishes the browser UI at
+<https://luckyassociation1107.github.io/jarvis/>. It is a static preview only:
+the bridge and local model stay on your own machine, and the hosted page cannot
+connect to that local runtime. Use the local `npm start` workflow for an actual
+AI session.
 
 ---
 
 ## Requirements
 
-**In one line:** a local model, plus two free things every computer can have —
-Node.js and Chrome. That's the whole list.
+**In one line:** a local model server, Node.js, and Chrome or Edge. Ollama is the recommended model server.
 
-- **A model server.** [Ollama](https://ollama.com) is the easiest way to get
-  one — install it, then `ollama run llama3.1`. llama.cpp, LM Studio and vLLM
-  all work too; JARVIS speaks the OpenAI chat-completions protocol, which is
-  what every local runtime has converged on. See the configuration table below
-  for the variables that point at it.
-- **Node.js 20 or newer** — free, one installer from <https://nodejs.org>. This
-  is a Node web app, so it is the one unavoidable tool.
+- **A model server.** [Ollama](https://ollama.com) is the easiest option;
+  keep its local service running so the bridge can reach it. llama.cpp, LM Studio
+  and vLLM also work through their OpenAI-compatible endpoints. The RAM-aware
+  autopilot uses the model families listed above; the model server itself is
+  installed separately.
+- **Node.js 20 or newer** from <https://nodejs.org>. This is a Node web app, so it is the one unavoidable runtime.
 - **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
   embedded preview pane. Preview panes (including the one inside editors) block
   microphone access, so the page loads and looks right but never hears you.
@@ -278,53 +254,28 @@ Node.js and Chrome. That's the whole list.
   it. With none configured he still answers, still talks, and still drives his
   own interface.
 
-Run `npm run setup` after cloning and it checks all of this for you, in plain
-language. It is the fastest way to find out whether your model server is
-reachable, which is the one thing that cannot be defaulted around.
+`npm run setup` is a friendly preflight after cloning. It checks whether your model server is reachable and reports missing prerequisites; it does not install software or models.
 
 ---
 
 ## Quick start
 
-First, install, then start it:
+Install Ollama and start its local server first. Then, in the repository:
 
 ```bash
 npm install
-npm start          # runs the brain and the face together
+npm run setup       # advisory preflight; no downloads or system changes
+npm start           # local bridge + Vite browser HUD
 ```
 
-Then open the URL it prints (http://localhost:5173) in **Chrome**, click **INITIALISE**, and say **“Hey Jarvis”**.
+Open <http://localhost:5173> in Chrome or Edge, click **INITIALISE**, allow the
+microphone, and say **“Hey Jarvis”**. The default chat model must be pulled before
+it can answer; the RAM-aware autopilot offers a preview and explicit install
+through `GET /autopilot` and `POST /autopilot/install` on `localhost:8787`.
 
-Prefer two terminals? Run them separately instead:
-
-```bash
-npm install
-```
-
-Terminal 1 — the brain:
-
-```bash
-npm run bridge
-```
-
-Terminal 2 — the face:
-
-```bash
-npm run dev
-```
-
-Then open the app in a **real Chrome or Edge window**:
-
-```bash
-open http://localhost:5173
-```
-
-Click **INITIALISE**, allow the microphone when asked, and say **"Hey Jarvis"**.
-
-> It has to be a real browser window. Embedded preview panes block the
-> microphone, so JARVIS will look perfectly alive and simply never respond.
-
----
+For separate terminals, use `npm run bridge` for the local AI/tool service and
+`npm run dev` for the HUD. The GitHub Pages page is only a static view; it does
+not host Ollama or the Node bridge.
 
 ## How it works
 

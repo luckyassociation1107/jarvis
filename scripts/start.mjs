@@ -2,7 +2,7 @@
  * One command to run JARVIS: the bridge (brain) and the Vite dev server (face)
  * together, so a student types `npm start` and nothing else.
  *
- * Two long-running processes normally mean two terminals. This launcher spawns
+ * Two long-running processes normally mean two terminals. This start script spawns
  * both as children, tags their output so you can tell them apart, and shuts
  * them down together on Ctrl-C — no extra dependency, just Node.
  *
@@ -97,7 +97,7 @@ process.on('SIGTERM', () => shutdown(0))
  *
  * The bridge only trusts WebSocket origins on localhost:5173-5199 and
  * 4173-4199, which is the right default — a socket that any local page can open
- * is a socket that drives every MCP server on the machine. But a launcher that
+ * is a socket that drives every MCP server on the machine. But a start script that
  * assigns a port outside that range produces the single most confusing failure
  * this project has: the interface loads, the reactor spins, the microphone
  * hears you, and the brain answers nothing, because the handshake is being 403'd

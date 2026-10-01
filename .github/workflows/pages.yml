@@ -1,9 +1,7 @@
 # Deploy the browser HUD to GitHub Pages.
 #
-# Separate from build-launcher.yml on purpose. That workflow builds a Windows
-# .exe and needs a Windows runner; this one is a static site and needs neither.
-# Keeping them apart means a change to the Dart launcher does not redeploy the
-# web view, and vice versa.
+# This repo ships one product: a browser HUD backed by a local Node bridge.
+# This workflow builds only the static browser interface for GitHub Pages.
 #
 # The honest limitation, stated here rather than discovered later: Pages serves
 # static files only. The Node bridge that talks to Ollama runs on localhost and
@@ -14,7 +12,15 @@ name: Deploy web view
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'index.html', 'vite.config.ts', 'package.json', 'public/**', '.github/workflows/pages.yml']
+    paths:
+      - 'src/**'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'tsconfig*.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'public/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -34,7 +40,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -45,6 +51,13 @@ jobs:
           # moment the repository is renamed or forked, so derive it.
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
+
+      - name: Verify Pages asset base
+        env:
+          EXPECTED_BASE: /${{ github.event.repository.name }}/
+        run: |
+          grep -Fq "src=\"${EXPECTED_BASE}assets/" dist/index.html
+          grep -Fq "href=\"${EXPECTED_BASE}assets/" dist/index.html
 
       - uses: actions/configure-pages@v4
 
