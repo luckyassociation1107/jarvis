@@ -93,6 +93,60 @@ The 0.5b chat model is first because it is 398 MB and is the difference between
 an assistant and a paperweight. The 14b is 9 GB and is a nicer conversation.
 Order matters more than fit.
 
+## First run, automated
+
+Double-tap the installer and the rest is meant to happen without you. Three
+steps, in this order, because permissions asked *after* the engine starts look
+like a second install rather than a finishing touch:
+
+1. **Ask to start with the machine** — auto-start, through
+   `com.jarvis.launcher/setup`. Every platform but Windows returns `false` and
+   the app still runs; it just does not start itself.
+2. **Start the engine and download its models** — the autopilot above.
+3. **Match the theme to your wallpaper** — the accent is the corner pixel with
+   the most luminance contrast against the near-black the surface already uses.
+   Not the most *common* colour, which in a photograph is usually a mid-tone grey
+   that reads as mud on black.
+
+A declined step is not fatal and is not hidden: `SetupReport.declined` carries
+exactly what was skipped so the UI can say so. Silently degraded and broken look
+identical from the outside.
+
+`launcher/lib/platform/setup.dart` is a channel, not a widget, so it runs from
+`main()` before the first frame rather than from an `initState` that has already
+painted something.
+
+## Uncensored models, enforced
+
+A standing requirement, so it is *checked* rather than assumed. `plan()` calls
+`assertUncensored()`, which fails loudly if any catalogue entry is not from an
+abliterated / dolphin / hermes / nous family. Ollama's plain `qwen2.5` tags are
+the aligned originals and are exactly what must not be installed. moondream and
+the whisper files are out of scope — not chat models, no alignment to remove.
+
+## Auto-update
+
+`GET /update` reports. `POST /update/apply` applies. Separate endpoints for the
+same reason as autopilot: applying *exits this process*, so it must never be a
+side effect of something that merely looked.
+
+The hard part is that this process is the thing being updated. Windows holds the
+executable open while it runs, so the swap has to be staged and deferred:
+
+1. ask GitHub for the newest release
+2. download the installer beside the running one
+3. spawn it `/VERYSILENT` and exit — the installer cannot replace files this
+   process has open, so the only safe moment is after we are gone
+
+`apply({auto:false})` stages and reports without touching anything, which is the
+default. Version comparison only accepts `vMAJOR.MINOR.PATCH`; a SHA tag is newer
+in time but not in version, and comparing one to a version number produces
+nonsense. Pre-releases are excluded — someone publishing `v1.3.0-beta.1` wants it
+tested by people who opted in, not pushed onto every machine that rebooted.
+
+`package.json` is the source of truth for the running version rather than a
+constant, so it cannot drift from what was published. It is now `1.0.0`.
+
 ## Model manager
 
 `GET /models` asks Ollama what it has and compares that against the three slots,
