@@ -135,13 +135,18 @@ jobs:
       # hotkey.cpp is a plain C++ module with no Flutter dependency, so it has
       # to be added to the generated build by hand. Without this line the
       # linker fails on RegisterJarvisHotkey with an unresolved external.
-      - name: Wire hotkey.cpp into the generated build
+      # hotkey.cpp and window_manager.cpp are plain C++ with no Flutter
+      # dependency, so the generated build does not know they exist. Without
+      # this the linker fails on RegisterJarvisHotkey and every window_manager
+      # symbol with an unresolved external.
+      - name: Wire the native modules into the generated build
         shell: python
         run: |
           import re, pathlib
           p = pathlib.Path('windows/runner/CMakeLists.txt')
           s = p.read_text()
-          if 'hotkey.cpp' in s:
+          needed = ['hotkey.cpp', 'window_manager.cpp']
+          if all(n in s for n in needed):
               print('already wired')
           else:
               m = re.search(r'add_executable\(\$\{BINARY_NAME\}[^)]*\)', s, re.S)
@@ -149,10 +154,10 @@ jobs:
               block = m.group(0)
               patched = block.replace(
                   '"flutter_window.cpp"',
-                  '"hotkey.cpp"\n  "flutter_window.cpp"', 1)
+                  '"hotkey.cpp"\n  "window_manager.cpp"\n  "flutter_window.cpp"', 1)
               assert patched != block, 'flutter_window.cpp not found in add_executable'
               p.write_text(s[:m.start()] + patched + s[m.end():])
-              print('added hotkey.cpp to add_executable')
+              print('wired native modules into add_executable')
 
       - name: flutter pub get
         run: flutter pub get

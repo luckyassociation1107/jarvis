@@ -227,9 +227,15 @@ highlight off-screen is worse than no keyboard at all.
 
 Four things, stated plainly because the alternative is a support question.
 
-1. **It is not a window manager.** Flutter cannot see, move or composite other
-   applications' windows. The dock is a *favourites* strip, not a taskbar, and
-   there is no window list. This is the single biggest gap between what this
+1. ~~**It is not a window manager.**~~ **Corrected — it now is one, on Windows.**
+   *Dart* cannot see, move or composite other applications' windows. A native
+   Win32 module can, and `windows/runner/window_manager.cpp` is that module:
+   `EnumWindows`, `SetWindowPos`, `ShowWindow`, `SetForegroundWindow`, with the
+   work area rather than the screen as the snap target so windows never land
+   under the taskbar.
+
+   It is Windows-only. On macOS and Linux the dock degrades to a favourites
+   strip, which is what it was before. This is the single biggest gap between what this
    looks like and what it is.
 
 2. **It is not the wallpaper.** A Flutter window cannot sit behind the desktop
