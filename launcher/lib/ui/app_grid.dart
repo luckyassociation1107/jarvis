@@ -72,11 +72,13 @@ class _AppTile extends StatefulWidget {
     required this.entry,
     required this.ranges,
     required this.onLaunch,
+    this.selected = false,
   });
 
   final AppEntry entry;
   final List<MatchRange> ranges;
   final void Function(AppEntry entry) onLaunch;
+  final bool selected;
 
   @override
   State<_AppTile> createState() => _AppTileState();
@@ -114,7 +116,7 @@ class _AppTileState extends State<_AppTile> with SingleTickerProviderStateMixin 
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _TileIcon(entry: widget.entry, hovered: _hover),
+              _TileIcon(entry: widget.entry, hovered: _hover, selected: widget.selected),
               const SizedBox(height: 10),
               _TileLabel(name: widget.entry.name, ranges: widget.ranges),
             ],
