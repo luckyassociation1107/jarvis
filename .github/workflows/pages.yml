@@ -1,0 +1,63 @@
+# Deploy the browser HUD to GitHub Pages.
+#
+# Separate from build-launcher.yml on purpose. That workflow builds a Windows
+# .exe and needs a Windows runner; this one is a static site and needs neither.
+# Keeping them apart means a change to the Dart launcher does not redeploy the
+# web view, and vice versa.
+#
+# The honest limitation, stated here rather than discovered later: Pages serves
+# static files only. The Node bridge that talks to Ollama runs on localhost and
+# is not part of this deployment, so the deployed page renders the interface
+# fully but cannot reach a model. It is a view of the app, not a working copy.
+name: Deploy web view
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'index.html', 'vite.config.ts', 'package.json', 'public/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the static site
+        env:
+          # Pages serves from /<repo>/. Hardcoding the repo name would break the
+          # moment the repository is renamed or forked, so derive it.
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - uses: actions/configure-pages@v4
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

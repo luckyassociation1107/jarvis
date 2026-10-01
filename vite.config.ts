@@ -4,6 +4,16 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+
+  // GitHub Pages serves this from /<repo>/, not from /. Without an explicit
+  // base, every script and stylesheet href is written as /assets/... and
+  // resolves to the domain root, which 404s — the symptom is a completely blank
+  // page with a populated <title>, which is a miserable thing to debug.
+  //
+  // Read from the environment so local dev is unaffected: `vite` leaves
+  // VITE_BASE_PATH unset and the base stays '/', while the Pages workflow sets
+  // it to the repo name.
+  base: process.env.VITE_BASE_PATH ?? '/',
   server: {
     // Honour PORT so a second instance can run alongside the first. The bridge
     // only accepts sockets from localhost:5173-5199, so stay inside that range
