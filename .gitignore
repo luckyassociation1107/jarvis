@@ -53,3 +53,23 @@ launcher/installer/dist/
 # IDE
 launcher/.idea/
 launcher/*.iml
+
+# Models downloaded by the autopilot. Multi-gigabyte and machine-specific, so
+# they belong in the cache, never in git.
+models/
+*.gguf
+*.bin
+!launcher/assets/**
+
+# Build and installer output
+launcher/build/
+launcher/.dart_tool/
+launcher/windows/flutter/ephemeral/
+*.exe
+*.msix
+*.zip
+*.tar.zst
+
+# Tooling dirs that are local-only
+.claude/
+.arena/
