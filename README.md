@@ -80,18 +80,38 @@ Selection is greedy by priority, not by size, and skips rather than stops — a
 6 GB machine cannot afford the coder but can still afford vision, and stopping
 at the first miss would throw that away. Verified across the range:
 
-| RAM | Model budget | Installs |
+| RAM | Model budget | Gets |
 |---|---|---|
-| 1 GB | 0.4 GB | chat 0.5b, whisper binary |
-| 2 GB | 0.8 GB | + whisper base |
-| 4 GB | 1.6 GB | + whisper small |
-| 8 GB | 3.2 GB | + vision 3b |
-| 24 GB | 9.6 GB | + coder 7b |
-| 32 GB | 12.8 GB | everything, including chat 7b |
+| 1 GB | 0.4 GB | chat 0.5b |
+| 2 GB | 0.8 GB | chat 0.5b + whisper tiny |
+| 4 GB | 1.6 GB | chat 1.5b + code 0.5b + whisper small |
+| 6 GB | 2.4 GB | chat 1.5b + code 1.5b + whisper small |
+| 8 GB | 3.2 GB | chat 3b + code 1.5b + whisper small |
+| 12 GB | 4.8 GB | chat 3b + code 3b + whisper large-v3-turbo |
+| 16 GB | 6.4 GB | same, speech maxed |
+| 24 GB | 9.6 GB | chat 7b + code 7b |
+| 32 GB | 12.8 GB | chat 7b + code 7b + whisper large |
 
-The 0.5b chat model is first because it is 398 MB and is the difference between
-an assistant and a paperweight. The 14b is 9 GB and is a nicer conversation.
-Order matters more than fit.
+Every model in both ladders is **abliterated**, from `huihui_ai/qwen2.5-abliterate`
+and `huihui_ai/qwen2.5-coder-abliterate`, each spanning 0.5b to 14b. Nothing else
+is downloaded. Vision is gone: the smallest multimodal model that produces useful
+output is ~950 MB, it is not a chat or coding model, and the requirement is
+abliterated chat and coding models only — adding it back would mean installing
+something aligned, which is exactly what must not happen.
+
+Whisper is exempt from the guard on purpose. It is a speech recogniser with no
+chat behaviour, so it has no alignment to remove. The exemption sits next to the
+rule rather than at the call site, so the two cannot drift apart.
+
+Climbing is **round-robin, not best-first**. A best-first walk gives the whole
+budget to whichever capability is listed first, and on a 24 GB machine that means
+a 9 GB chat model beside a 0.4 GB coder — a machine that converses well and writes
+code badly. Round-robin takes one rung from each in turn, so they climb together
+and neither can starve the other.
+
+The guard is verified to actually fire: replacing one entry with an aligned model
+makes `plan()` throw, with the offender named.
+
 
 ## First run, automated
 
