@@ -1,72 +1,65 @@
-import { BACKEND } from '../config'
-import * as direct from './anthropic'
 import * as bridge from './bridge'
-import type { AskHandlers, Msg } from './anthropic'
+import type { Msg } from './bridge'
 import type { Blade, Panel } from '../store'
 
-export type { AskHandlers, Msg }
+export type { AskHandlers, Msg } from './bridge'
 export type { ConnectionState } from './bridge'
 
 /**
- * Picks the brain. Both backends answer a question and stream text and tool
- * events back; they differ in where they run and what they can reach.
+ * The brain. There is one, and it is the bridge.
  *
- *   bridge — a local Node process running the Claude Agent SDK. Uses your
- *            existing Claude Code login, so no API key, and every MCP server
- *            you have configured is available, including local stdio ones.
+ * This module used to choose between two backends: the local Node bridge, and
+ * the browser calling a hosted model API directly. The second is gone. It
+ * required an API key inlined into the JavaScript bundle — readable by anyone
+ * who opened devtools on a deployed page — and it could only reach remote HTTP
+ * MCP servers, which ruled out every local one. It was also the only part of
+ * the project with a bill attached.
  *
- *   direct — the browser calls the Claude API itself. No process to run and it
- *            deploys as a static site, but it needs an API key in the bundle
- *            and can only use remote HTTP MCP servers.
+ * What is left runs a model on your own machine, through a local process that
+ * keeps whatever credentials it needs off the client entirely.
+ *
+ * `history` is still accepted and ignored. App.tsx passes it because the
+ * transcript is a list of messages either way, but the bridge owns the
+ * conversation — the model's context lives in its session, and mirroring it
+ * here would mean two versions of the truth to keep in step.
  */
+export const usingBridge = true
 
-export const usingBridge = BACKEND === 'bridge'
-
-/** Conversation state lives in the bridge session, so history is only threaded
- *  through on the direct path. */
+/** One question, streamed back. `history` is unused; see the note above. */
 export async function ask(
   prompt: string,
-  history: Msg[],
-  handlers: AskHandlers,
+  _history: Msg[],
+  handlers: bridge.AskHandlers,
 ): Promise<{ text: string; tools: string[] }> {
-  return usingBridge
-    ? bridge.ask(prompt, handlers)
-    : direct.ask([...history, { role: 'user', content: prompt }], handlers)
+  return bridge.ask(prompt, handlers)
 }
 
 export async function warm(): Promise<void> {
-  if (usingBridge) await bridge.warmBridge()
+  await bridge.warmBridge()
 }
 
-/** The bridge reports its server list twice — from config on connect, then
- *  with live status once the agent boots — so the HUD subscribes. */
+/** The bridge reports its server list once on connect, from its own config. */
 export function watchServers(fn: (servers: string[]) => void): void {
-  if (usingBridge) bridge.watchServers(fn)
+  bridge.watchServers(fn)
 }
 
 /** HUD panels are pushed mid-turn by the `display` tool, not returned by ask(). */
 export function watchPanels(fn: (panel: Panel) => void): void {
-  if (usingBridge) bridge.watchPanels(fn)
+  bridge.watchPanels(fn)
 }
 
-/** Blades — the big surface — arrive the same way, from the `blade` tool. Like
- *  panels and the ui_* commands, this is a bridge capability: the direct path
- *  has no channel for a server to volunteer anything mid-turn. */
+/** Blades — the big surface — arrive the same way, from the `blade` tool. */
 export function watchBlades(fn: (blade: Blade) => void): void {
-  if (usingBridge) bridge.watchBlades(fn)
+  bridge.watchBlades(fn)
 }
 
 /**
- * Redressing the interface — theme, reactor, orbiting objects, effects — is a
- * bridge capability, like panels. The `ui_*` tools live in an in-process MCP
- * server inside the bridge and push straight down the open socket, mid-turn.
- * The direct path has no such channel: the browser talks to the Messages API
- * over one-shot HTTPS requests and gets back an answer, with nowhere for a
- * server to volunteer anything. On that backend this watcher simply never
- * fires and the interface stays exactly as it ships.
+ * Redressing the interface — theme, reactor, orbiting objects, effects — is
+ * pushed down the socket mid-turn by the `ui_*` tools, which live in an
+ * in-process MCP server inside the bridge.
  */
 export function watchUi(fn: (op: string, args: any) => void): void {
-  if (usingBridge) bridge.watchUi(fn)
+  bridge.watchUi(fn)
 }
 
 /**
@@ -75,24 +68,20 @@ export function watchUi(fn: (op: string, args: any) => void): void {
  * Every other channel here is the bridge volunteering something mid-turn. A
  * camera frame is the exception — the hardware is in the browser and the model
  * is in the bridge — so this handler answers a request rather than receiving a
- * push. Bridge-only for the same reason as the rest: the direct path is one-shot
- * HTTPS, with nowhere for a request to arrive.
+ * push.
  */
 export function watchCapture(
   fn: (req: bridge.CaptureRequest) => Promise<bridge.CaptureResult>,
 ): void {
-  if (usingBridge) bridge.watchCapture(fn)
+  bridge.watchCapture(fn)
 }
 
 /**
- * Barge-in. Stops the answer on both paths and settles whatever `ask()` call
- * is outstanding, so the caller's await always returns — on the bridge by
- * interrupting the agent and resolving with the text so far, on the direct
- * path by aborting the stream so the model stops generating and billing.
+ * Barge-in. Stops the answer and settles whatever `ask()` call is outstanding,
+ * so the caller's await always returns.
  */
 export function cancel(): void {
-  if (usingBridge) bridge.cancel()
-  else direct.cancel()
+  bridge.cancel()
 }
 
 /** The older name for `cancel()`. */
@@ -103,29 +92,27 @@ export function interrupt(): void {
 /**
  * Whether the brain is reachable right now.
  *
- * Only meaningful on the bridge, where a live socket is the session. The direct
- * path holds no connection between turns — each one is its own HTTPS request —
- * so there is nothing that can be down until you try it.
+ * The socket *is* the session, so this is the honest answer to "is JARVIS
+ * alive" — there is no connection between turns to be down.
  */
 export function isConnected(): boolean {
-  return usingBridge ? bridge.isConnected() : true
+  return bridge.isConnected()
 }
 
 /**
  * Connection state, for the UI.
  *
- * Worth surfacing because in bridge mode the socket *is* the conversation: all
- * of JARVIS's memory of the exchange lives in the agent session behind it, so a
- * drop wipes the conversation while the transcript on screen still shows it.
- * Never fires on the direct path, which has no connection to lose.
+ * Worth surfacing because a drop wipes the conversation: all of JARVIS's memory
+ * of the exchange lives in the session behind the socket, while the transcript
+ * on screen still shows it. So the reconnect is loud rather than invisible.
  */
 export function watchConnection(
   fn: (state: bridge.ConnectionState) => void,
 ): void {
-  if (usingBridge) bridge.watchConnection(fn)
+  bridge.watchConnection(fn)
 }
 
 /** Labels for the HUD's SYSTEMS rail. */
 export function connectedLabels(): string[] {
-  return usingBridge ? bridge.bridgeServers() : direct.connectedLabels()
+  return bridge.bridgeServers()
 }

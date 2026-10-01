@@ -26,12 +26,9 @@ import {
   watchUi,
   watchConnection,
   connectedLabels,
-  usingBridge,
   type Msg,
 } from './lib/brain'
 import { startAnalyser, micLevel } from './lib/audio'
-import { probeCapabilities } from './lib/capabilities'
-import { env } from './config'
 
 /**
  * The conversation.
@@ -147,7 +144,7 @@ export default function App() {
     let filled = false
 
     try {
-      const { text } = await ask(said, history.current, {
+      await ask(said, history.current, {
         onText: (delta) => {
           if (stale()) return
           if (!started) {
@@ -184,15 +181,9 @@ export default function App() {
 
       if (stale()) return
 
-      // The bridge keeps conversation state in its own session, so history is
-      // only threaded through on the direct path.
-      if (!usingBridge) {
-        history.current.push({ role: 'user', content: said })
-        history.current.push({ role: 'assistant', content: text || '…' })
-        if (history.current.length > 16) {
-          history.current = history.current.slice(-16)
-        }
-      }
+      // Nothing to record. The bridge keeps the conversation in its own session,
+      // so the model already has this exchange in context next time. Mirroring
+      // it here would be a second copy of the truth to keep in step.
 
       await spk.end()
       if (stale()) return
@@ -461,13 +452,10 @@ export default function App() {
           .setError('Bridge reconnected. The previous conversation was not kept.')
       }
     })
+    // The bridge is the only brain, and it reports whether it can reach its
+    // model. Nothing to check here: there is no key to be missing and no second
+    // backend to fall back to.
     const warming = warm().catch((err: Error) => s.setError(err.message))
-
-    if (!usingBridge && !env.anthropicKey) {
-      s.setError(
-        'No Anthropic API key — copy .env.example to .env.local and set VITE_ANTHROPIC_API_KEY.',
-      )
-    }
 
     // Pull the neural voice down during the boot sequence so the first
     // "Hey Jarvis" isn't waiting on an 86MB download. Deliberately not awaited
@@ -508,11 +496,6 @@ export default function App() {
           'voice. Speech recognition is unaffected.',
       )
     }
-
-    // Ask the bridge which speech engines exist before the loop starts, so the
-    // first turn already uses ElevenLabs when a key is present and the browser
-    // fallback when it is not — no flag, no reload.
-    await probeCapabilities()
 
     // One voice loop, started once, running until the page closes.
     voice.current = await startVoice({

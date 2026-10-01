@@ -2,41 +2,53 @@
 
 A browser voice assistant with an Iron Man holographic interface. Say
 **"Hey Jarvis"**, he wakes, listens, and does real things through your tools —
-searches the web, generates images, drives your phone, reads your mail. The face
-is a web page (React + Vite + Three.js + custom GLSL). The brain is Claude Code,
-run headless as a library.
+searches the web, drives your phone, reads your screen, controls his own
+interface. The face is a web page (React + Vite + Three.js + custom GLSL). The
+brain is an open-weight model running on your own machine.
 
-**The only subscription you need is Claude Code.** No API keys, no OpenAI
-account, no cloud bill — the brain runs on your existing Claude Code login, and
-the heavy work (the model itself) runs on Anthropic's servers, so even a low-end
-laptop only has to draw the interface. **ElevenLabs is an optional add-on** that
-gives JARVIS a much better voice and sharper hearing; without it he speaks and
-listens through the browser's own speech, and everything still works.
+**Nothing here is billed and nothing here phones home.** No API keys, no
+accounts, no subscriptions. The model runs locally behind a small Node bridge,
+the voice runs in your browser, and the only network calls the bridge makes are
+to `localhost`. The one cost is your own hardware: the model is the heavy part,
+so a machine with a GPU and some RAM will give you a much better JARVIS than a
+laptop will.
+
+**What that trade actually costs.** A hosted frontier model reads a JSON schema
+and calls a tool correctly almost every time. An 8B model on a laptop does it
+perhaps half the time, and a small one mostly narrates what it would do instead.
+Everything in this project works with any model you can run — pick the largest
+one your machine will hold, because that is the whole tuning knob. If you want a
+model with no content filter, look for the "abliterated" or "dolphin" builds:
+they are ordinary open-weight models with the refusal training removed, they run
+exactly the same way, and JARVIS imposes no restrictions of its own.
 
 ---
 
 ## Requirements
 
-**In one line:** a Claude Code subscription, plus two free things every computer
-can have — Node.js and Chrome. That's the whole list.
+**In one line:** a local model, plus two free things every computer can have —
+Node.js and Chrome. That's the whole list.
 
-- **Claude Code, installed and logged in** — this is the only account you need.
-  Install it with the official method — `npm install -g @anthropic-ai/claude-code`,
-  or the platform installer at <https://docs.claude.com/en/docs/claude-code> —
-  then run `claude` once and complete login. The bridge reuses that login. **No
-  API key**, and usage is billed to your existing Claude account.
+- **A model server.** [Ollama](https://ollama.com) is the easiest way to get
+  one — install it, then `ollama run llama3.1`. llama.cpp, LM Studio and vLLM
+  all work too; JARVIS speaks the OpenAI chat-completions protocol, which is
+  what every local runtime has converged on. See the configuration table below
+  for the variables that point at it.
 - **Node.js 20 or newer** — free, one installer from <https://nodejs.org>. This
   is a Node web app, so it is the one unavoidable tool.
 - **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
-  embedded preview pane. Preview panes (including the one inside editors and
-  Claude Code) block microphone access, so the page loads and looks right but
-  never hears you. JARVIS also needs WebGL, which these browsers provide.
-- **Optional: an ElevenLabs API key** — a good add-on, not a requirement. It
-  gives a better voice and sharper transcription; the free tier is plenty for a
-  demo. Without it, everything runs on the browser's own speech.
+  embedded preview pane. Preview panes (including the one inside editors) block
+  microphone access, so the page loads and looks right but never hears you.
+  JARVIS also needs WebGL, which these browsers provide.
+- **Optional: MCP servers**, if you want JARVIS to reach anything outside this
+  machine. He reads `~/.claude.json` for them, which is where they already live
+  on a machine that has ever run Claude Code — not because this project needs
+  it. With none configured he still answers, still talks, and still drives his
+  own interface.
 
 Run `npm run setup` after cloning and it checks all of this for you, in plain
-language.
+language. It is the fastest way to find out whether your model server is
+reachable, which is the one thing that cannot be defaulted around.
 
 ---
 
@@ -90,27 +102,32 @@ the brain and the hands.
 ```
   ┌─ browser (the face) ───────────────┐        ┌─ bridge (the brain) ─────────────┐
   │  "Hey Jarvis" wake word            │        │  Node · bridge/server.mjs        │
-  │  local VAD  →  speech to text      │   ws   │  Claude Agent SDK                │
-  │  reactor UI (Three.js + GLSL)      │◄─────► │   = Claude Code, headless        │
+  │  local VAD  →  speech to text      │   ws   │  local-llm.mjs                   │
+  │  reactor UI (Three.js + GLSL)      │◄─────► │   → your model server            │
   │  text to speech                    │  8787  │  spawns your MCP servers         │
   │  heads-up display                  │        │  permission gate (decideTool)    │
   └────────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
 Everything you see and hear happens in the browser. The bridge is a single Node
-process (`bridge/server.mjs`) that runs the **Claude Agent SDK**
-(`@anthropic-ai/claude-agent-sdk`) — this spawns the real `claude` CLI as a child
-process, so **the brain literally is Claude Code, headless.** They talk over a
+process (`bridge/server.mjs`) that talks to a local model over the OpenAI
+chat-completions protocol — see `bridge/local-llm.mjs`. They talk over a
 WebSocket (plus a few HTTP endpoints) on `ws://localhost:8787`.
 
-**Why a bridge at all?** A browser tab cannot spawn the local stdio MCP servers —
-`higgsfield`, `elevenlabs`, `android`, `playwright`, `exa`, `serper`, and the
-rest. The bridge can. And because it is the Agent SDK, it authenticates off your
-existing Claude Code login: no API key, billed to that same Claude account.
+**Why a bridge at all?** Two reasons, and neither is about the model.
 
-**The model.** `claude-opus-5` at effort `medium` by default. Override with the
-`JARVIS_MODEL` and `JARVIS_EFFORT` environment variables. On startup the bridge
-prints its choice, e.g. `[jarvis] model claude-opus-5 · effort medium`.
+1. A browser tab cannot spawn the local stdio MCP servers — `android`,
+   `playwright`, and the rest. The bridge can.
+2. Whatever credential the model server wants stays here, in a process, rather
+   than being inlined into a JavaScript bundle where anyone with devtools can
+   read it.
+
+**The model.** `llama3.1` by default, overridable with `JARVIS_MODEL_NAME`, and
+`JARVIS_MODEL_BASE_URL` says where it lives (Ollama's default is
+`http://localhost:11434/v1`). On startup the bridge prints its choice and checks
+the server is actually reachable, e.g. `[jarvis] model llama3.1 · max 8 tool
+turns`. If it is not, you get a line telling you to run `ollama run llama3.1`
+rather than a bridge that starts happily and fails on your first question.
 
 ### The voice pipeline
 
@@ -119,50 +136,54 @@ The loop is designed so that nothing silently dies and barge-in feels natural.
 - **Detection is local.** An energy-based voice-activity detector
   (`src/lib/vad.ts`) decides when you are speaking. It is instant, cannot quietly
   fail, and is what makes **barge-in** work — speak while JARVIS is talking and he
-  stops.
-- **Transcription has two tiers, chosen automatically at boot.** The browser asks
-  the bridge `/health` and picks the best available:
-  - **ElevenLabs key present** → ElevenLabs Scribe, via the bridge `/stt` endpoint.
-  - **Nothing configured** → the browser's own `SpeechRecognition` (Chrome/Edge),
-    guarded by a heartbeat so it recovers when Chrome throttles it.
-- **Speaking** uses the **ElevenLabs voice when a key is present**, and the
-  browser's `speechSynthesis` otherwise. If a cloud call fails it falls back to
-  the browser voice, and if the OS voice itself is broken it latches over to the
-  cloud voice.
+  stops, without waiting for a transcript to say so.
+- **Transcription** is the browser's own `SpeechRecognition` (Chrome/Edge),
+  guarded by a heartbeat so it recovers when Chrome throttles it. Chrome
+  throttling that API into silence with no event to catch is the failure this
+  guard exists for.
+- **Speaking** uses the browser's `speechSynthesis` by default. `VITE_TTS_ENGINE=kokoro`
+  switches to a neural voice that runs in the tab — better sound, nothing leaving
+  the machine, but it downloads ~86MB of weights and generates slower than
+  realtime. If the OS voice is broken it latches over to Kokoro for the rest of
+  the session, because a broken system voice fails identically every time and
+  retrying it per sentence is worse than a worse timbre.
 
-So it works with no keys and auto-upgrades when a key appears — there is no flag
-to set. Capability detection lives in `src/lib/capabilities.ts`, which probes the
-bridge's `GET /health` (returning `{ ok, tts, stt }`, both tracking the
-ElevenLabs key) once at boot and picks the engines.
+So there is no key, no account and no flag: speech works on a fresh install.
+The one thing to know is that it has to be a real browser window.
 
 ---
 
 ## What JARVIS can do
 
-Beyond answering, JARVIS reaches every MCP server in your Claude Code
-configuration, and can drive his own interface.
+Beyond answering, JARVIS reaches every MCP server on your machine, and can drive
+his own interface.
 
 ### Your tools
 
-Every server in your `~/.claude.json` is handed to the SDK explicitly. Depending
-on what you have installed, that is roughly:
+Every server in your `~/.claude.json` is connected explicitly. Depending on what
+you have installed, that is roughly:
 
-- **Web & search** — `exa`, `serper`, `serpapi`
-- **Images & video** — `higgsfield`, `openrouter-image`, `palmier-pro`
-- **Voice** — `elevenlabs`
+- **Web & search** — `exa`, `lottie-search`, `mcp-registry`
 - **Your phone** — `android`
 - **The browser** — `playwright`
+
+These are all optional. With none of them configured JARVIS still answers, still
+talks, still looks through the camera, and still drives his own interface —
+those four are built into the bridge and cannot be missing.
 
 A few things you can say:
 
 - *"What's happening in AI this week?"*
-- *"Generate an image of the Mark VII suit."*
 - *"Take a screenshot of my phone."*
 - *"Open my GitHub notifications."*
+- *"Look at me."*
 
-> **Note on account connectors.** Servers you added through your **claude.ai
-> account** are not stored on disk, so the bridge cannot see them — it works from
-> the servers in `~/.claude.json` (about 14), not the claude.ai ones.
+> **A note on what was removed.** This project used to advertise a long list of
+> paid MCP servers — image and video generation, hosted voice, hosted search —
+> and the README told you to sign up for them. They are gone, along with the
+> subscriptions. What is left either runs on your machine or has a free tier.
+> The `display`, `blade`, `ui_*`, `look` and `watch` tools that make JARVIS
+> himself are built into the bridge and need nothing from anyone.
 
 ### JARVIS controls the interface
 
@@ -224,37 +245,46 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 
 | Variable | Default | Effect |
 |---|---|---|
+| `JARVIS_MODEL_BASE_URL` | `http://localhost:11434/v1` | Where the model server listens |
+| `JARVIS_MODEL_NAME` | `llama3.1` | Which model to ask for |
+| `JARVIS_MODEL_API_KEY` | — | Only for servers that insist on a non-empty header |
+| `JARVIS_MODEL_TEMPERATURE` | `0.6` | Sampling temperature |
+| `JARVIS_MODEL_MAX_TURNS` | `8` | Tool-calling rounds per question |
+| `JARVIS_MODEL_TIMEOUT_MS` | `180000` | Whole-turn timeout, tools and all |
 | `JARVIS_BRIDGE_PORT` | `8787` | Port for the WebSocket + HTTP endpoints |
-| `JARVIS_MODEL` | `claude-opus-5` | Model to run |
-| `JARVIS_EFFORT` | `medium` | Reasoning effort |
 | `JARVIS_ALLOW_WRITES` | off | `1` allows effectful tools (see below) |
 | `JARVIS_ALLOWED_ORIGINS` | local dev | Extra WebSocket origins to accept |
 | `JARVIS_ALLOW_NO_ORIGIN` | off | Accept connections with no `Origin` header |
 | `JARVIS_FILE_ROOTS` | — | Roots the `/file` endpoint may serve from |
-| `JARVIS_VOICE_ID` | — | ElevenLabs voice id |
-| `ELEVENLABS_API_KEY` | — | Optional; enables the ElevenLabs voice + Scribe |
 
 ### Frontend (`.env.local`)
 
 | Variable | Effect |
 |---|---|
-| `VITE_BACKEND` | `bridge` (default) or `direct` |
 | `VITE_BRIDGE_URL` | Where to reach the bridge |
 | `VITE_TTS_ENGINE` | `system` or `kokoro` |
 | `VITE_KOKORO_VOICE` | Voice for the Kokoro engine |
-| `VITE_USE_ELEVENLABS` | Force the ElevenLabs voice on |
-| `VITE_ANTHROPIC_API_KEY` | Direct mode only |
 
-### Adding an ElevenLabs key
+### Choosing a model
 
-You do not have to touch a flag. Either:
+The default `llama3.1` is what `ollama run llama3.1` gives you, and it handles
+tool calling. Two things are worth knowing when you pick your own:
 
-- Set `ELEVENLABS_API_KEY` on the bridge before starting it, **or**
-- Add the key to your `elevenlabs` MCP server's env in `~/.claude.json` — the
-  bridge reads it from there too.
+- **Bigger is the whole game.** Tool use is where a small model struggles most.
+  A 70B will call a tool correctly most of the time; an 8B mostly narrates what
+  it would do instead. Take the largest model your machine will hold.
+- **For vision, you need a vision model.** `look` and `watch` return images, and
+  only a model trained on images can read them. `llama3.2-vision`,
+  `qwen2.5-vl` and `gemma3` all work. On a text-only model the image is dropped
+  and the words beside it are kept, so the tool still answers — just not about
+  what it saw.
 
-Either way, `/health` starts reporting the capability, the browser picks it up on
-the next boot, and both the voice and transcription upgrade automatically.
+### Adding a model server
+
+Point `JARVIS_MODEL_BASE_URL` at it and restart the bridge. `/health` reports
+whether the model is reachable, and the boot line says so either way — a bridge
+whose model is missing tells you on startup rather than failing on your first
+question.
 
 ---
 
@@ -263,9 +293,14 @@ the next boot, and both the voice and transcription upgrade automatically.
 The tool gate starts **read-only**. Search, generation and lookups run freely;
 anything effectful — send, tap, delete, install, pay — is denied. Voice is a poor
 interface for a confirmation dialog, so the decision is made ahead of time in
-`decideTool()` in `bridge/server.mjs`, not at the moment of use. The bridge sets
-`settingSources: []`, which makes its own gate the only authority — filesystem
-settings and any global `bypassPermissions` cannot override it.
+`decideTool()` in `bridge/server.mjs`, not at the moment of use. This gate is the
+only authority: it is applied in the bridge's own tool loop, before anything
+runs, and nothing the model says can talk its way past it.
+
+It is worth knowing that this gate now matters more than it used to. The brain is
+a local model rather than a hosted one, and a local model is far more willing to
+attempt a tool call it has misunderstood — so the default-deny is doing real
+work, not standing in for a model that would not have tried.
 
 To allow effectful tools (phone, browser driving, sending), run the bridge this
 way instead:
@@ -290,6 +325,16 @@ window** (not an embedded preview), and you must have **allowed the microphone**
 
 **Bridge not reachable.** Check that `npm run bridge` is still running in its
 terminal, and that nothing else is holding port `8787`.
+
+**He answers but never uses a tool.** This is the local-model trade, and it is
+the most common disappointment. The tools are all there and the loop is correct —
+the model is the variable. Try a larger one. `JARVIS_DEBUG=1` on the bridge
+prints every tool call and its verdict, which will tell you whether the model is
+declining to call or calling something that gets denied.
+
+**"I cannot reach my model server."** The bridge says this in the answer rather
+than failing silently, and `/health` reports it too. Start the server:
+`ollama run llama3.1`, or point `JARVIS_MODEL_BASE_URL` wherever yours lives.
 
 ---
 

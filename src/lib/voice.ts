@@ -1,8 +1,6 @@
-import { BRIDGE_HTTP_URL } from '../config'
 import { getMic } from './audio'
 import { speakingNow, speakingSince } from './tts'
 import { startVad, type Vad } from './vad'
-import { caps } from './capabilities'
 
 /**
  * The voice loop.
@@ -332,7 +330,7 @@ function isEcho(heard: string, spoken: string): boolean {
  * apart in one glance.
  */
 export const diag = {
-  /** Which input engine is running: 'elevenlabs' (VAD+Scribe) or 'browser'. */
+  /** Which input engine is running. There is one: 'browser'. */
   engine: 'browser',
   /** Whether the microphone pipeline is live. */
   running: false,
@@ -376,15 +374,19 @@ if (typeof window !== 'undefined') {
 /**
  * Pick the voice engine and start it.
  *
- * Two engines, chosen by what the bridge reported at boot (see capabilities.ts):
- *   - ElevenLabs available -> local voice-activity detection for instant
- *     barge-in, and ElevenLabs Scribe for the words. The reliable path.
- *   - nothing configured -> the browser's own SpeechRecognition, so a student
- *     with no keys still has a working assistant. Less robust, but free and
- *     zero-setup, and guarded by a heartbeat so its silent death is recovered.
+ * One engine: the browser's own SpeechRecognition, which detects and transcribes
+ * in one step. It is the flakier of the two this file used to hold — Chrome
+ * throttles it and it can go silent with no event to catch — so a heartbeat
+ * watches it and forces a fresh session whenever it stops showing signs of
+ * life. That guard is the difference between "the wake word stopped working
+ * halfway through" and an assistant that keeps listening.
+ *
+ * The other engine was ElevenLabs Scribe behind a local voice-activity
+ * detector: more reliable, and paid. It went when the rest of the paid
+ * integrations did.
  *
  * The microphone is opened once here so a denied permission is reported loudly
- * rather than surfacing later as an unexplained deafness, whichever engine runs.
+ * rather than surfacing later as an unexplained deafness.
  */
 export async function startVoice(h: VoiceHandlers): Promise<Voice> {
   try {
@@ -398,195 +400,12 @@ export async function startVoice(h: VoiceHandlers): Promise<Voice> {
     )
     return { stop: () => {}, live: () => false }
   }
-  diag.engine = caps().stt ? 'elevenlabs' : 'browser'
-  return caps().stt ? startElevenVoice(h) : startBrowserVoice(h)
-}
-
-/** VAD + ElevenLabs Scribe. */
-async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
-  let lastWake = 0
-  let vad: Vad | null = null
-
-  /**
-   * Segments waiting for the transcriber, oldest first.
-   *
-   * This was a boolean — `if (transcribing) return` — and that single line was
-   * the worst bug in the pause story. Segments arrive faster than Scribe
-   * answers whenever someone speaks in bursts, which is exactly what pausing
-   * mid-sentence looks like, so the second half of the thought was not merely
-   * mis-timed, it was silently discarded. Queue instead: nothing a person says
-   * out loud gets thrown away because the network was busy.
-   *
-   * Order is preserved because the drain is single-flight, which matters —
-   * "London" arriving before "what's the weather in" is worse than either.
-   */
-  const pendingAudio: Blob[] = []
-  let draining = false
-
-  /**
-   * Transcripts become turns here rather than one-per-segment.
-   * See makeAssembler for why.
-   */
-  const assemble = makeAssembler({
-    emit: (text) => {
-      diag.dropped = ''
-      diag.accepted++
-      diag.holding = ''
-      h.onUtterance(text)
-    },
-    partial: (text) => h.onPartial(text),
-  })
-
-  /**
-   * Send one captured segment to the bridge and act on the words.
-   *
-   * The mode is re-read here, not at capture time, because a barge-in flips the
-   * machine from 'guard' to 'listening' between the segment starting and its
-   * transcript arriving — and the transcript belongs to the mode the user is in
-   * now, not the one they interrupted.
-   */
-  const transcribe = async (blob: Blob) => {
-    const mode = h.mode()
-    if (mode === 'deaf') return
-    const t0 = performance.now()
-    try {
-      const res = await fetch(`${BRIDGE_HTTP_URL}/stt`, {
-        method: 'POST',
-        headers: { 'content-type': blob.type || 'audio/webm' },
-        body: blob,
-      })
-      diag.idleMs = Math.round(performance.now() - t0)
-      if (!res.ok) {
-        diag.restarts++
-        diag.lastError = `stt ${res.status}`
-        drop(`transcription failed (${res.status})`)
-        return
-      }
-      const { text } = (await res.json()) as { text?: string }
-      const said = (text ?? '').trim()
-      diag.lastError = ''
-
-      if (!said) {
-        drop('nothing intelligible in the segment')
-        return
-      }
-
-      // His own voice, come back through the microphone. The raised guard
-      // threshold stops most of it at the door; this catches the rest.
-      if (isEcho(said, speakingNow())) {
-        drop('echo of his own voice')
-        return
-      }
-
-      diag.heard = said
-      diag.heardAt = Date.now()
-
-      if (mode === 'wake') {
-        if (WAKE.test(said) && Date.now() - lastWake > WAKE_DEBOUNCE) {
-          lastWake = Date.now()
-          diag.wakes++
-          diag.dropped = ''
-          diag.accepted++
-          h.onWake(afterWake(said))
-        } else {
-          drop(`heard "${said.slice(-40)}" — not his name`)
-        }
-        return
-      }
-
-      // Not a turn yet — a piece of one. The assembler decides when the thought
-      // is finished, reading the words and whether the room is still noisy.
-      assemble.feed(said, vad?.meter().speaking ?? false)
-    } catch (err) {
-      diag.restarts++
-      diag.lastError = String(err)
-      drop('could not reach the speech service')
-    }
-  }
-
-  /** One transcription at a time, in the order the segments were spoken. */
-  const drain = async () => {
-    if (draining) return
-    draining = true
-    try {
-      while (pendingAudio.length) {
-        await transcribe(pendingAudio.shift()!)
-      }
-    } finally {
-      draining = false
-    }
-  }
-
-  vad = await startVad({
-    onStart: () => {
-      const mode = h.mode()
-      diag.mode = mode
-      diag.sessions++
-      if (mode === 'deaf') return
-      // Standing down mid-thought throws the thought away with it. Otherwise
-      // held text would surface as the opening of the *next* conversation.
-      if (mode === 'wake') assemble.cancel()
-      // The barge-in. In guard mode the user has started talking over him, and
-      // because the guard threshold is high this is a real interruption rather
-      // than leaked playback — so cut him off now, do not wait for the words.
-      if (mode === 'guard') {
-        const since = speakingSince()
-        if (since && Date.now() - since < SELF_GUARD_MS) {
-          diag.selfGuarded++
-          return
-        }
-        h.onSpeechStart()
-      }
-    },
-    onEnd: (blob) => {
-      pendingAudio.push(blob)
-      void drain()
-    },
-    onLevel: (v) => {
-      // Only paint the live level while actually listening for a command, so a
-      // dormant reactor stays calm and does not twitch at every room noise.
-      const mode = h.mode()
-      if (mode !== 'command') return
-      // Never over the assembled text. This used to run unconditionally and
-      // overwrote a half-built sentence with an ellipsis sixty times a second,
-      // so a pause looked like the interface had forgotten what you just said.
-      if (assemble.held()) return
-      h.onPartial(v > 0.04 ? '…' : '')
-    },
-    onError: (message) => {
-      diag.lastError = 'capture'
-      diag.running = false
-      h.onError(message)
-    },
-  })
-  diag.running = vad.live()
-
-  // Raise the trigger bar exactly while he speaks. The mode is polled rather
-  // than pushed because nothing in the app pushes phase changes here, and a
-  // 200ms lag on the echo gate is imperceptible.
-  const guardPoll = setInterval(() => {
-    const mode = h.mode()
-    vad?.setGuard(mode === 'guard')
-    // He has stood down — by Escape, by the idle timeout, or by dropping back
-    // to the wake word. Anything half-said belonged to a conversation that is
-    // over, and letting the hold expire later would open the next one with a
-    // fragment of the last.
-    if ((mode === 'wake' || mode === 'deaf') && assemble.held()) assemble.cancel()
-  }, 200)
-
-  return {
-    stop: () => {
-      clearInterval(guardPoll)
-      assemble.cancel()
-      vad?.stop()
-      diag.running = false
-    },
-    live: () => vad?.live() ?? false,
-  }
+  diag.engine = 'browser'
+  return await startBrowserVoice(h)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Browser fallback: SpeechRecognition                                        */
+/* SpeechRecognition                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -599,11 +418,11 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
  * between "the wake word stopped working halfway through the lesson" and an
  * assistant that keeps listening.
  */
-function startBrowserVoice(h: VoiceHandlers): Voice {
+async function startBrowserVoice(h: VoiceHandlers): Promise<Voice> {
   const Ctor =
     (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition
   if (!Ctor) {
-    h.onError('This browser has no speech recognition — use Chrome or Edge, or add an ElevenLabs key.')
+    h.onError('This browser has no speech recognition — use Chrome or Edge.')
     return { stop: () => {}, live: () => false }
   }
 
@@ -617,6 +436,68 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let lastWake = 0
   let lastAlive = Date.now()
   let silenceTimer: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * A local voice-activity detector, running alongside the recogniser.
+   *
+   * SpeechRecognition endpoints on its own quiet gap, which means the earliest
+   * it can tell you someone is talking is after they have stopped — so cutting
+   * JARVIS off waited on a round trip through a server that had already decided
+   * the sentence was over. The detector is local and threshold-based, so it
+   * knows within a frame. That is what makes barge-in feel like interrupting a
+   * person rather than filing a request.
+   *
+   * It used to exist only to feed a paid transcriber, which meant the free path
+   * had no fast barge-in at all. Now it earns its keep here, where it costs
+   * nothing and needs no key.
+   */
+  let vad: Vad | null = null
+  try {
+    vad = await startVad({
+      onStart: () => {
+        const mode = h.mode()
+        diag.mode = mode
+        diag.sessions++
+        // Standing down mid-thought throws the thought away with it. Otherwise
+        // held text would surface as the opening of the *next* conversation.
+        if (mode === 'wake') assemble.cancel()
+        // The barge-in. In guard mode the user has started talking over him,
+        // and because the guard threshold is high this is a real interruption
+        // rather than leaked playback — so cut him off now, do not wait for the
+        // words. The self-guard is what stops a long answer interrupting itself
+        // on its own first syllable, which is the loudest, least-cancelled
+        // thing in the whole answer.
+        if (mode === 'guard') {
+          const since = speakingSince()
+          if (since && Date.now() - since < SELF_GUARD_MS) {
+            diag.selfGuarded++
+            return
+          }
+          h.onSpeechStart()
+        }
+      },
+      onLevel: (v) => {
+        // Only paint the live level while actually listening for a command, so a
+        // dormant reactor stays calm and does not twitch at every room noise.
+        if (h.mode() !== 'command') return
+        // Never over the assembled text. Running this unconditionally used to
+        // overwrite a half-built sentence with an ellipsis sixty times a second,
+        // so a pause looked like the interface had forgotten what you just said.
+        if (assemble.held()) return
+        h.onPartial(v > 0.04 ? '…' : '')
+      },
+      onError: (message) => {
+        // The detector is an optimisation, not a dependency. Losing it costs
+        // fast barge-in and nothing else, so the recogniser carries on.
+        diag.lastError = 'capture'
+        console.warn('[jarvis] voice-activity detector unavailable:', message)
+      },
+    })
+  } catch (err) {
+    console.warn('[jarvis] voice-activity detector failed to start:', err)
+    vad = null
+  }
+  diag.running = vad?.live() ?? false
 
   /** Same assembly rules as the premium path — a pause is not a full stop. */
   const assemble = makeAssembler({
@@ -795,7 +676,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
 
   // The heartbeat. If nothing has been heard from the engine for a while it has
   // gone quiet on us — tear it down and build a fresh one.
-  const health = setInterval(() => {
+  const heartbeat = setInterval(() => {
     if (stopped) return
     const idle = Date.now() - lastAlive
     diag.idleMs = idle
@@ -813,19 +694,28 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     spin()
   }, 5000)
 
+  // Raise the trigger bar exactly while he speaks. The mode is polled rather
+  // than pushed because nothing in the app pushes phase changes here, and a
+  // 200ms lag on the echo gate is imperceptible.
+  const guardPoll = setInterval(() => {
+    vad?.setGuard(h.mode() === 'guard')
+  }, 200)
+
   return {
-    stop: () => {
+    stop() {
+      if (stopped) return
       stopped = true
-      clearInterval(health)
+      clearInterval(guardPoll)
+      clearInterval(heartbeat)
       clearSilence()
-      assemble.cancel()
-      diag.running = false
+      vad?.stop()
       try {
         rec?.abort()
       } catch {
-        /* noop */
+        /* already stopped */
       }
+      diag.running = false
     },
-    live: () => running,
+    live: () => running || (vad?.live() ?? false),
   }
 }

@@ -10,18 +10,27 @@ import { useStore } from '../store'
  * never competes with the answer.
  *
  * Each line is phrased the way you'd actually say it, not as a feature name.
+ *
+ * Every one of these works with nothing installed but a local model. That is
+ * the constraint worth keeping: a suggestion that needs a paid MCP server is a
+ * promise the app cannot keep on a fresh machine, and the first thing a new
+ * user tries should not be the one thing that fails.
+ *
+ * The first few deliberately reach for JARVIS's own tools — the display, the
+ * camera, the interface controls — because those are built into the bridge and
+ * cannot be missing. The rest need only a web search.
  */
 const EXAMPLES = [
-  'what happened in AI this week',
-  'generate an image of the Mark Seven suit',
-  'take a screenshot of my phone',
-  "what's on my calendar tomorrow",
-  'search for the best coffee near me',
-  'read me the top story on Hacker News',
-  'open my GitHub notifications',
-  "summarise what's in my inbox",
-  'find me a loading animation',
+  'look at me',
+  'watch me do this',
+  'make the interface red',
+  'show me the top story on Hacker News',
   "what's the weather looking like",
+  'take a screenshot of my phone',
+  'search for the best coffee near me',
+  'find me a loading animation',
+  'open my GitHub notifications',
+  'clear the screen',
 ]
 
 const ROTATE_MS = 4200

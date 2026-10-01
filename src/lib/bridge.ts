@@ -1,15 +1,25 @@
-import type { AskHandlers } from './anthropic'
 import type { Blade, Panel } from '../store'
 import { BRIDGE_WS_URL } from '../config'
+
+/** One message in a conversation. Kept as a loose shape on purpose: the bridge
+ *  owns the history now, so the browser only ever needs to send the new turn. */
+export type Msg = { role: 'user' | 'assistant'; content: string }
+
+export type AskHandlers = {
+  /** Fires for each chunk of the spoken answer. */
+  onText: (delta: string) => void
+  /** Fires when the model starts running a tool. */
+  onTool: (name: string) => void
+}
 
 /**
  * Client for the local bridge (see bridge/server.mjs).
  *
- * Same `ask()` shape as the browser-direct path, so App.tsx doesn't care which
- * brain is behind it. The difference is what's reachable: this one runs on your
- * machine, so every MCP server in your Claude Code config is in play.
+ * There is exactly one brain now — this one. It used to be one of two, and the
+ * other talked straight to a hosted API from the browser, which needed a key in
+ * the bundle. That path is gone; see brain.ts.
  *
- * The socket is the session. The bridge holds one Claude Agent SDK query per
+ * The socket is the session. The bridge holds one local model session per
  * connection and the whole conversation lives inside it, so a dropped socket
  * silently wipes JARVIS's memory of the exchange while the transcript on screen
  * still shows it. That is why the reconnect below is loud rather than
@@ -169,7 +179,7 @@ function dispatch(ws: WebSocket) {
     }
 
     if (msg.type === 'ready') {
-      // The bridge announces immediately on connect from Claude Code's config,
+      // The bridge announces immediately on connect from the user's MCP config,
       // then again with live status once the agent initialises. Keep listening
       // so the later, more accurate list wins.
       servers = (msg.servers ?? [])
@@ -495,7 +505,7 @@ export function interrupt(): void {
   cancel()
 }
 
-/** `mcp__higgsfield__generate_image` -> `higgsfield · generate image` */
+/** `mcp__android__take_screenshot` -> `android · take screenshot` */
 function prettyToolName(raw: string): string {
   if (!raw.startsWith('mcp__')) return raw
   const [, server, ...rest] = raw.split('__')

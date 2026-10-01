@@ -1,4 +1,4 @@
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, tool } from './mcp.mjs'
 import { z } from 'zod'
 import { createConnection } from 'node:net'
 import { readdir, stat } from 'node:fs/promises'
@@ -18,8 +18,8 @@ import { join } from 'node:path'
  *
  * Reaching it is the interesting part.
  *
- * The Claude for Chrome extension already speaks to a local process — that is
- * how Claude Code's own browser tools work. The chain is:
+ * The Chrome browser extension already speaks to a local process — that is how
+ * its own tools work. The chain is:
  *
  *   Chrome extension  (fcoeoabgfenejglbffodgkkbkcdhcgfn)
  *        ↕  Chrome Native Messaging: 4-byte little-endian length + JSON
@@ -27,15 +27,15 @@ import { join } from 'node:path'
  *        ↕  Unix socket: /tmp/claude-mcp-browser-bridge-<user>/<pid>.sock
  *   whoever connects  ← this file
  *
- * What Claude Code normally does at that last step is detour through
- * `wss://bridge.claudeusercontent.com`, matching the CLI and the extension by
- * user id and OAuth token in Anthropic's cloud. That hop is the source of most
+ * What the extension's own client normally does at that last step is detour
+ * through a cloud relay, matching the extension to the client by user id and
+ * token. That hop is the source of most
  * of the "Browser extension is not connected" reports: the socket underneath is
  * healthy and the bridge above it simply fails to authenticate, with no
  * fallback to the socket that was working all along.
  *
- * We are on the same machine as the socket, so we skip the round trip to
- * Virginia entirely and connect to it directly. Nothing about the browser side
+ * We are on the same machine as the socket, so we skip the round trip to the
+ * relay entirely and connect to it directly. Nothing about the browser side
  * changes — the extension does not know or care who is on the other end of its
  * native host.
  *
@@ -170,8 +170,8 @@ class ChromeLink {
     const path = await findSocket()
     if (!path) {
       throw new Error(
-        'The Claude browser extension is not running on this machine. ' +
-          'Open Chrome with the Claude extension enabled, then try again.',
+        'The browser extension is not running on this machine. ' +
+          'Open Chrome with the extension enabled, then try again.',
       )
     }
     await new Promise((resolve, reject) => {
@@ -292,7 +292,7 @@ function toResult(reply) {
 }
 
 /**
- * Translate an image block from the Anthropic wire format into the MCP one.
+ * Translate an image block from the browser's wire format into the MCP one.
  *
  * The extension answers a screenshot with the shape the Messages API uses —
  * `{ type: 'image', source: { type: 'base64', media_type, data } }` — because
@@ -328,7 +328,7 @@ function normaliseImage(block) {
  * Strip the extension's own coaching out of its results.
  *
  * Every reply carries a <system-reminder> urging the caller to batch its next
- * actions through `browser_batch`. That advice is addressed to Claude Code's
+ * actions through `browser_batch`. That advice is addressed to the model's
  * browser harness, not to this one — we deliberately expose a narrower, named
  * set of tools so the permission gate can reason about them, and `browser_batch`
  * is not among them. Left in, it is an instruction arriving through a tool
@@ -567,7 +567,7 @@ export function chromeServer({ allowWrites }) {
                 type: 'text',
                 text:
                   'The browser extension is not running. Chrome may be closed, ' +
-                  'or the Claude extension may be disabled.',
+                  'or the extension may be disabled.',
               },
             ],
           }
@@ -649,10 +649,10 @@ export function chromeServer({ allowWrites }) {
     tool(
       'chrome_find',
       'Find an element by describing it in plain words, e.g. "the search box". ' +
-        'This one runs a model inside the extension, so some Claude accounts ' +
-        'cannot use it at all and it fails with a permission error. When that ' +
-        'happens do not retry it — use chrome_read_page, which returns the same ' +
-        'refs by reading the page directly and always works.',
+        'This one runs a model inside the extension, so it depends on what that ' +
+        'extension is allowed to do and fails with a permission error when it ' +
+        'is not. When that happens do not retry it — use chrome_read_page, which ' +
+        'returns the same refs by reading the page directly and always works.',
       {
         query: z.string().describe('What to look for, described naturally.'),
         tabId,

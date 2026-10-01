@@ -94,17 +94,17 @@ type Rule = {
 const FOOTAGE = ['Assembling the footage.', 'Rendering the sequence.']
 
 const BY_TOOL: Rule[] = [
-  // Video sits above image because higgsfield and palmier both do either, so
+  // Video sits above image because a generation server that does either will
   // the verb in the tool name is the only thing separating them — a rule on the
   // server alone would send every generate_video to "Rendering."
   { tool: /video|footage|\bclip\b|\breel\b|talking_head/, lines: FOOTAGE },
   {
-    server: /higgsfield|openrouter-image|dalle|flux|midjourney/,
+    server: /image|img|picture|render|draw|flux|dalle/,
     tool: /image|photo|thumbnail|render|upscale|seedream/,
     lines: ['Rendering.', 'Composing it now.'],
   },
   // The editors, once the two rules that read the verb have had their turn.
-  { server: /palmier|heygen|runway|descript/, lines: FOOTAGE },
+  { server: /video|footage|clip|runway|descript/, lines: FOOTAGE },
   {
     server: /playwright|puppeteer|browserbase|chrome/,
     tool: /\bbrowser\b|navigate/,
@@ -127,7 +127,7 @@ const BY_TOOL: Rule[] = [
     lines: ['Checking your calendar.', 'Consulting the diary.'],
   },
   {
-    server: /elevenlabs|openai-tts/,
+    server: /tts|speech|voice|audio/,
     tool: /speech|\bvoice\b|\btts\b|text_to_sound/,
     lines: ['Synthesising.', 'Working on it, sir.'],
   },
@@ -156,8 +156,10 @@ const BY_TOOL: Rule[] = [
     lines: ['Running the query.', 'Pulling the figures.'],
   },
   {
-    server: /\bexa\b|serper|serpapi|perplexity|tavily|brave/,
-    tool: /search|\bweb\b|\bfetch\b|crawl|research/,
+    // Named by what the server DOES rather than by which product it is, because
+    // this used to be a list of paid search APIs and those are gone. Anything
+    // whose tools search or fetch gets the same line.
+    tool: /search|\bweb\b|\bfetch\b|crawl|research|\bexa\b/,
     lines: ['Searching.', 'Consulting the record.'],
   },
 ]
@@ -171,7 +173,7 @@ const pickers = BY_TOOL.map((r) => ({ ...r, pick: makePicker(r.lines) }))
  *
  * The second form matters more than it looks: the bridge client prettifies
  * names for the HUD badge before handing them on, so what actually arrives
- * here is `higgsfield · generate image`. Parsing only the raw form meant every
+ * here is `android · take screenshot`. Parsing only the raw form meant every
  * rule below silently missed and every tool got the generic line.
  */
 function split(toolName: string): { server: string; tool: string } {

@@ -1,22 +1,31 @@
 /**
  * JARVIS local bridge.
  *
- * Runs the Claude Agent SDK — Claude Code as a library — and exposes one turn
- * of conversation over a WebSocket. The browser stays the face and the voice;
- * this process is the brain and the hands.
+ * Runs a local, open-source model and exposes one turn of conversation over a
+ * WebSocket. The browser stays the face and the voice; this process is the
+ * brain and the hands.
  *
- * Two things this buys over calling the Claude API from the browser:
- *   1. No API key. It authenticates exactly the way `claude` does, off your
- *      existing login, and bills to that same account.
- *   2. Every MCP server in your Claude Code config is available, including the
- *      local stdio ones a browser could never reach — higgsfield, elevenlabs,
- *      android, playwright, palmier-pro and the rest.
+ * The model is whatever you point JARVIS_MODEL_BASE_URL at — Ollama by default,
+ * but llama.cpp, LM Studio and vLLM all speak the same protocol. Nothing here
+ * is billed and nothing here phones home: the only network calls are to
+ * localhost.
+ *
+ * What it still buys over calling a model from the browser:
+ *   1. The model's tools are MCP servers, and a browser tab cannot spawn the
+ *      local stdio ones. This process can, so `android`, `playwright` and
+ *      anything else in your config are all reachable.
+ *   2. The key, if the server wants one, stays here rather than being inlined
+ *      into a JavaScript bundle.
  *
  *   node bridge/server.mjs
  */
 
 import { WebSocketServer } from 'ws'
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { runTurn, modelStatus, BRIDGE_MODEL_NAME, MODEL_URL } from './local-llm.mjs'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
@@ -99,27 +108,22 @@ function originAllowed(origin) {
 const ALLOW_WRITES = process.env.JARVIS_ALLOW_WRITES === '1'
 
 /**
- * The orchestrator model. Override with JARVIS_MODEL to trade quality for pace
- * — claude-sonnet-5 is noticeably snappier on camera if Opus feels slow.
+ * Which model, and how it is reached. Both live in local-llm.mjs, which owns
+ * everything about the model server; this file only ever needs the name, for
+ * the boot line.
+ *
+ * Override with JARVIS_MODEL_NAME. A bigger model is the single biggest quality
+ * win available — a 70B will use tools where an 8B mostly talks about them.
  */
-const MODEL = process.env.JARVIS_MODEL ?? 'claude-opus-5'
+const MODEL = BRIDGE_MODEL_NAME
 
 /**
- * How hard the model thinks before answering.
- *
- * This was 'low', on the reasoning that a voice assistant is judged on latency
- * — and that is true right up until the answer is thin. Low effort scopes the
- * work tightly to what was literally asked: fewer tool calls, less
- * cross-referencing, no second look. On a model of this tier that is leaving
- * most of it on the table.
- *
- * 'medium' is the compromise worth having here. It reasons and reaches for
- * tools noticeably more than 'low' while still answering inside the window a
- * spoken conversation tolerates. Raise it to 'high' or 'xhigh' when quality
- * matters more than pace; drop back to 'low' when filming and every second of
- * dead air shows.
+ * How many tool-calling rounds one question may take before the brain stops
+ * and answers from what it has. A local model loops more than a hosted one
+ * does — it re-reads the same page, asks for the same screenshot twice — so
+ * the ceiling matters. See JARVIS_MODEL_MAX_TURNS.
  */
-const EFFORT = process.env.JARVIS_EFFORT ?? 'high'
+const EFFORT = process.env.JARVIS_MODEL_MAX_TURNS ?? 8
 
 /**
  * Both spellings of every renamed built-in are listed on purpose. The SDK
@@ -142,7 +146,7 @@ const WRITE_BUILTINS = new Set([
 ])
 
 /**
- * Every MCP server Claude Code has configured, read out of its own config.
+ * Every MCP server the user has configured, read out of their own config.
  *
  * This does two jobs. The HUD wants the names while the boot animation plays,
  * and the agent doesn't emit its init message — and therefore its server
@@ -204,19 +208,23 @@ const mcpToolOf = (toolName) => toolName.split('__').slice(2).join('__')
  * ALLOW_WRITES no matter which server it came from, which is what keeps
  * `make_outbound_call` and `download_lottie` still until you ask for them.
  */
+/**
+ * An explicit allowlist of servers whose whole surface is lookups — search,
+ * registries, analytics reads. Anything there runs in read-only mode.
+ *
+ * Paid services were on this list once, because a generation server is the
+ * headline demo and its tools (`generate_image`) begin with no read verb, so
+ * without an entry they fell to the deny branch and stopped working. They are
+ * gone now, along with the subscriptions that went with them: everything this
+ * bridge reaches runs on the user's own machine or on a free tier. What is left
+ * are the servers that only ever read.
+ *
+ * A server you add yourself is not on here by default, and does not need to be
+ * — the verb rules below cover it. Add one only when its tools read as writes
+ * but are not.
+ */
 const READ_ONLY_MCP = new Set([
-  'exa', 'exa-code', 'serper', 'serpapi', 'lottie-search', 'mcp-registry',
-  'openrouter', 'openrouter-image', 'Microsoft_Clarity',
-  // The generation servers belong here too, and leaving them out was a real
-  // regression: `generate_image` begins with no read verb, so it fell to the
-  // deny branch and "generate an image of the Mark VII suit" — the headline
-  // demo — stopped working in the default mode.
-  //
-  // Putting them on the allowlist is safe because the veto below still applies
-  // to allowlisted servers: it is what continues to withhold
-  // make_outbound_call, delete_character, create_* and edit_image. Generation
-  // runs; acting on the world does not.
-  'higgsfield', 'heygen', 'elevenlabs',
+  'exa', 'exa-code', 'lottie-search', 'mcp-registry', 'Microsoft_Clarity',
 ])
 
 /**
@@ -242,15 +250,14 @@ const EFFECTFUL_VERB =
  * occasionally the wrong answer. `openrouter send-message` sends a prompt to a
  * language model and gets text back — nothing in the world changes — but it is
  * indistinguishable by name from sending mail. Asking a second model a question
- * is one of the better things this assistant can do, so it is named here
- * instead of being lost to a regex.
+ * That server was a paid API and went with the rest of them, so the set is
+ * empty for now. It stays, because the next server whose `send_message` only
+ * sends a message will need it, and an empty set is the honest way to leave a
+ * mechanism in place.
  *
  * Full `server__tool` keys, so an exemption can never leak across servers.
  */
-const VETO_EXEMPT = new Set([
-  'openrouter__send-message',
-  'openrouter__send-feedback',
-])
+const VETO_EXEMPT = new Set([])
 
 function decideTool(name) {
   if (READ_ONLY_BUILTINS.has(name)) return true
@@ -437,27 +444,6 @@ Using tools:
   Put the source in the panel as a short tag like "REUTERS" instead.
 - If a tool fails or isn't connected, one plain sentence saying so.
 - If you don't know, say you don't know.`
-
-/**
- * ElevenLabs credentials, borrowed from the MCP server config.
- *
- * If you've set up the elevenlabs MCP server, the key is already on this
- * machine — no reason to make you paste it into a second .env file. The browser
- * never sees it: it POSTs text to /tts here and gets audio back.
- */
-function elevenKey() {
-  if (process.env.ELEVENLABS_API_KEY) return process.env.ELEVENLABS_API_KEY
-  try {
-    const cfg = JSON.parse(
-      readFileSync(join(homedir(), '.claude.json'), 'utf8'),
-    )
-    return cfg.mcpServers?.elevenlabs?.env?.ELEVENLABS_API_KEY ?? null
-  } catch {
-    return null
-  }
-}
-
-const VOICE_ID = process.env.JARVIS_VOICE_ID ?? 'JBFqnCBsd6RMkjVDRZzb'
 
 /**
  * Where /file is permitted to read from, and how big a read may get.
@@ -677,14 +663,20 @@ const handleRequest = async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/health') {
-    // The browser reads this once at boot to decide which voice engine to use.
-    // Both premium paths ride the same ElevenLabs key, so both flags track it:
-    // with a key the app transcribes with Scribe and speaks with ElevenLabs;
-    // without one it falls back to the browser's own recogniser and voice, so a
-    // student with nothing configured still has a working assistant.
-    const eleven = Boolean(elevenKey())
+    // The browser reads this at boot to know the bridge is alive, and the
+    // diagnostics panel reads it to say why it is not. Speech needs no flag
+    // any more — it runs on the browser's own recogniser and voice, on the
+    // user's machine, with nothing to configure. The model is the one thing
+    // that can be missing, so it is the one thing reported.
+    const model = await modelStatus()
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ ok: true, tts: eleven, stt: eleven }))
+    return res.end(
+      JSON.stringify({
+        ok: model.ok,
+        model: model.model,
+        ...(model.error ? { error: model.error } : {}),
+      }),
+    )
   }
 
   // Serve local image files to the page. Screenshots and generated art land on
@@ -806,161 +798,6 @@ const handleRequest = async (req, res) => {
     }
   }
 
-  if (req.method === 'POST' && req.url === '/tts') {
-    const key = elevenKey()
-    if (!key) {
-      res.writeHead(503, cors)
-      return res.end('no elevenlabs key')
-    }
-    // A spoken line is a few hundred bytes. Anything approaching this is not a
-    // sentence, and buffering it unbounded would let one request eat the heap.
-    let body = ''
-    let overflowed = false
-    for await (const chunk of req) {
-      body += chunk
-      if (body.length > 64 * 1024) {
-        overflowed = true
-        break
-      }
-    }
-    if (overflowed) {
-      req.destroy()
-      res.writeHead(400, cors)
-      return res.end('body too large')
-    }
-    // Inside a try: this handler is async with nothing catching its rejection,
-    // so a malformed body used to take the entire bridge down with it.
-    let text
-    try {
-      ;({ text } = JSON.parse(body || '{}'))
-    } catch {
-      res.writeHead(400, cors)
-      return res.end('bad json')
-    }
-    if (!text) {
-      res.writeHead(400, cors)
-      return res.end('no text')
-    }
-    try {
-      const upstream = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
-          // 22kHz mono is half the bytes of 44kHz and indistinguishable through
-          // a laptop speaker; optimize_streaming_latency=3 trades a little
-          // prosody for a much earlier first byte.
-          `?output_format=mp3_22050_32&optimize_streaming_latency=3`,
-        {
-          method: 'POST',
-          headers: { 'xi-api-key': key, 'content-type': 'application/json' },
-          body: JSON.stringify({
-            text,
-            // Flash is the low-latency model — a conversation needs speed more
-            // than it needs the last few percent of quality.
-            model_id: 'eleven_flash_v2_5',
-            voice_settings: {
-              stability: 0.4,
-              similarity_boost: 0.75,
-              speed: 1.05,
-            },
-          }),
-        },
-      )
-      if (!upstream.ok) {
-        res.writeHead(upstream.status, cors)
-        return res.end(await upstream.text())
-      }
-
-      // Pipe it through rather than buffering. Waiting for the whole file here
-      // would throw away everything the streaming endpoint just bought us.
-      res.writeHead(200, {
-        ...cors,
-        'content-type': 'audio/mpeg',
-        'cache-control': 'no-cache',
-      })
-      for await (const chunk of upstream.body) res.write(Buffer.from(chunk))
-      return res.end()
-    } catch (err) {
-      res.writeHead(502, cors)
-      return res.end(String(err?.message ?? err))
-    }
-  }
-
-  // Speech to text. The browser captures one spoken segment as a compressed
-  // audio blob and posts the raw bytes here; the bridge hands them to
-  // ElevenLabs Scribe and returns the transcript. This is what replaced the
-  // browser's own SpeechRecognition — that API dies silently under always-on
-  // use, and a server-side transcriber cannot. Detecting that the user is
-  // speaking at all is done locally with voice-activity detection, which never
-  // touches this endpoint; this is only for the words.
-  if (req.method === 'POST' && req.url === '/stt') {
-    const key = elevenKey()
-    if (!key) {
-      res.writeHead(503, cors)
-      return res.end('no elevenlabs key')
-    }
-
-    const type = req.headers['content-type'] || 'audio/webm'
-    const chunks = []
-    let size = 0
-    let overflowed = false
-    // A few seconds of Opus is well under a megabyte; 25 MB is a generous
-    // ceiling that still refuses a runaway stream before it eats the heap.
-    for await (const chunk of req) {
-      chunks.push(chunk)
-      size += chunk.length
-      if (size > 25 * 1024 * 1024) {
-        overflowed = true
-        break
-      }
-    }
-    if (overflowed) {
-      req.destroy()
-      res.writeHead(413, cors)
-      return res.end('audio too large')
-    }
-    // Silence, or a click. Nothing to transcribe, and calling out to the API
-    // for it would only add latency to a non-answer.
-    if (size < 1200) {
-      res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ text: '' }))
-    }
-
-    try {
-      // The filename extension is the only hint Scribe gets about the codec, so
-      // derive it from the content-type the MediaRecorder reported rather than
-      // hard-coding one.
-      const ext = type.includes('ogg')
-        ? 'ogg'
-        : type.includes('mp4') || type.includes('mpeg')
-          ? 'mp4'
-          : type.includes('wav')
-            ? 'wav'
-            : 'webm'
-      const form = new FormData()
-      form.append('model_id', 'scribe_v1')
-      form.append(
-        'file',
-        new Blob([Buffer.concat(chunks)], { type }),
-        `speech.${ext}`,
-      )
-
-      const upstream = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
-        method: 'POST',
-        headers: { 'xi-api-key': key },
-        body: form,
-      })
-      if (!upstream.ok) {
-        res.writeHead(upstream.status, cors)
-        return res.end(await upstream.text())
-      }
-      const data = await upstream.json()
-      res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ text: (data.text ?? '').trim() }))
-    } catch (err) {
-      res.writeHead(502, cors)
-      return res.end(String(err?.message ?? err))
-    }
-  }
-
   res.writeHead(404, cors)
   res.end()
 }
@@ -1001,10 +838,20 @@ const wss = new WebSocketServer({
 server.listen(PORT)
 
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
-console.log(
-  `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : 'using browser fallback voice'}`,
-)
-console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
+console.log(`[jarvis] model ${MODEL} · max ${EFFORT} tool turns`)
+// Checked rather than assumed, because a bridge that starts happily and fails
+// on the first question is the worst shape it can take: the interface shows a
+// connected assistant that cannot think, and nothing says why.
+const model = await modelStatus()
+if (model.ok) {
+  console.log(`[jarvis] model reachable at ${MODEL_URL}`)
+} else {
+  console.warn(`[jarvis] MODEL NOT REACHABLE — ${model.error}`)
+  console.warn(
+    `[jarvis] start one with: ollama run ${MODEL}` +
+      '   (or set JARVIS_MODEL_BASE_URL to wherever yours lives)',
+  )
+}
 console.log(
   `[jarvis] writes ${ALLOW_WRITES ? 'ENABLED' : 'disabled'}` +
     (ALLOW_WRITES ? '' : ' — set JARVIS_ALLOW_WRITES=1 to permit shell/file/device actions'),
@@ -1017,7 +864,7 @@ void chromeAvailable().then((ok) => {
   console.log(
     ok
       ? `[jarvis] browser control ready${ALLOW_WRITES ? '' : ' (reading only — clicking and typing need JARVIS_ALLOW_WRITES=1)'}`
-      : '[jarvis] browser control unavailable — open Chrome with the Claude extension enabled',
+      : '[jarvis] browser control unavailable — open Chrome with the browser extension enabled',
   )
 })
 
@@ -1031,15 +878,16 @@ console.log(
  * What to tell the browser when a turn ends badly. Plain sentences, because
  * whatever reaches the client is liable to be spoken.
  */
-const RESULT_FAILURES = {
-  error_during_execution: 'The turn failed part way through.',
-  error_max_turns: 'The turn ran too long and was stopped.',
-  error_max_budget_usd: 'The budget for this turn ran out.',
-  error_max_structured_output_retries: 'The answer could not be assembled.',
-  default: 'The turn ended without an answer.',
-}
-
-wss.on('connection', (socket) => {
+/**
+ * One browser connection.
+ *
+ * Async because setting up the brain awaits real work — four in-process MCP
+ * servers to join and the user's own to start — and a bridge that accepted a
+ * socket and then failed silently would leave the interface showing a connected
+ * assistant with no tools. A failure here is logged and the socket closed, so
+ * the browser reconnects rather than waiting on a brain that never arrived.
+ */
+const handleConnection = async (socket) => {
   console.log('[jarvis] client connected')
 
   // Answer the HUD straight away rather than making it wait for the agent's
@@ -1048,26 +896,13 @@ wss.on('connection', (socket) => {
     JSON.stringify({ type: 'ready', servers: Object.keys(MCP_SERVERS) }),
   )
 
-  /** Resolves the pending user message into the SDK's input generator. */
-  let deliver = null
-  let closed = false
-  const inbox = []
-
-  async function* userMessages() {
-    while (!closed) {
-      const text =
-        inbox.shift() ??
-        (await new Promise((resolve) => {
-          deliver = resolve
-        }))
-      if (closed || text == null) return
-      yield {
-        type: 'user',
-        message: { role: 'user', content: text },
-        parent_tool_use_id: null,
-      }
-    }
-  }
+  /**
+   * Set on close. Written for the socket handlers below and read by nothing —
+   * an in-flight turn stops through its own AbortController instead — but kept
+   * because it is the one flag that says this connection is over, and the next
+   * person to add a handler will want it.
+   */
+  let _closed = false
 
   const send = (msg) => {
     if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(msg))
@@ -1113,64 +948,147 @@ wss.on('connection', (socket) => {
       send({ type: kind, id, ...args })
     })
 
+  // -------------------------------------------------------------------------
+  // The brain
+  // -------------------------------------------------------------------------
+
   /**
-   * Announcing a tool on the HUD, once, and only if it actually runs.
+   * Every tool this bridge can reach, as connected MCP clients.
    *
-   * A tool_use block surfaces twice — as a partial stream event and again on
-   * the completed assistant message — so ids are remembered. The harder part
-   * is timing, because a refused tool that lights the badge, plays the sound
-   * and provokes a "working on it" line, for work that never happens, reads as
-   * a bug on camera.
-   *
-   * The SDK's order is: the block starts streaming, then canUseTool is asked,
-   * then the tool runs. So nothing is known at content_block_start. Announcing
-   * from inside canUseTool would know the verdict but miss tools entirely —
-   * measured on this SDK, the callback is consulted only for calls the CLI
-   * hasn't already settled, so a `Bash: echo` its own classifier waves through
-   * never reaches us at all.
-   *
-   * So: announce immediately for anything decideTool permits, since those run.
-   * Hold the rest, and let the tool_result settle it — a refusal comes back as
-   * is_error, anything else really did execute and has earned its badge, a
-   * beat late. Nothing is ever announced for work that didn't happen.
+   * Two kinds, and the split matters. The four JARVIS servers are built inside
+   * this process and reach the browser through callbacks that close over this
+   * socket, so they are per-connection — an in-memory transport joins each to a
+   * client with no port and no subprocess. Everything else the user has
+   * configured in ~/.claude.json is a separate program speaking MCP over stdio
+   * or HTTP; those are started here too, and a failure is reported against a
+   * connection the user can see rather than lost in a boot log they have already
+   * scrolled past.
    */
-  const seenTools = new Set()
-  const heldTools = new Map()
+  const clients = new Map()
+
+  const own = {
+    jarvis: displayServer(
+      (panel) => send({ type: 'panel', panel }),
+      (blade) => send({ type: 'blade', blade }),
+    ),
+    // A separate key because MCP tool names are `mcp__<server>__<tool>` and one
+    // server carries one name; the underscore in it is why decideTool and
+    // announceTool both name `jarvis_ui` explicitly.
+    jarvis_ui: uiServer((op, args) => send({ type: 'ui', op, args })),
+    // The user's own Chrome, over the extension's native-host socket. Built
+    // here with the rest so the write gate is read once, at the same point as
+    // everything else.
+    jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }),
+    // The camera, which unlike everything else here has to ask and wait.
+    jarvis_eyes: visionServer(ask),
+  }
+
+  for (const [name, server] of Object.entries(own)) {
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'jarvis-brain', version: '1.0.0' })
+    await Promise.all([
+      client.connect(clientSide),
+      server.connect(serverSide),
+    ])
+    clients.set(name, client)
+  }
+
+  for (const [name, spec] of Object.entries(MCP_SERVERS)) {
+    try {
+      let transport = null
+      if (spec.command) {
+        transport = new StdioClientTransport({
+          command: spec.command,
+          args: spec.args ?? [],
+          env: { ...process.env, ...(spec.env ?? {}) },
+          // An MCP server's stderr is not a protocol channel. Inheriting it
+          // splashes another program's diagnostics across this process's logs.
+          stderr: 'ignore',
+        })
+      } else if (spec.url) {
+        transport = new StreamableHTTPClientTransport(new URL(spec.url), {
+          requestInit: { headers: spec.headers ?? {} },
+        })
+      }
+      if (!transport) {
+        console.warn(`[jarvis] skipping MCP server ${name}: no command or url`)
+        continue
+      }
+      const client = new Client({ name: 'jarvis-brain', version: '1.0.0' })
+      await client.connect(transport)
+      clients.set(name, client)
+    } catch (err) {
+      // One bad server must not cost the user the rest. JARVIS without the
+      // phone still has the display, the browser and the camera.
+      console.warn(
+        `[jarvis] MCP server ${name} unavailable: ${err?.message ?? err}`,
+      )
+    }
+  }
+
+  // Tool lists, read once. Every one of them is sent to the model on every
+  // turn — which is why a server carrying two hundred tools is a real cost, but
+  // hiding tools behind a search is how "open my notifications" quietly becomes
+  // a web search. They are all here, always.
+  for (const [name, client] of clients) {
+    try {
+      const { tools } = await client.listTools()
+      client.__jarvisTools = tools
+    } catch (err) {
+      console.warn(
+        `[jarvis] could not list tools for ${name}: ${err?.message ?? err}`,
+      )
+      client.__jarvisTools = []
+    }
+  }
+
+  send({ type: 'ready', servers: [...clients.keys()] })
+  console.log(`[jarvis] ${clients.size} MCP servers available`)
+
+  /**
+   * The conversation, oldest first.
+   *
+   * Kept across questions rather than rebuilt per turn so the model has
+   * context: "and make it red instead" is a normal thing to say to an
+   * assistant, and a fresh context each time turns it into a riddle.
+   */
+  const history = [{ role: 'system', content: SYSTEM_PROMPT }]
 
   /**
    * Resolves when the turn in flight has actually finished.
    *
-   * Waiting on session.interrupt() alone is not enough. It resolves when the
-   * agent has been *told* to stop, not when it has, so the last tokens of the
-   * abandoned answer are still on their way — and since nothing on the wire
-   * identifies which question a delta belongs to, they land on the next turn's
-   * listener. Measured: ask for ALPHA, interrupt, ask for BRAVO, and BRAVO's
-   * answer arrives as "ALPHA\nBRAVO".
-   *
-   * The SDK emits exactly one `result` per turn, so that is the boundary worth
-   * waiting for. Raced against a timeout because a turn that never reports one
-   * must not wedge the conversation for ever — a stray word is a blemish, a
-   * deadlocked assistant is not.
+   * Waiting on an abort alone is not enough. It stops the request, but the last
+   * tokens are already on the wire — and since nothing on the wire identifies
+   * which question a delta belongs to, they land on the next turn's listener.
+   * So the new question waits for this turn to report done before it is
+   * adopted. Raced against a timeout because a turn that never reports must not
+   * wedge the conversation for ever: a stray word is a blemish, a deadlocked
+   * assistant is not.
    */
   let settling = Promise.resolve()
   let finishTurn = null
+  let inTurn = false
+  /** Aborts the fetch in flight. Null between turns. */
+  let abort = null
 
   const turnFinished = () =>
     new Promise((resolve) => {
       finishTurn = resolve
     })
 
-  /**
-   * A brief pause so the abandoned turn's frames are tagged with the OLD id
-   * before the new one is adopted. Short, because correctness now comes from
-   * the tag rather than from the wait — this only has to cover the gap, not
-   * outlast the whole turn.
-   */
+  /** A beat, so the abandoned turn's frames are tagged with the old id. */
   const SETTLE_CAP_MS = 400
 
-  const announceTool = (id, name) => {
-    if (!name || (id && seenTools.has(id))) return
-    if (id) seenTools.add(id)
+  /**
+   * Announcing a tool on the HUD, and only if it actually runs.
+   *
+   * Called from inside the loop immediately before a permitted tool is invoked,
+   * which is the one moment the verdict is known. A refused tool is never
+   * announced at all — a badge, a sound and a "working on it" line for work
+   * that never happened reads as a bug on camera.
+   */
+  const announceTool = (name) => {
+    if (!name) return
     // The display tool isn't work being done, it's the HUD drawing itself —
     // announcing it would put "jarvis · display" in the tool badge and trigger
     // a "working on it" filler for something already on screen.
@@ -1179,221 +1097,71 @@ wss.on('connection', (socket) => {
     // interface is the interface talking about itself, not work being done for
     // the user, and the badge would be describing the very thing they can see.
     if (name.startsWith('mcp__jarvis_ui__')) return
-    if (decideTool(name)) return sendTurn({ type: 'tool', name })
-    if (id) heldTools.set(id, name)
+    sendTurn({ type: 'tool', name })
   }
 
-  const settleTool = (id, failed) => {
-    const name = heldTools.get(id)
-    if (name === undefined) return
-    heldTools.delete(id)
-    if (!failed) sendTurn({ type: 'tool', name })
-  }
+  /** One question, start to finish. Never throws — failures are reported. */
+  const answer = async (text, id) => {
+    answering = id
+    const controller = new AbortController()
+    abort = controller
+    inTurn = true
+    history.push({ role: 'user', content: text })
 
-  const session = query({
-    prompt: userMessages(),
-    options: {
-      // Everything Claude Code has configured, plus the HUD as an in-process
-      // server. The HUD's handler closes over this socket, so a `display` call
-      // lands on screen directly — which is also why this object is built per
-      // connection rather than once.
-      mcpServers: {
-        ...MCP_SERVERS,
-        jarvis: displayServer(
-          (panel) => send({ type: 'panel', panel }),
-          (blade) => send({ type: 'blade', blade }),
-        ),
-        // The interface controls, on the same socket. A separate key because
-        // MCP tool names are `mcp__<key>__<tool>` and one key can only carry
-        // one server; the underscore in it is why decideTool and announceTool
-        // both name `jarvis_ui` explicitly.
-        jarvis_ui: uiServer((op, args) => send({ type: 'ui', op, args })),
-        // The user's own Chrome, over the extension's native-host socket. It
-        // holds no per-connection state, but it is built here with the rest so
-        // the write gate is read once, at the same point as everything else.
-        jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }),
-        // The camera, which unlike everything else here has to ask and wait.
-        jarvis_eyes: visionServer(ask),
-      },
-      // A plain system prompt, not the claude_code preset. The preset is
-      // tuned for a coding agent — verbose, file-oriented, and a large chunk
-      // of input tokens on every turn. Replacing it makes the persona stick,
-      // keeps answers short enough to speak, and cuts cost per turn.
-      systemPrompt: SYSTEM_PROMPT,
-      // Run from the home directory so project-scoped MCP servers don't shadow
-      // the global ones, and so file tools have a sane root.
-      cwd: homedir(),
-      // No filesystem settings at all. Left to its default the SDK loads
-      // ~/.claude/settings.json and settings.local.json exactly as the CLI
-      // does — which on a working machine means a bypassPermissions default
-      // and a pile of allow-rules for Bash. Allow-rules are matched before the
-      // permission callback, so decideTool below would never even be asked
-      // about the tools it most needs to refuse. Empty makes this bridge the
-      // only authority. It also stops the global CLAUDE.md riding along on
-      // every voice turn, carrying instructions written for a coding agent
-      // into a conversation that is meant to be two sentences long.
-      //
-      // The cost is that MCP servers stop being discovered too, which is why
-      // mcpServers above passes them in by hand.
-      settingSources: [],
-      // Stated explicitly, and it has to be.
-      //
-      // With no `model` here the SDK falls back to its own default, which on
-      // this machine resolved to claude-opus-4-8[1m] — not what src/config.ts
-      // declares for the browser-direct path, and not anything anyone chose.
-      // Normally your own `/model` preference would decide, but that lives in
-      // the settings files `settingSources: []` deliberately stops loading, so
-      // without this line nothing in the project has a say at all.
-      model: MODEL,
-      effort: EFFORT,
-      maxTurns: 24,
-      permissionMode: 'default',
-      // Without this the SDK only emits whole assistant messages, and JARVIS
-      // would sit silent until the entire answer was written. Partial events
-      // are what let speech start on the first finished sentence.
-      includePartialMessages: true,
-      // Signature is (toolName, input, options) and it must return a
-      // PermissionResult object. Returning a bare boolean silently denies
-      // everything, with the tool name arriving undefined.
-      //
-      // Worth knowing: this is a last gate, not the only one. Calls the CLI
-      // has already settled never arrive here — its own classifier waves
-      // through a `Bash: echo hello` without asking, and only reaches us for
-      // something with a consequence, like a `touch`. So a deny here is
-      // reliable; an absence of a call here is not proof nothing ran.
-      canUseTool: async (toolName) => {
-        const ok = decideTool(toolName)
-        console.log(`[jarvis] tool ${toolName} -> ${ok ? 'allow' : 'deny'}`)
-        return ok
-          ? { behavior: 'allow' }
-          : {
-              behavior: 'deny',
-              // Every word of this can end up spoken, so it carries no command
-              // to read out — the persona is forbidden from saying one aloud.
-              message:
-                'Blocked: JARVIS is running in read-only mode and cannot take' +
-                ' actions that change anything. Tell the user this action is' +
-                ' unavailable until they enable write access on the machine.',
-            }
-      },
-    },
-  })
-
-  // Pump the session's output stream to the browser for as long as it lives.
-  ;(async () => {
     try {
-      for await (const msg of session) {
-        if (process.env.JARVIS_DEBUG === '1') {
-          console.log('[msg]', msg.type, msg.event?.type ?? '')
-        }
-
-        switch (msg.type) {
-          // Raw Anthropic stream events, surfaced by includePartialMessages.
-          // This is the ONLY place spoken text arrives: there is no top-level
-          // text_delta message in the SDK union and the 'assistant' message
-          // carries no deltas either. Turn includePartialMessages off and
-          // JARVIS goes completely mute.
-          case 'stream_event': {
-            const ev = msg.event
-            if (
-              ev?.type === 'content_block_delta' &&
-              ev.delta?.type === 'text_delta' &&
-              ev.delta.text
-            ) {
-              sendTurn({ type: 'text', delta: ev.delta.text })
-            }
-            if (
-              ev?.type === 'content_block_start' &&
-              ev.content_block?.type === 'tool_use'
-            ) {
-              announceTool(ev.content_block.id, ev.content_block.name)
-            }
-            break
-          }
-
-          case 'assistant': {
-            // Fallback for builds that emit whole assistant messages rather
-            // than partial events. Deduped against the stream_event path.
-            for (const block of msg.content ?? msg.message?.content ?? []) {
-              if (block.type === 'tool_use') {
-                announceTool(block.id, block.name)
-              }
-            }
-            break
-          }
-
-          case 'user': {
-            // Tool results come back as a user message. This is the only place
-            // a held announcement can be resolved: a refused tool arrives with
-            // is_error set and stays off the HUD, anything else ran.
-            const blocks = msg.message?.content
-            if (!Array.isArray(blocks)) break
-            for (const block of blocks) {
-              if (block?.type === 'tool_result') {
-                settleTool(block.tool_use_id, block.is_error === true)
-              }
-            }
-            break
-          }
-
-          case 'result':
-            // A result is not automatically a success. The error subtypes
-            // carry no `result` field at all, so reporting them as 'done' with
-            // empty text is indistinguishable from a turn that simply had
-            // nothing to say — the HUD stops spinning and JARVIS stands there
-            // silent. Say what happened instead.
-            if (msg.subtype === 'success') {
-              sendTurn({
-                type: 'done',
-                text: msg.result ?? '',
-                costUsd: msg.total_cost_usd ?? null,
-              })
-            } else {
-              console.error(
-                `[jarvis] turn failed: ${msg.subtype}`,
-                msg.errors ?? '',
-              )
-              sendTurn({
-                type: 'error',
-                message: RESULT_FAILURES[msg.subtype] ?? RESULT_FAILURES.default,
-              })
-            }
-            // Whatever was waiting on this turn to finish can go now. This is
-            // the only place a turn is genuinely over.
-            finishTurn?.()
-            finishTurn = null
-            // One turn's tool ids are never referred to again, and these
-            // otherwise grow for as long as the socket is open.
-            seenTools.clear()
-            heldTools.clear()
-            break
-
-          case 'system':
-            if (msg.subtype === 'init') {
-              // Servers report 'pending' until first use — they connect
-              // lazily — so only drop the ones that are actually unusable.
-              const usable = (msg.mcp_servers ?? [])
-                .filter((s) => s.status !== 'needs-auth' && s.status !== 'failed')
-                .map((s) => s.name)
-              send({ type: 'ready', servers: usable })
-              console.log(`[jarvis] ${usable.length} MCP servers available`)
-            }
-            break
-        }
-      }
+      const said = await runTurn({
+        messages: history,
+        clients,
+        gate: decideTool,
+        onDelta: (delta) => sendTurn({ type: 'text', delta }),
+        onToolStart: announceTool,
+        signal: controller.signal,
+      })
+      sendTurn({ type: 'done', text: said ?? '' })
     } catch (err) {
-      console.error('[jarvis] session error:', err)
-      send({ type: 'error', message: String(err?.message ?? err) })
-      // The stream is finished either way — nothing will ever be read from it
-      // again. Leaving the socket open would leave the client believing it has
-      // a working bridge, and every later question would hang for ever waiting
-      // on a pump that has already stopped. Close it so it reconnects.
-      closed = true
-      deliver?.(null)
-      session.close?.()
-      socket.close()
+      // An abort is a barge-in, not a failure — the user spoke over him on
+      // purpose, and reporting it as an error would put a red line on screen
+      // for something they asked for.
+      if (!controller.signal.aborted) {
+        console.error('[jarvis] turn failed:', err)
+        // A model server that is not running is the common case, and "fetch
+        // failed" sends people looking for a network problem. Say what to do.
+        const unreachable = /fetch failed|ECONNREFUSED|aborted/i.test(
+          String(err?.message ?? err),
+        )
+        sendTurn({
+          type: 'error',
+          message: unreachable
+            ? `I cannot reach my model server at ${MODEL_URL}. Start it with \`ollama run ${MODEL}\` and ask me again.`
+            : String(err?.message ?? err),
+        })
+      }
+    } finally {
+      // Order matters: resolve first, while inTurn is still true, so an
+      // interrupt racing this turn sees a turn that has genuinely ended.
+      finishTurn?.()
+      finishTurn = null
+      inTurn = false
+      abort = null
     }
-  })()
+  }
+
+  /**
+   * Serialises questions.
+   *
+   * A voice assistant gets asked things faster than it can answer them, and two
+   * models writing to one socket interleave into nonsense. So they queue, and
+   * the queue is the conversation.
+   */
+  let chain = Promise.resolve()
+  const enqueueQuestion = (text, id) => {
+    chain = chain
+      .then(() => answer(text, id))
+      .catch((err) => {
+        console.error('[jarvis] turn failed:', err)
+        sendTurn({ type: 'error', message: String(err?.message ?? err) })
+      })
+  }
 
   socket.on('message', (raw) => {
     let msg
@@ -1408,27 +1176,16 @@ wss.on('connection', (socket) => {
        * Queued behind any interrupt that is still settling.
        *
        * A barge-in is two messages in quick succession — interrupt, then the
-       * new question — and session.interrupt() is asynchronous. Delivering the
-       * question the instant it arrives means the agent can still be winding
-       * down the previous turn, so its last tokens are emitted after the new
-       * one has begun and land on the new turn's listener. Measured: ask "one",
-       * interrupt, ask "two", and the answer to "two" comes back as "One."
+       * new question. Delivering the question the instant it arrives means the
+       * previous turn is still winding down, so its last tokens are emitted
+       * after the new one has begun and land on the new turn's listener.
        *
        * Waiting costs nothing when nothing is interrupting — the chain is an
        * already-resolved promise — and removes the cross-talk when there is.
        */
       const text = msg.text
       const id = typeof msg.id === 'string' ? msg.id : null
-      void settling.then(() => {
-        answering = id
-        if (deliver) {
-          const resolve = deliver
-          deliver = null
-          resolve(text)
-        } else {
-          inbox.push(text)
-        }
-      })
+      void settling.then(() => enqueueQuestion(text, id))
     }
 
     if (msg.type === 'reply' && typeof msg.id === 'string') {
@@ -1442,22 +1199,39 @@ wss.on('connection', (socket) => {
 
     if (msg.type === 'interrupt') {
       // Held so the next question can wait for it rather than racing it.
-      const stopped = turnFinished()
-      settling = Promise.resolve(session.interrupt?.())
-        .catch(() => {})
-        .then(() =>
-          Promise.race([
-            stopped,
-            new Promise((r) => setTimeout(r, SETTLE_CAP_MS)),
-          ]),
-        )
+      // Aborting kills the request mid-stream, which is the whole point of
+      // barge-in; the wait afterwards is what stops the tail of the abandoned
+      // answer from being mistaken for the start of the new one.
+      const stopped = inTurn ? turnFinished() : Promise.resolve()
+      abort?.abort()
+      settling = Promise.race([
+        stopped,
+        new Promise((r) => setTimeout(r, SETTLE_CAP_MS)),
+      ])
     }
   })
 
   socket.on('close', () => {
     console.log('[jarvis] client disconnected')
-    closed = true
-    deliver?.(null)
-    session.close?.()
+    _closed = true
+    abort?.abort()
+    // The in-process servers are built per connection and die with it. The
+    // user's own stdio servers are shared and deliberately left running — the
+    // next connection reuses them, and restarting a phone or a browser bridge
+    // on every reconnect is a cost with no benefit.
+    for (const client of clients.values()) {
+      void client.close().catch(() => {})
+    }
+  })
+}
+
+wss.on('connection', (socket) => {
+  handleConnection(socket).catch((err) => {
+    console.error('[jarvis] connection failed:', err)
+    try {
+      socket.close()
+    } catch {
+      /* already gone */
+    }
   })
 })

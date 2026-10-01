@@ -30,8 +30,15 @@ import { getMic } from './audio'
 export type VadHandlers = {
   /** The signal crossed into speech. Instant; this is the barge-in trigger. */
   onStart: () => void
-  /** Speech ended. The blob is one complete, decodable audio file. */
-  onEnd: (audio: Blob, ms: number) => void
+  /**
+   * Speech ended, with the audio as one complete, decodable file.
+   *
+   * Optional. Omit it when nobody wants the audio — a caller that transcribes
+   * in the browser has no use for a recording — and the MediaRecorder is never
+   * started at all, which saves encoding every segment on a path that would
+   * only throw the result away.
+   */
+  onEnd?: (audio: Blob, ms: number) => void
   /** 0..1 smoothed input level, for the caption/orb while capturing. */
   onLevel: (v: number) => void
   /** Capture is impossible — no microphone, or no MediaRecorder support. */
@@ -152,6 +159,8 @@ export async function startVad(h: VadHandlers): Promise<Vad> {
   }
 
   const startRecorder = () => {
+    // Only record when someone is going to ask for the audio.
+    if (!h.onEnd) return
     parts = []
     try {
       recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream)
@@ -189,7 +198,7 @@ export async function startVad(h: VadHandlers): Promise<Vad> {
       const blob = new Blob(parts, { type })
       parts = []
       const ms = startedAt ? performance.now() - startedAt : 0
-      h.onEnd(blob, ms)
+      h.onEnd?.(blob, ms)
     }
     rec.onstop = finalise
     try {
