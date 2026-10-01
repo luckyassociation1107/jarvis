@@ -24,6 +24,37 @@ exactly the same way, and JARVIS imposes no restrictions of its own.
 
 ---
 
+## Three models, and the one that was missing
+
+The pipeline routes by capability, not by one big model doing everything:
+
+| Slot | Model | Job |
+|---|---|---|
+| `chat` | `huihui_ai/qwen2.5-abliterate:0.5b` | conversation, and intent extraction |
+| `vision` | `huihui_ai/qwen2.5-vl-abliterated:3b` | sees the camera and the screen |
+| `reason` | `dagbs/qwen2.5-coder-7b-instruct-abliterated` | writes and debugs code |
+
+`bridge/language.mjs` adds the piece that was absent: a **multilingual intent
+extractor and English translator**. Say "computer lo chrome close cheyyu" and it
+returns `{language: "te", intent: "close", target: "Chrome"}` plus an English
+rewrite, so the models downstream never see a language they were not trained for.
+
+Two deliberate choices in there:
+
+**A separate slot, not the coder.** Intent extraction is classification, and a
+0.5b model does it in under a second. Routing it through the 7b coder would
+triple the latency of every command for no gain.
+
+**Soft failure.** If the model is unreachable or returns something unparseable,
+the caller gets the original text back with `language: null` and the router
+proceeds in English exactly as before. A feature that breaks the assistant when
+the model is down is not a feature.
+
+`runTurn` gained a `translate` step that rewrites the last user message in
+English, keeping the original visible to the model as well — so a mistranslation
+is recoverable in context rather than silently wrong. English input skips it
+entirely, so an English user pays no latency.
+
 ## Two front-ends, one brain
 
 This repo holds two interfaces to the same local model:

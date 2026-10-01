@@ -529,7 +529,24 @@ export async function runTurn({
   onToolEnd,
   onDelta,
   signal,
+  translate = true,
 }) {
+  /**
+   * Non-English in, English onward.
+   *
+   * The models behind this bridge are English-first, and asking one of them to
+   * both understand Telugu and drive a tool reliably is asking it to do two
+   * hard things at once. So the language is stripped off first, by a model
+   * small enough to do it cheaply, and everything downstream sees English.
+   *
+   * Off by default only when `translate: false`, which the tests use.
+   */
+  let working = messages
+  if (translate) {
+    const { translateInbound } = await import('./language.mjs')
+    working = await translateInbound(messages)
+  }
+
   const tools = toOpenAiTools(
     [...clients.entries()].flatMap(([server, client]) =>
       (client.__jarvisTools ?? []).map((t) => ({
@@ -547,17 +564,17 @@ export async function runTurn({
    * question, and only a vision model can read it. That is the one case where
    * switching mid-turn is not a preference but a requirement.
    */
-  let slot = pickModel(messages)
+  let slot = pickModel(working)
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const first = await streamChat({ messages, tools, signal, onDelta, slot })
+    const first = await streamChat({ working, tools, signal, onDelta, slot })
 
     // The fast slot announced an action it never took. Nothing has been spoken
     // yet, so this costs the user a pause and nothing else — and it turns a
     // silent, total failure into a slow, correct answer.
     if (first.narrated && slot === 'chat') {
       slot = 'reason'
-      const retry = await streamChat({ messages, tools, signal, onDelta, slot })
+      const retry = await streamChat({ working, tools, signal, onDelta, slot })
       if (retry.narrated) return '' // it will not act; better silence than fiction
       if (!retry.toolCalls.length) return retry.text
       Object.assign(first, retry)
@@ -570,7 +587,7 @@ export async function runTurn({
 
     // The assistant turn has to be recorded verbatim, including the tool calls
     // — the API rejects a tool message that does not follow the call it answers.
-    messages.push({
+    working.push({
       role: 'assistant',
       content: text || null,
       tool_calls: toolCalls.map((c) => ({
@@ -638,17 +655,17 @@ export async function runTurn({
       }
 
       onToolEnd?.(call.name, result?.isError === true)
-      messages.push(toolResultMessage(call.id, result))
+      working.push(toolResultMessage(call.id, result))
     }
 
     // A tool result may have changed what the question needs — most often by
     // putting an image in the conversation.
-    slot = pickModel(messages)
+    slot = pickModel(working)
   }
 
   // Ran out of turns. Answering from what is already gathered is better than
   // silence, and far better than an error the user cannot act on.
-  const last = [...messages].reverse().find((m) => m.role === 'assistant')
+  const last = [...working].reverse().find((m) => m.role === 'assistant')
   return (
     last?.content ??
     'I gathered what I could but ran out of steps before I could finish. Ask me again and I will be more direct about it.'
@@ -729,4 +746,44 @@ export async function modelStatus() {
     console.log(`[jarvis] model probe took ${Date.now() - started}ms`)
   }
   return { ok: slots.every((s) => s.ok), slots }
+}
+
+/**
+ * A one-shot completion, no tools and no streaming.
+ *
+ * `runTurn` is the agentic path and it is the wrong shape for classification
+ * work: it will happily call a tool, loop, and spend seconds producing an answer
+ * that is one JSON object. Intent extraction and translation need the opposite —
+ * send two messages, get one string back.
+ *
+ * Exported for bridge/language.mjs, which is the only caller today. If a second
+ * one appears, this is the seam it should go through too.
+ *
+ * @param {string} slot       'chat' | 'vision' | 'reason'
+ * @param {Array<{role:string,content:string}>} messages
+ * @param {{temperature?:number, maxTokens?:number}} [opts]
+ * @returns {Promise<string>} the assistant's reply text
+ */
+export async function complete(slot, messages, opts = {}) {
+  const { model, url } = PIPELINE[slot] ?? PIPELINE.chat
+  const res = await fetch(`${url}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: opts.temperature ?? 0.1,
+      max_tokens: opts.maxTokens ?? 400,
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!res.ok) {
+    throw new Error(`${slot} completion failed: HTTP ${res.status}`)
+  }
+  const data = await res.json()
+  return data?.choices?.[0]?.message?.content ?? ''
 }
