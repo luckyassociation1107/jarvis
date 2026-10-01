@@ -37,10 +37,9 @@ class SkinWidget extends StatelessWidget {
       //
       // ClipRRect first, or the blur would bleed past the rounded corners and
       // square off the whole panel.
-      final blur = MemoryBudget.current.blur;
       child: ClipRRect(
         borderRadius: BorderRadius.circular(2),
-        child: blur
+        child: MemoryBudget.current.blur
             ? BackdropFilter(
                 filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
                 child: _panel(),

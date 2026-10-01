@@ -1,6 +1,5 @@
 import 'dart:ui' as ui;
 
-import '../platform/system_stats.dart';
 
 /// How much this machine can afford.
 ///
