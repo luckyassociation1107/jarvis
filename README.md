@@ -158,7 +158,11 @@ The scripts check for Node.js 20+ and npm. If Node is missing, `build.ps1`
 tries WinGet; `build.sh` uses a version manager/Homebrew or downloads and
 SHA-256-verifies a user-local Node 24 LTS binary. If Windows blocks the `.ps1`
 by execution policy, use `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
-The script then installs missing/stale npm packages from `package-lock.json`,
+The setup skips ONNX Runtime's optional Node-only CUDA provider by default; the
+browser TTS path uses the web runtime, and Ollama manages chat-model GPU use.
+Set `ONNXRUNTIME_NODE_INSTALL_CUDA=v12` before running the setup script only if
+another Node-side ONNX workload specifically needs that CUDA provider. The
+script then installs missing/stale npm packages from `package-lock.json`,
 vendors the hand-tracking runtime if needed, builds the **web UI**, and runs a
 read-only preflight. It then checks for Ollama and
 installs it only if this machine's RAM plan has a fitting local chat, vision or

@@ -191,6 +191,14 @@ ensure_node
 
 printf 'Node.js %s; npm %s\n' "$(node --version)" "$(npm --version)"
 
+# JARVIS runs its ONNX workloads in the browser and sends chat inference to
+# Ollama. The optional Node CUDA provider is not required; skipping its separate
+# GitHub asset download keeps CPU-only installs working. Set either supported
+# variable explicitly to opt into ONNX Runtime's CUDA provider.
+if [[ -z "${ONNXRUNTIME_NODE_INSTALL_CUDA:-}" && -z "${npm_config_onnxruntime_node_install_cuda:-}" ]]; then
+  export ONNXRUNTIME_NODE_INSTALL_CUDA='skip'
+fi
+
 needs_install=0
 if [[ ! -f node_modules/.package-lock.json || ! -f node_modules/vite/bin/vite.js ]]; then
   needs_install=1

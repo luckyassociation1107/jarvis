@@ -131,6 +131,12 @@ try {
   if ($LASTEXITCODE -ne 0 -or -not $npmVersion) { throw 'npm is present but could not run. Reinstall Node.js 20+ and rerun build.ps1.' }
   Write-Host "Node.js $nodeVersion; npm $npmVersion"
 
+  # JARVIS runs ONNX in the browser and sends chat inference to Ollama. The
+  # optional Node CUDA provider is not needed for this app's normal setup.
+  if (-not $env:ONNXRUNTIME_NODE_INSTALL_CUDA -and -not $env:npm_config_onnxruntime_node_install_cuda) {
+    $env:ONNXRUNTIME_NODE_INSTALL_CUDA = 'skip'
+  }
+
   $needsInstall = -not (Test-Path 'node_modules/.package-lock.json') -or -not (Test-Path 'node_modules/vite/bin/vite.js')
   if (-not $needsInstall) {
     $projectLock = Get-Item 'package-lock.json'
