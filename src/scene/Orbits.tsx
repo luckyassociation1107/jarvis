@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useStore, type OrbitObject } from '../store'
@@ -89,14 +89,15 @@ export function Orbits() {
   const group = useMemo(() => new THREE.Group(), [])
   /** One quad, shared by every object — only the scale differs. */
   const geometry = useMemo(() => new THREE.PlaneGeometry(1, 1), [])
-  const entries = useMemo(() => new Map<string, Entry>(), [])
+  const entries = useRef(new Map<string, Entry>())
   /** Last list identity seen, so the reconcile below is skipped when idle. */
-  const seen = useMemo<{ list: OrbitObject[] | null }>(() => ({ list: null }), [])
+  const seen = useRef<OrbitObject[] | null>(null)
 
   useEffect(() => {
+    const ownedEntries = entries.current
     return () => {
-      for (const entry of entries.values()) release(group, entry)
-      entries.clear()
+      for (const entry of ownedEntries.values()) release(group, entry)
+      ownedEntries.clear()
       geometry.dispose()
     }
   }, [entries, geometry, group])
@@ -108,7 +109,7 @@ export function Orbits() {
       resolveSrc(src),
       (texture) => {
         // The list may have moved on while the image was in flight.
-        if (entry.token !== mine || entries.get(entry.def.id) !== entry) {
+        if (entry.token !== mine || entries.current.get(entry.def.id) !== entry) {
           texture.dispose()
           return
         }
@@ -165,12 +166,12 @@ export function Orbits() {
     const alive = new Set<string>()
     for (const def of list) {
       alive.add(def.id)
-      const entry = entries.get(def.id)
+      const entry = entries.current.get(def.id)
       if (!entry) {
         // Registered before the load starts, since the callback identifies
         // itself by looking itself up in here.
         const created = spawn(def)
-        entries.set(def.id, created)
+        entries.current.set(def.id, created)
         attach(created, def.src)
         continue
       }
@@ -181,20 +182,20 @@ export function Orbits() {
       if (entry.def.phase !== def.phase) entry.angle = def.phase * DEG
       entry.def = def
     }
-    for (const [id, entry] of entries) {
+    for (const [id, entry] of entries.current) {
       if (alive.has(id)) continue
       release(group, entry)
-      entries.delete(id)
+      entries.current.delete(id)
     }
   }
 
   useFrame((state, dt) => {
     const { orbits } = useStore.getState().ui
-    if (orbits !== seen.list) {
-      seen.list = orbits
+    if (orbits !== seen.current) {
+      seen.current = orbits
       sync(orbits)
     }
-    if (entries.size === 0) return
+    if (entries.current.size === 0) return
 
     /**
      * Both conversions come off the live viewport rather than off a constant,
@@ -205,7 +206,7 @@ export function Orbits() {
     const fit = Math.min(state.viewport.width, state.viewport.height)
     const perPx = state.viewport.width / state.size.width
 
-    for (const entry of entries.values()) {
+    for (const entry of entries.current.values()) {
       if (entry.dead || !entry.texture) continue
       const def = entry.def
       entry.angle += dt * def.speed * RPM

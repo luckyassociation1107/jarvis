@@ -183,13 +183,21 @@ install_ollama_if_needed() {
   printf '  Ollama is installed; the selected model setup will start its service if necessary.\n'
 }
 
+[[ -f package.json && -f package-lock.json ]] || fail 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
 printf '\nJ.A.R.V.I.S. — web setup, build, and run\n'
 printf '%s\n' '======================================='
 printf '%s\n' 'This builds the browser UI only; no desktop app or EXE is created.'
 ensure_node
 
-[[ -f package.json && -f package-lock.json ]] || fail 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
 printf 'Node.js %s; npm %s\n' "$(node --version)" "$(npm --version)"
+
+# JARVIS runs its ONNX workloads in the browser and sends chat inference to
+# Ollama. The optional Node CUDA provider is not required; skipping its separate
+# GitHub asset download keeps CPU-only installs working. Set either supported
+# variable explicitly to opt into ONNX Runtime's CUDA provider.
+if [[ -z "${ONNXRUNTIME_NODE_INSTALL_CUDA:-}" && -z "${npm_config_onnxruntime_node_install_cuda:-}" ]]; then
+  export ONNXRUNTIME_NODE_INSTALL_CUDA='skip'
+fi
 
 needs_install=0
 if [[ ! -f node_modules/.package-lock.json || ! -f node_modules/vite/bin/vite.js ]]; then

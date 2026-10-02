@@ -10,6 +10,15 @@ import type { Drive } from './Scene'
 
 const COUNT = 4000
 
+/** Stable shell placement without an impure random call during React render. */
+function seededRandom(seed: number) {
+  let state = seed >>> 0
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+    return state / 0x1_0000_0000
+  }
+}
+
 const vertex = /* glsl */ `
   uniform float uTime;
   uniform float uLevel;
@@ -77,16 +86,18 @@ export function Particles({ drive }: { drive: Drive }) {
     const positions = new Float32Array(COUNT * 3)
     const seeds = new Float32Array(COUNT)
     const radii = new Float32Array(COUNT)
+    const random = seededRandom(0x4a415256)
     for (let i = 0; i < COUNT; i++) {
-      // Even distribution on a sphere, then jittered into a shell.
-      const u = Math.random() * 2 - 1
-      const theta = Math.random() * Math.PI * 2
+      // Even distribution on a sphere, then jittered into a shell. The seeded
+      // sequence gives the same authored field on every render and device.
+      const u = random() * 2 - 1
+      const theta = random() * Math.PI * 2
       const r = Math.sqrt(1 - u * u)
-      const radius = 1.9 + Math.pow(Math.random(), 2) * 2.6
+      const radius = 1.9 + Math.pow(random(), 2) * 2.6
       positions[i * 3] = Math.cos(theta) * r * radius
       positions[i * 3 + 1] = u * radius
       positions[i * 3 + 2] = Math.sin(theta) * r * radius
-      seeds[i] = Math.random()
+      seeds[i] = random()
       radii[i] = (radius - 1.9) / 2.6
     }
     return { positions, seeds, radii }
@@ -108,7 +119,7 @@ export function Particles({ drive }: { drive: Drive }) {
     const u = mat.current.uniforms
     pts.current.visible = drive.reactor.visible
     u.uIntensity.value = drive.reactor.intensity
-    u.uTime.value = state.clock.elapsedTime
+    u.uTime.value = state.clock.elapsedTime * drive.motionScale
     u.uLevel.value += (drive.level - u.uLevel.value) * Math.min(1, dt * 6)
     ;(u.uColor.value as THREE.Color).lerp(drive.color, Math.min(1, dt * 3))
   })

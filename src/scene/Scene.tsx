@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useReducedMotion } from 'framer-motion'
 import { Canvas, useFrame } from '@react-three/fiber'
 import {
   EffectComposer,
@@ -67,6 +68,8 @@ export type Drive = {
   amp: number
   /** 0..1 power-up reveal — the ring assembles outwards from the centre. */
   open: number
+  /** Motion multiplier from the user's reduced-motion preference. */
+  motionScale: number
   /**
    * The reactor slice of the ui state, already resolved and smoothed.
    *
@@ -106,7 +109,7 @@ function aim(tint: Tint, css: string): THREE.Color {
 
 const STYLE_INDEX = { ring: 0, sphere: 1, wire: 2 } as const
 
-function Rig() {
+function Rig({ reducedMotion }: { reducedMotion: boolean }) {
   const drive = useMemo<Drive>(
     () => ({
       color: new THREE.Color(phaseColor.offline),
@@ -114,6 +117,7 @@ function Rig() {
       spin: spinFor.offline,
       amp: AMP_CALM,
       open: 0,
+      motionScale: reducedMotion ? 0.18 : 1,
       reactor: {
         color: new THREE.Color(phaseColor.offline),
         scale: 1,
@@ -123,7 +127,7 @@ function Rig() {
         visible: true,
       },
     }),
-    [],
+    [reducedMotion],
   )
   const target = useMemo<Tint>(() => ({ key: '', color: new THREE.Color() }), [])
   const reactorTarget = useMemo<Tint>(
@@ -150,13 +154,20 @@ function Rig() {
     // place instead of snapping. The style is the exception: it is a mode, and
     // easing between two of them would drag the picture through the third.
     const k = Math.min(1, dt * 5)
+    // Intentional imperative frame state: R3F reads the same mutable driver
+    // from child useFrame callbacks without scheduling React renders.
+    // oxlint-disable-next-line react/immutability -- mutable animation driver
     drive.reactor.scale += (r.scale - drive.reactor.scale) * k
     drive.reactor.intensity += (r.intensity - drive.reactor.intensity) * k
     drive.reactor.spin += (r.spin - drive.reactor.spin) * k
     drive.reactor.style = STYLE_INDEX[r.style] ?? STYLE_INDEX.ring
     drive.reactor.visible = r.visible
 
-    drive.spin += (spinFor[phase] - drive.spin) * Math.min(1, dt * 2)
+    // Keep the target inertial across frames; this is a renderer-owned ref-like
+    // object, not UI state.
+    const spinTarget = spinFor[phase] * drive.motionScale
+    // oxlint-disable-next-line react/immutability -- mutable animation driver
+    drive.spin += (spinTarget - drive.spin) * Math.min(1, dt * 2)
     drive.amp = phase === 'dormant' || phase === 'offline' ? AMP_CALM : AMP_LIVE
     // Held shut until the reactor is powered on, so the ring builds itself out
     // of the centre on the ignition click rather than simply appearing.
@@ -169,10 +180,13 @@ function Rig() {
     const want = Math.max(level, breathe)
     drive.level += (want - drive.level) * Math.min(1, dt * 9)
 
-    // Slow drift on the camera keeps handheld-ish life in the shot.
+    // Slow, pointer-reactive camera drift adds depth without moving the HUD.
+    // Respect the OS preference by keeping the camera still and easing the
+    // shader motion down to a low idle rate.
     const t = state.clock.elapsedTime
-    state.camera.position.x = Math.sin(t * 0.13) * 0.35
-    state.camera.position.y = Math.cos(t * 0.17) * 0.22
+    const drift = reducedMotion ? 0 : 1
+    state.camera.position.x = Math.sin(t * 0.13) * 0.16 * drift + state.pointer.x * 0.11 * drift
+    state.camera.position.y = Math.cos(t * 0.17) * 0.10 * drift + state.pointer.y * 0.07 * drift
     state.camera.lookAt(0, 0, 0)
   })
 
@@ -193,6 +207,7 @@ function Rig() {
 }
 
 export function Scene() {
+  const reducedMotion = Boolean(useReducedMotion())
   return (
     <Canvas
       className="scene"
@@ -200,7 +215,7 @@ export function Scene() {
       gl={{ antialias: true, alpha: true }}
       dpr={[1, 2]}
     >
-      <Rig />
+      <Rig reducedMotion={reducedMotion} />
       {/*
         multisampling={0} on purpose. The default is 8, which allocates a
         half-float MSAA target — at dpr 2 that is a 3200x1800 buffer — and there

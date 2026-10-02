@@ -259,7 +259,7 @@ export function Core({ drive }: { drive: Drive }) {
     // clock would rewrite all the turbulence that has already happened, and the
     // edge would boil harder the longer the tab had been open. The spin
     // multiplier rides on the same accumulator for the same reason.
-    u.uPhase.value += dt * (0.5 + u.uLevel.value * 0.7) * r.spin
+    u.uPhase.value += dt * (0.5 + u.uLevel.value * 0.7) * r.spin * drive.motionScale
     u.uOpen.value += (drive.open - u.uOpen.value) * Math.min(1, dt * 1.6)
     u.uIntensity.value = r.intensity
     u.uStyle.value = r.style

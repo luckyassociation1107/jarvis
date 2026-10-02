@@ -29,21 +29,28 @@ effectful tools still have a separate default-deny permission gate.
 
 ## Model slots and multilingual workflow
 
-JARVIS routes each turn to a RAM-selected local model:
+JARVIS routes each turn deliberately. RAM autopilot normally assigns one
+abliterated Qwen3.5 multimodal tag across chat, vision and coding. At 32 GB it
+uses a higher-parameter text/coding rung plus a separate native Ollama vision
+rung, keeping image support independent of the third-party GGUF import:
 
-| Slot | Capability | RAM-selected model family |
+| Slot | Capability | RAM-selected model |
 |---|---|---|
-| `chat` | multilingual conversation, intent extraction, English translation | abliterated Qwen2.5 instruct, 0.5B–14B |
-| `vision` | image understanding | supplied abliterated Qwen2.5-VL 3B/7B only; unavailable below its memory floor |
-| `reason` | English-only coding, tool use and technical reasoning | abliterated Qwen coder, including DAGBS 7B Q2/Q3/Q4 tags |
+| `chat` | multilingual conversation, intent extraction, English translation | shared Qwen3.5 abliterated multimodal rung |
+| `vision` | image understanding and visual question answering | the same image-capable rung; present in every RAM profile |
+| `reason` | coding, tool use and technical reasoning | the same instruct model, routed separately for code/actions |
 | `speech` | local multilingual speech-to-text | quantized multilingual Whisper.cpp; never `.en`-only |
-| `tts` | spoken responses | system/browser voice at tight budgets; browser-cached Kokoro at tiers with headroom |
+| `tts` | spoken responses | system/browser voice at tight budgets; browser-cached Kokoro when memory allows |
 
 `bridge/language.mjs` extracts intent and translates non-English requests into
 English before model/tool routing. English input skips translation. For example,
 a Telugu request can keep its original text while the downstream task gets an
-English rewrite. Real inference still requires the local bridge and model server;
-this environment has not completed a full Ollama-backed conversation.
+English rewrite. Chat, vision and reason remain separate routes. Where they
+share a tag, its weights are downloaded once and can stay warm between those
+routes. If a different local tag or Whisper needs the same reserved memory, the
+bridge serializes the work and unloads the retained tag first; the next request
+reloads it. The 32 GB high-parameter profile uses distinct text and vision
+tags. Overrides can still pin individual slots to another local model/server.
 
 ## RAM autopilot and explicit installation
 
@@ -55,43 +62,71 @@ The plan preserves the requested allocation:
 40%  maximum JARVIS allocation
 ```
 
-Chat, vision, coding and Whisper run sequentially. The planner compares each
-model's estimated active-memory requirement (weights plus runtime/context
-headroom) with the same 40% ceiling; it does **not** add every downloaded file
-as if all models must stay loaded at once. The bridge asks Ollama to unload a
-model after a request. The model estimates are conservative guides, not hardware
-guarantees, and current free RAM can lower the selected tier further.
+The planner compares each selected model's estimated active-memory requirement
+(weights plus runtime/context headroom) with the fixed 40% ceiling. Routes that
+use the same tag share its download and may share residency; switching to a
+different local tag or Whisper releases the previous JARVIS-managed local
+Ollama model first, preserving the sequential peak estimate. The 32 GB profile
+deliberately splits text/coding from image understanding: a larger-parameter
+Q2_K GGUF for chat/reason and a native Ollama Q8_0 model for verified vision.
+Browser TTS has a separate resident allowance. Estimates are conservative
+guides, not hardware guarantees. Free RAM is sampled when the bridge starts;
+restart the bridge to re-plan after host memory availability changes.
 
-| Total RAM | JARVIS cap | Chat | Vision | Coding | Whisper STT | TTS | Selected assets* |
-|---:|---:|---|---|---|---|---|---:|
-| 500 MB | 0.20 GB | 0.5B best-effort; not installed | unavailable | 0.5B best-effort; not installed | unavailable | Browser/OS | 0.00 GB |
-| 1 GB | 0.40 GB | 0.5B best-effort; not installed | unavailable | 0.5B best-effort; not installed | multilingual base | Browser/OS | 0.06 GB |
-| 2 GB | 0.80 GB | 0.5B | unavailable | 0.5B | multilingual small | Browser/OS | 0.96 GB |
-| 4 GB | 1.60 GB | 1.5B | unavailable | 1.5B | large-v3-turbo | Browser/OS | 2.60 GB |
-| 8 GB | 3.20 GB | 3B | unavailable | 3B | large-v3-turbo | Kokoro Q8 | 4.42 GB |
-| 12 GB | 4.80 GB | 3B | Qwen2.5-VL 3B | DAGBS 7B Q3_K_M | large-v3-turbo | Browser/OS | 9.44 GB |
-| 16 GB | 6.40 GB | 7B | Qwen2.5-VL 3B | DAGBS 7B Q4_K_M | large-v3-turbo | Browser/OS | 13.14 GB |
-| 24 GB | 9.60 GB | 7B | Qwen2.5-VL 7B | DAGBS 7B Q4_K_M | large-v3-turbo | Kokoro FP32 | 16.26 GB |
-| 32 GB | 12.80 GB | 14B | Qwen2.5-VL 7B | abliterated coder 14B | large-v3-turbo | Kokoro FP32 | 24.86 GB |
+| Total RAM | JARVIS cap | Chat | Vision | Coding / reason | Whisper STT | TTS | Unique selected assets* | Peak resident estimate |
+|---:|---:|---|---|---|---|---|---:|---:|
+| 500 MB | 0.20 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | unavailable | Browser/OS | 0.00 GB | 0.00 GB |
+| 1 GB | 0.40 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual base Q5_1 | Browser/OS | 0.06 GB | 0.33 GB |
+| 2 GB | 0.80 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual small Q5_1 | Browser/OS | 0.19 GB | 0.68 GB |
+| 4 GB | 1.60 GB | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 1.54 GB | 1.35 GB |
+| 8 GB | 3.20 GB | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 3.24 GB | 3.15 GB |
+| 12 GB | 4.80 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 3.84 GB | 4.10 GB |
+| 16 GB | 6.40 GB | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 5.74 GB | 6.10 GB |
+| 24 GB | 9.60 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 32 GB | 12.80 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Browser/OS | 22.44 GB | 12.40 GB |
 
-The 1 GB profile is deliberately honest: the smallest abliterated Q4 chat and
-coder weights are about 398 MB each, but runtime estimates are about 510 MB and
-the whole JARVIS allowance is only 400 MB. Those two slots are shown as
-best-effort for comparison but are not auto-installed or treated as runnable.
-The smallest Whisper tier fits at 1 GB; at 500 MB even that local STT model is
-outside budget. The only local vision choices are the supplied abliterated
-Qwen2.5-VL variants: the 3B file is about 3.2 GB and estimates 4.1 GB resident,
-so it first fits at 12 GB total. No aligned low-memory VLM is substituted.
+Vision is required and stays visible in all 33 reference profiles. At 500 MB
+through 3 GB, its smallest rung (0.873B Q8_0, estimated 1.30 GB resident) is
+labelled **best-effort only**; it is not auto-downloaded or invoked as though it
+fits. Under a fully free 40% budget, the first reference tier where it fits is
+4 GB. At 32 GB, the catalogue now reaches a **27.8B Q2_K** text/coding rung
+(10.9 GB estimate including the repository's separate image-projector file,
+12.4 GB resident) while vision stays on the native Ollama **9.65B Q8_0** tag
+(11 GB download, 12.3 GB resident). The HF-to-Ollama Q2_K import has not been
+verified by this project; the image route never relies on it, and Ollama's
+vision metadata is checked before sending pixels. This two-model plan is about
+22.44 GB of unique downloads, but only the larger active model is counted in
+the resident peak. Larger 27.8B Q4_K_M (17 GB download, 20 GB resident) and
+36.0B Q4_K_M (24 GB download, 28 GB resident) remain available above the 32 GB
+reference range when their resident estimates fit. The extended native ladder
+then offers 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0 (39/46 GB), and
+36B F16 (72/80 GB) as progressively higher-memory tiers. At the top is
+Ollama's native **122B tag (125B parameters, Q4_K_M)** at about 81 GB download /
+96 GB estimated resident, first eligible around 240 GB total RAM with the full
+40% allowance free. On a 256 GB host with sufficient free memory, the plan can
+also select multilingual Whisper and browser-cached Kokoro FP32, for roughly
+97.5 GB peak resident under the 102.4 GB cap. These remain multimodal, and
+current-free-memory checks can step the plan down; workstation tiers are outside
+the 33-row 0.5–32 GB reference catalogue.
 
-*Selected-asset totals include the chosen model weights and, where applicable,
-the browser-cached Kokoro asset (fetched on first use). They are maximum
-catalogue estimates before reusing anything already installed; downloads for
-other RAM tiers are never included. Actual live planning can step down when
-current free memory is lower than the reference profile.
+The 1–3 GB tiers still show vision as **best-effort only** and never auto-run
+it. High-end Q8 rungs are used at 8, 16 and 32 GB when the fixed 40% cap allows.
 
-Chat and coding downloads are abliterated instruct models only; the planner
-refuses a non-abliterated chat/coding entry. Vision has its own explicitly
-multimodal ladder. Whisper is multilingual (not `.en`) and is not a chat model.
+*Unique selected-asset totals count each distinct selected LLM tag once, plus
+the selected Whisper file and (where chosen) browser-cached Kokoro asset. They
+are catalogue estimates before reusing anything already installed; other RAM
+tiers are never downloaded. Actual live planning can step down when current free
+memory is lower than the reference profile.
+
+Chat, vision and coding use abliterated instruct builds only; the planner
+refuses a non-abliterated model. Every advertised vision rung is multimodal.
+Whisper is multilingual (not `.en`) and is not a chat model. The candidate
+Qwen3.5 family and HF multimodal GGUF are documented by
+[Ollama](https://ollama.com/huihui_ai/qwen3.5-abliterated) and
+[Hugging Face](https://huggingface.co/mradermacher/Huihui-Qwen3.5-27B-abliterated-GGUF).
+The higher-memory Q8/F16 options are in the [official Ollama tag catalogue](https://ollama.com/huihui_ai/qwen3.5-abliterated/tags); the top model's size and quantization are listed on its [122B tag page](https://ollama.com/huihui_ai/qwen3.5-abliterated:122B).
+The RAM-selected vision path stays on native Ollama tags rather than relying on
+an unverified third-party projector import.
 
 Open **MODEL STACK** in the HUD (or press **M**) to inspect the live RAM plan,
 all 33 reference tiers from 500 MB through 32 GB, selected models, estimates and
@@ -123,7 +158,11 @@ The scripts check for Node.js 20+ and npm. If Node is missing, `build.ps1`
 tries WinGet; `build.sh` uses a version manager/Homebrew or downloads and
 SHA-256-verifies a user-local Node 24 LTS binary. If Windows blocks the `.ps1`
 by execution policy, use `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
-The script then installs missing/stale npm packages from `package-lock.json`,
+The setup skips ONNX Runtime's optional Node-only CUDA provider by default; the
+browser TTS path uses the web runtime, and Ollama manages chat-model GPU use.
+Set `ONNXRUNTIME_NODE_INSTALL_CUDA=v12` before running the setup script only if
+another Node-side ONNX workload specifically needs that CUDA provider. The
+script then installs missing/stale npm packages from `package-lock.json`,
 vendors the hand-tracking runtime if needed, builds the **web UI**, and runs a
 read-only preflight. It then checks for Ollama and
 installs it only if this machine's RAM plan has a fitting local chat, vision or
@@ -167,10 +206,12 @@ recogniser, not a chat model.
 ## Verification status
 
 Official Ollama catalogue entries and published model-size tags were checked
-while building the planner. `npm run test:autopilot` passes ten deterministic
-profiles from 0.5–32 GB and mocked checks for non-fitting skips, Ollama-tag
-idempotence, offline Whisper installation, incomplete-file rejection, and the
-browser-cached Kokoro path. `npm run smoke` exercises the bridge and tool loop,
+while building the planner. `npm run test:autopilot` passes 13 deterministic
+RAM profiles and mocked checks for non-fitting skips, Ollama-tag idempotence,
+slot-filtered installer routing, offline Whisper installation, incomplete-file
+rejection, and the browser-cached Kokoro path. `npm run test:installers` covers
+loopback endpoint aliases, manual/per-slot overrides, and read-only preflight
+behavior against a mock model server. `npm run smoke` exercises the bridge and tool loop,
 RAM-plan response shape and 33-tier catalogue/statuses, Telugu-to-English
 code-intent routing, and vision prompt fusion against a local stub model
 server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
@@ -342,6 +383,19 @@ previews block microphone access.
 ---
 
 ## What JARVIS can do
+
+**Text chat and voice share the same local model session.** Open **TEXT CHAT**
+in the HUD to type a message and read a streamed reply; this works without
+initialising the voice loop, granting microphone access, or enabling speech
+output. The chat console reports live bridge, Ollama, model, and RAM-plan status,
+and marks the tools used for each answer. Use the same thread with the wake word
+when voice is more convenient.
+
+Open **COMMANDS** or press **Ctrl/Cmd + K** to search system actions, launch the
+model stack, clear the transcript, toggle HUD surfaces, or run a display scan.
+The 3D scene follows pointer movement gently and slows down for the operating
+system's reduced-motion preference; neural speech and the WebGL scene are split
+from the initial shell so the controls can appear first.
 
 Beyond answering, JARVIS reaches every MCP server on your machine, and can drive
 his own interface.

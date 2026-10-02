@@ -289,13 +289,53 @@
 }
 
 .deck-screen-grid {
-  opacity: .2;
-  background-image: linear-gradient(#5bd1ec12 1px,#0000 1px),linear-gradient(90deg,#5bd1ec12 1px,#0000 1px),linear-gradient(#5bd1ec06 1px,#0000 1px),linear-gradient(90deg,#5bd1ec06 1px,#0000 1px);
+  opacity: .17;
+  background-image:
+    linear-gradient(color-mix(in srgb,var(--accent) 8%,transparent) 1px,#0000 1px),
+    linear-gradient(90deg,color-mix(in srgb,var(--accent) 8%,transparent) 1px,#0000 1px),
+    linear-gradient(color-mix(in srgb,var(--accent) 3%,transparent) 1px,#0000 1px),
+    linear-gradient(90deg,color-mix(in srgb,var(--accent) 3%,transparent) 1px,#0000 1px);
   background-size: 80px 80px,80px 80px,16px 16px,16px 16px;
+  background-position: 0 0,0 0,0 0,0 0;
   position: absolute;
   inset: 0;
+  transform: perspective(1100px) rotateX(.45deg) scale(1.02);
+  transform-origin: center;
   -webkit-mask-image: radial-gradient(#000 4%,#0000 79%);
   mask-image: radial-gradient(#000 4%,#0000 79%);
+  animation: deck-grid-drift 48s linear infinite;
+}
+
+@keyframes deck-grid-drift {
+  to { background-position: 80px 80px,80px 80px,16px 16px,16px 16px; }
+}
+
+.phase-listening .deck-screen-grid {
+  opacity: .25;
+  animation-duration: 28s;
+}
+
+.phase-thinking .deck-screen-grid {
+  opacity: .14;
+  animation-duration: 60s;
+}
+
+.phase-tooling .deck-screen-grid {
+  opacity: .22;
+  animation-duration: 21s;
+}
+
+.phase-speaking .deck-screen-grid {
+  opacity: .19;
+  animation-duration: 36s;
+}
+
+.phase-offline .deck-screen-grid {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-screen-grid { animation: none; transform: none; }
 }
 
 .deck-frame {

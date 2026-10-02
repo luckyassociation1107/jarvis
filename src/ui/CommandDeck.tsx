@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { BRIDGE_HTTP_URL } from '../config'
 import { useStore, type Phase } from '../store'
-import { ModelManager } from './ModelManager'
 import { analyserActive, micLevel } from '../lib/audio'
 import './CommandDeck.css'
+
+const ModelManager = lazy(() => import('./ModelManager').then((module) => ({ default: module.ModelManager })))
 
 type HealthSlot = {
   slot: string
@@ -437,8 +438,9 @@ function CommandDeckView({ onStart }: { onStart: () => void }) {
   const looking = useStore((s) => s.looking)
   const ui = useStore((s) => s.ui)
   const bridge = useBridgeHealth()
-  const [modelManagerOpen, setModelManagerOpen] = useState(false)
-  const closeModelManager = useCallback(() => setModelManagerOpen(false), [])
+  const modelManagerOpen = useStore((s) => s.modelManagerOpen)
+  const setModelManagerOpen = useStore((s) => s.setModelManagerOpen)
+  const closeModelManager = useCallback(() => setModelManagerOpen(false), [setModelManagerOpen])
 
   const [clock, setClock] = useState('00:00:00')
   const [fps, setFps] = useState(0)
@@ -465,10 +467,11 @@ function CommandDeckView({ onStart }: { onStart: () => void }) {
     const openModelStack = (event: KeyboardEvent) => {
       const target = event.target
       const typing = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-      if (typing || event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+      if (typing || useStore.getState().commandPaletteOpen || event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
       if (event.key.toLowerCase() === 'm') {
         event.preventDefault()
-        setModelManagerOpen((open) => !open)
+        const current = useStore.getState()
+        current.setModelManagerOpen(!current.modelManagerOpen)
       }
     }
     window.addEventListener('keydown', openModelStack)
@@ -692,7 +695,7 @@ function CommandDeckView({ onStart }: { onStart: () => void }) {
 
       <footer className="deck-footer">
         <div className="deck-footer-brand"><span className="deck-footer-emblem">J</span><span>J.A.R.V.I.S. / CLIENT</span><i />LOCAL-FIRST SESSION</div>
-        <div className="deck-footer-center"><span className="deck-footer-line" /><span>{phase === 'offline' ? 'SYSTEM OFFLINE / INPUT REQUIRED' : phase === 'dormant' ? 'SAY “HEY JARVIS”' : PHASE_LABEL[phase]}</span><span className="deck-footer-line" /></div>
+        <div className="deck-footer-center"><span className="deck-footer-line" /><span>{phase === 'offline' ? 'VOICE STANDBY / TEXT CHAT READY' : phase === 'dormant' ? 'SAY “HEY JARVIS”' : PHASE_LABEL[phase]}</span><span className="deck-footer-line" /></div>
         <div className="deck-footer-actions">
           {phase === 'offline' ? (
             <button className="deck-power-button" type="button" onClick={onStart}>
@@ -713,13 +716,17 @@ function CommandDeckView({ onStart }: { onStart: () => void }) {
             className="deck-model-stack-button"
             type="button"
             aria-expanded={modelManagerOpen}
-            onClick={() => setModelManagerOpen((open) => !open)}
+            onClick={() => setModelManagerOpen(!modelManagerOpen)}
           >
             <kbd>M</kbd> {modelManagerOpen ? 'CLOSE STACK' : 'MODEL STACK'}
           </button>
         </div>
       </footer>
-      {modelManagerOpen && <ModelManager onClose={closeModelManager} />}
+      {modelManagerOpen && (
+        <Suspense fallback={null}>
+          <ModelManager onClose={closeModelManager} />
+        </Suspense>
+      )}
     </div>
   )
 }

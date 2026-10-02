@@ -21,7 +21,8 @@
     "models:install": "node scripts/model-bootstrap.mjs --install",
     "prebuild": "node scripts/vendor-mediapipe.mjs",
     "smoke": "node smoke.mjs",
-    "test:autopilot": "node scripts/test-autopilot.mjs"
+    "test:autopilot": "node scripts/test-autopilot.mjs",
+    "test:installers": "node scripts/test-installers.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",

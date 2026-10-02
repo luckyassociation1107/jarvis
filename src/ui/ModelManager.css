@@ -90,6 +90,7 @@
 .model-slot-model { display: block; overflow: hidden; margin-top: 12px; color: #e8f8fc; font: 10px/1.45 var(--deck-mono, ui-monospace, monospace); text-transform: none; text-overflow: ellipsis; white-space: nowrap; }
 .model-slot-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; color: currentColor; font-size: 7px; letter-spacing: .04em; }
 .model-slot-card p { margin: 8px 0 0; color: rgba(227, 237, 242, .72); font: 9px/1.45 var(--deck-mono, ui-monospace, monospace); }
+.model-slot-card p.model-slot-runtime-warning { padding: 7px 8px; border-left: 2px solid var(--mm-red); background: rgba(255, 119, 142, .07); color: #ffc1cc; font-size: 8px; }
 
 .model-manager-skipped { margin-top: 11px; padding: 11px 13px; border-left: 2px solid var(--mm-red); background: rgba(255, 119, 142, .06); }
 .model-manager-skipped > b { color: var(--mm-red); font-size: 8px; letter-spacing: .14em; }

@@ -7,15 +7,15 @@
  * because it looks like a bug in the assistant rather than a missing download.
  *
  * So this asks Ollama what it has, compares that against what the slots want,
- * and reports the gap. `ensure()` can also pull, but only when told to: a 7 GB
- * download should never start as a side effect of booting.
+ * and reports the gap. `ensure()` can also pull, but only when told to: a
+ * 24 GB download should never start as a side effect of booting.
  *
  * All of it is read-only by default and every failure is soft. If Ollama is not
  * running, `status()` reports that rather than throwing, because "Ollama is not
  * running" is the single most useful thing this file can tell anyone.
  */
 
-import { PIPELINE } from './local-llm.mjs'
+import { PIPELINE, modelVisionCapability } from './local-llm.mjs'
 
 const OLLAMA_HOST = process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434'
 
@@ -24,7 +24,7 @@ const OLLAMA_HOST = process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434'
  * @typedef {Object} SlotStatus
  * @property {string} slot
  * @property {string} model        the configured model name
- * @property {'ready'|'missing'|'unknown'|'unsupported'} state
+ * @property {'ready'|'missing'|'unknown'|'unsupported'|'incompatible'} state
  * @property {number|null} size    bytes on disk, if Ollama reported it
  * @property {boolean|null} fits   RAM planner fit flag, null when manually overridden
  * @property {number|null} residentBytes estimated resident memory
@@ -87,7 +87,7 @@ export async function status() {
   }
 
   const have = await installed()
-  const slots = Object.entries(PIPELINE).map(([slot, cfg]) => {
+  const slots = await Promise.all(Object.entries(PIPELINE).map(async ([slot, cfg]) => {
     const wanted = cfg.model
     if (!wanted) {
       return {
@@ -103,6 +103,20 @@ export async function status() {
     const tagless = !wanted.includes(':')
     const match = have.find((m) => m.name === wanted || (tagless && m.name === `${wanted}:latest`))
     if (match) {
+      const visionCheck = slot === 'vision'
+        ? await modelVisionCapability(OLLAMA_HOST, wanted)
+        : null
+      if (visionCheck?.supported === false) {
+        return {
+          slot,
+          model: wanted,
+          state: 'incompatible',
+          size: match.size,
+          fits: cfg.fits,
+          residentBytes: cfg.residentBytes,
+          note: visionCheck.error,
+        }
+      }
       return {
         slot,
         model: wanted,
@@ -122,7 +136,7 @@ export async function status() {
       residentBytes: cfg.residentBytes,
       note: `not pulled — roughly ${approxSize(wanted)}`,
     }
-  })
+  }))
 
   return {
     ollama: true,
@@ -224,6 +238,20 @@ export async function summary() {
 
 function approxSize(model) {
   const lower = String(model ?? '').toLowerCase()
+  if (lower.includes('huihui-qwen3.5-27b-abliterated-gguf:q2_k')) return 'about 10.9 GB including the projector'
+  if (lower.includes('qwen3.5-abliterated:122b')) return 'about 81 GB'
+  if (lower.includes('qwen3.5-abliterated:35b-a3b-fp16')) return 'about 72 GB'
+  if (lower.includes('qwen3.5-abliterated:35b-a3b-q8_0')) return 'about 39 GB'
+  if (lower.includes('qwen3.5-abliterated:27b-q8_0')) return 'about 30 GB'
+  if (lower.includes('qwen3.5-abliterated:35b')) return 'about 24 GB'
+  if (lower.includes('qwen3.5-abliterated:27b')) return 'about 17 GB'
+  if (lower.includes('qwen3.5-abliterated:9b-q8_0')) return 'about 11 GB'
+  if (lower.includes('qwen3.5-abliterated:4b-q8_0')) return 'about 5.2 GB'
+  if (lower.includes('qwen3.5-abliterated:2b-q8_0')) return 'about 2.7 GB'
+  if (lower.includes('qwen3.5-abliterated:9b')) return 'about 6.6 GB'
+  if (lower.includes('qwen3.5-abliterated:4b')) return 'about 3.3 GB'
+  if (lower.includes('qwen3.5-abliterated:2b')) return 'about 1.9 GB'
+  if (lower.includes('qwen3.5-abliterated:0.8b')) return 'about 1.0 GB'
   if (lower.includes('qwen2.5-vl-abliterated:7b')) return 'about 6.0 GB'
   if (lower.includes('qwen2.5-vl-abliterated:3b')) return 'about 3.2 GB'
   if (lower.includes('q2_k')) return 'about 3.0 GB'
