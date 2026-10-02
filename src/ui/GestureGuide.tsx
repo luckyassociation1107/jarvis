@@ -12,8 +12,9 @@ import { diag } from '../lib/hands'
  *
  * It fades once you have used it. A legend that stays up forever is clutter,
  * and the moment you have successfully pinched something you no longer need to
- * be told how; but it comes back whenever the camera is turned on again,
- * because that is when you have forgotten.
+ * be told how; but it comes back whenever the camera is turned on again. Hud
+ * keys this component to the camera session, so each explicit opt-in starts a
+ * fresh, un-dismissed guide without resetting React state from an effect.
  */
 
 const MOVES: { gesture: string; hand: string; does: string }[] = [
@@ -28,29 +29,27 @@ const MOVES: { gesture: string; hand: string; does: string }[] = [
 const DISMISS_MS = 1400
 
 export function GestureGuide({ live }: { live: boolean }) {
-  const [show, show_] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
   const used = useRef(false)
-  const poll = useRef(0)
+  const show = live && !dismissed
 
   useEffect(() => {
-    if (!live) {
-      show_(false)
-      used.current = false
-      return
-    }
-    show_(true)
+    if (!live) return
+    let dismissTimer = 0
 
     // Polled rather than subscribed: the tracker publishes a plain mutable
     // object on purpose, so that the loop's timing is not at the mercy of
     // React. Four times a second is plenty to notice a first pinch.
-    poll.current = window.setInterval(() => {
-      if (used.current) return
-      if (diag.gesture.includes('pinch')) {
-        used.current = true
-        window.setTimeout(() => show_(false), DISMISS_MS)
-      }
+    const poll = window.setInterval(() => {
+      if (used.current || !diag.gesture.includes('pinch')) return
+      used.current = true
+      dismissTimer = window.setTimeout(() => setDismissed(true), DISMISS_MS)
     }, 250)
-    return () => window.clearInterval(poll.current)
+
+    return () => {
+      window.clearInterval(poll)
+      if (dismissTimer) window.clearTimeout(dismissTimer)
+    }
   }, [live])
 
   return (

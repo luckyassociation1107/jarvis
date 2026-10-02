@@ -48,14 +48,10 @@ export function Boot() {
   // reading Date.now advances by real elapsed time whatever the browser does
   // with its frame budget: throttling can cost smoothness, never correctness.
   useEffect(() => {
-    if (phase !== 'boot') {
-      setT(0)
-      return
-    }
+    if (phase !== 'boot') return
     const start = Date.now()
-    setT(0)
-    const id = setInterval(() => setT(Date.now() - start), 50)
-    return () => clearInterval(id)
+    const id = window.setInterval(() => setT(Date.now() - start), 50)
+    return () => window.clearInterval(id)
   }, [phase])
 
   if (phase !== 'boot') return null

@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react'
-import { Scene } from './scene/Scene'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Hud } from './ui/Hud'
 import { Boot } from './ui/Boot'
 import { Diagnostics } from './ui/Diagnostics'
@@ -28,6 +27,10 @@ import {
   type Msg,
 } from './lib/brain'
 import { startAnalyser, micLevel } from './lib/audio'
+
+// Defer the WebGL stack until the first browser paint so text, controls, and
+// connection feedback remain responsive while the scene chunks load.
+const Scene = lazy(() => import('./scene/Scene').then((module) => ({ default: module.Scene })))
 
 /**
  * The conversation.
@@ -78,6 +81,7 @@ export default function App() {
    * the phase, the speaker, or the busy state on its way to the floor.
    */
   const turn = useRef(0)
+  const bridgeEventsBound = useRef(false)
   const booting = useRef(false)
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const voicePoll = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -119,12 +123,24 @@ export default function App() {
 
   // -- one turn -------------------------------------------------------------
 
-  const respond = async (said: string): Promise<void> => {
+  const respond = async (said: string, channel: 'voice' | 'chat' = 'voice'): Promise<void> => {
+    const before = store.getState().phase
+    if (channel === 'chat') {
+      // Typed input shares the same local model session. If a voice turn is in
+      // progress, let a new chat message replace it just like a spoken barge-in.
+      silence()
+      if (before === 'thinking' || before === 'tooling' || before === 'speaking') {
+        turn.current++
+        interrupt()
+      }
+    }
+
     const mine = ++turn.current
     const stale = () => mine !== turn.current
 
     clearIdle()
     const s = store.getState()
+    s.setError(null)
     // Last turn's panels and blades go now, before the new answer starts
     // putting its own up. Anything the model marked sticky survives.
     s.clearPanels()
@@ -133,33 +149,55 @@ export default function App() {
     s.pushTurn({ id: newId(), role: 'user', text: said })
     s.setPhase('thinking')
 
-    const spk = createSpeaker()
+    // Text chat uses the very same brain and tool loop, but does not open the
+    // speaker or microphone. Voice remains an optional way to talk to JARVIS.
+    const spk = channel === 'voice' ? createSpeaker() : null
     speaker.current = spk
-    sfx.duck(true)
-    music.duck(true)
+    if (channel === 'voice') {
+      sfx.duck(true)
+      music.duck(true)
+    }
 
     const turnId = newId()
+    let turnStartedAt = performance.now()
+    let firstTokenMs: number | null = null
     let started = false
     let filled = false
+    const usedTools: string[] = []
 
     try {
-      await ask(said, history.current, {
+      // A fresh text-only session has no boot-time warm-up. Wait for the bridge
+      // to finish attaching its tools before the first chat turn is sent.
+      if (channel === 'chat') await warm()
+      // Start telemetry at the actual model request, excluding bridge setup time.
+      turnStartedAt = performance.now()
+      const result = await ask(said, history.current, {
         onText: (delta) => {
           if (stale()) return
           if (!started) {
             started = true
-            store.getState().setPhase('speaking')
+            firstTokenMs = Math.max(0, Math.round(performance.now() - turnStartedAt))
+            store.getState().setPhase(channel === 'voice' ? 'speaking' : 'thinking')
             // The answer arriving is what ends the tool phase — a timer would
             // clear the readout while a slow tool was still running.
             store.getState().setActiveTool(null)
             music.working(false)
-            store.getState().pushTurn({ id: turnId, role: 'jarvis', text: '' })
+            store.getState().pushTurn({
+              id: turnId,
+              role: 'jarvis',
+              text: '',
+              ...(usedTools.length ? { tools: [...usedTools] } : {}),
+            })
           }
           store.getState().appendToLastTurn(delta)
-          spk.push(delta)
+          spk?.push(delta)
         },
         onTool: (name) => {
           if (stale()) return
+          if (!usedTools.includes(name)) {
+            usedTools.push(name)
+            if (started) store.getState().appendToolToLastTurn(name)
+          }
           // Only claim the tooling phase while he has nothing to say yet.
           // Setting it unconditionally pinned the machine in 'tooling' for the
           // rest of any answer that called a tool after it started talking,
@@ -171,41 +209,184 @@ export default function App() {
           // Say something the moment work starts — a tool can take ten seconds
           // and silence that long reads as a crash. Once per turn only; a
           // chain of five tools shouldn't produce five apologies.
-          if (!filled && !started) {
+          if (channel === 'voice' && !filled && !started) {
             filled = true
-            spk.say(forTool(name))
+            spk?.say(forTool(name))
           }
         },
       })
 
       if (stale()) return
 
-      // Nothing to record. The bridge keeps the conversation in its own session,
-      // so the model already has this exchange in context next time. Mirroring
-      // it here would be a second copy of the truth to keep in step.
+      // The bridge streams in normal operation. If a compatible server returns
+      // only a final completion, still put that answer in the visible transcript.
+      if (!started && result.text) {
+        started = true
+        firstTokenMs = Math.max(0, Math.round(performance.now() - turnStartedAt))
+        store.getState().setPhase(channel === 'voice' ? 'speaking' : 'thinking')
+        store.getState().setActiveTool(null)
+        music.working(false)
+        store.getState().pushTurn({
+          id: turnId,
+          role: 'jarvis',
+          text: result.text,
+          ...(usedTools.length ? { tools: [...usedTools] } : {}),
+        })
+        spk?.push(result.text)
+      }
 
-      await spk.end()
+      if (spk) await spk.end()
       if (stale()) return
-      sfx.play('done')
+      if (channel === 'voice') sfx.play('done')
     } catch (err) {
       if (stale()) return
       console.error(err)
-      sfx.play('error')
-      store
-        .getState()
-        .setError(err instanceof Error ? err.message : 'Something went wrong.')
+      if (channel === 'voice') sfx.play('error')
+      const message = err instanceof Error ? err.message : 'Something went wrong.'
+      store.getState().setError(message)
+      if (channel === 'chat') {
+        store.getState().pushTurn({
+          id: newId(),
+          role: 'jarvis',
+          text: `I couldn't reach the local brain. Check that the bridge and model server are running.\n\n${message}`,
+        })
+      }
     } finally {
       if (!stale()) {
+        if (channel === 'chat' && started) {
+          const totalMs = Math.max(0, Math.round(performance.now() - turnStartedAt))
+          store.getState().setTurnTelemetry(turnId, {
+            firstTokenMs: firstTokenMs ?? totalMs,
+            totalMs,
+          })
+        }
         speaker.current = null
         sfx.duck(false)
         music.duck(false)
         store.getState().setActiveTool(null)
         music.working(false)
-        // Stay open. Having to say his name again to add one more sentence is
-        // the difference between a conversation and a vending machine.
-        listen(FOLLOW_UP_MS)
+        if (channel === 'voice') {
+          // Stay open. Having to say his name again to add one more sentence is
+          // the difference between a conversation and a vending machine.
+          listen(FOLLOW_UP_MS)
+        } else {
+          // A typed turn can work without ever enabling the microphone. Keep the
+          // voice UI dormant if voice was initialized; otherwise leave it off.
+          store.getState().setPhase(voice.current ? 'dormant' : 'offline')
+        }
       }
     }
+  }
+
+  /** Install bridge callbacks once so text chat works before voice is powered on. */
+  const bindBridgeEvents = () => {
+    if (bridgeEventsBound.current) return
+    bridgeEventsBound.current = true
+
+    watchServers((servers) => store.getState().setConnected(servers))
+    watchPanels((panel) => store.getState().pushPanel(panel))
+    watchBlades((blade) => store.getState().pushBlade(blade))
+
+    /**
+     * JARVIS asking to see something.
+     *
+     * Announced on screen for as long as it takes, with whatever he said he was
+     * looking for. The camera's own light is on too, but a hardware light that
+     * appears with no explanation is exactly the thing that makes people
+     * distrust an assistant — so the interface says it before they have to ask.
+     */
+    watchCapture(async (req) => {
+      const note =
+        req.mode === 'watch'
+          ? req.when === 'past'
+            ? req.reason || 'reviewing the last few seconds'
+            : `${req.reason || 'watching'} · ${req.seconds}s`
+          : req.reason || 'taking a look'
+      store.getState().setLooking(note)
+
+      // The past is only available if something has been remembering it, and
+      // that only happens while the camera is on screen. Answering plainly
+      // beats opening the camera and recording the next few seconds instead,
+      // which is a different question from the one that was asked.
+      if (req.mode === 'watch' && req.when === 'past' && camera.bufferedSeconds() < 1) {
+        store.getState().setLooking(null)
+        return {
+          error:
+            'There is no recent footage — the camera has to be open on screen ' +
+            'for me to remember what just happened. Ask me to open the camera, ' +
+            'and I can watch from then on.',
+        }
+      }
+
+      // Held for the whole capture. Without this the stream can be torn down by
+      // whoever else was using it half way through a six-second watch.
+      let held = false
+      try {
+        await camera.holdCamera()
+        held = true
+        if (req.mode === 'look') return camera.grabFrame()
+        if (req.when === 'past') {
+          const grid = camera.recentGrid(req.seconds, 9)
+          return grid ?? { error: 'There is not enough recent footage to review.' }
+        }
+        return await camera.watchAhead(req.seconds, 9)
+      } catch (err) {
+        return {
+          error:
+            (err as DOMException)?.name === 'NotAllowedError'
+              ? 'The camera is not permitted, so I cannot see anything.'
+              : `The camera could not be read: ${(err as Error)?.message ?? err}`,
+        }
+      } finally {
+        if (held) camera.releaseCamera()
+        store.getState().setLooking(null)
+      }
+    })
+
+    // The interface is JARVIS's to drive. These arrive out of band, pushed
+    // mid-turn the way panels are, so a command can retint the reactor or put
+    // something into orbit while he is still speaking the sentence about it.
+    watchUi((op, args) => {
+      const s = store.getState()
+      const a = (args ?? {}) as Record<string, never>
+      switch (op) {
+        case 'patch':
+          s.applyUi(args)
+          break
+        case 'orbit':
+          if (a.action === 'add') s.addOrbit(args)
+          else if (a.action === 'remove') s.removeOrbit(String(a.id))
+          else s.clearOrbits()
+          break
+        case 'effect':
+          s.fireEffect(a.kind)
+          break
+        case 'reset':
+          s.resetUi()
+          break
+        case 'screen':
+          s.clearScreen(a.what ?? 'all')
+          break
+        default:
+          console.warn('[jarvis] unknown ui op:', op, args)
+      }
+    })
+    // A lost socket takes its model session and conversation context with it.
+    watchConnection((state) => {
+      if (state === 'lost') {
+        store.getState().setError('Bridge connection lost — reconnecting.')
+      } else if (state === 'reconnected') {
+        store.getState().setError('Bridge reconnected. The previous conversation was not kept.')
+      }
+    })
+  }
+
+  const sendChatMessage = async (message: string) => {
+    if (store.getState().phase === 'boot') return
+    bindBridgeEvents()
+    // respond() sends through the same bridge session as voice turns. No audio
+    // unlock, wake word, microphone permission, or voice boot sequence needed.
+    await respond(message, 'chat')
   }
 
   // -- voice events ---------------------------------------------------------
@@ -351,109 +532,9 @@ export default function App() {
 
     s.setPhase('boot')
 
-    watchServers((servers) => store.getState().setConnected(servers))
-    watchPanels((panel) => store.getState().pushPanel(panel))
-    watchBlades((blade) => store.getState().pushBlade(blade))
-
-    /**
-     * JARVIS asking to see something.
-     *
-     * Announced on screen for as long as it takes, with whatever he said he was
-     * looking for. The camera's own light is on too, but a hardware light that
-     * appears with no explanation is exactly the thing that makes people
-     * distrust an assistant — so the interface says it before they have to ask.
-     */
-    watchCapture(async (req) => {
-      const note =
-        req.mode === 'watch'
-          ? req.when === 'past'
-            ? req.reason || 'reviewing the last few seconds'
-            : `${req.reason || 'watching'} · ${req.seconds}s`
-          : req.reason || 'taking a look'
-      store.getState().setLooking(note)
-
-      // The past is only available if something has been remembering it, and
-      // that only happens while the camera is on screen. Answering plainly
-      // beats opening the camera and recording the next few seconds instead,
-      // which is a different question from the one that was asked.
-      if (req.mode === 'watch' && req.when === 'past' && camera.bufferedSeconds() < 1) {
-        store.getState().setLooking(null)
-        return {
-          error:
-            'There is no recent footage — the camera has to be open on screen ' +
-            'for me to remember what just happened. Ask me to open the camera, ' +
-            'and I can watch from then on.',
-        }
-      }
-
-      // Held for the whole capture. Without this the stream can be torn down by
-      // whoever else was using it half way through a six-second watch.
-      let held = false
-      try {
-        await camera.holdCamera()
-        held = true
-        if (req.mode === 'look') return camera.grabFrame()
-        if (req.when === 'past') {
-          const grid = camera.recentGrid(req.seconds, 9)
-          return grid ?? { error: 'There is not enough recent footage to review.' }
-        }
-        return await camera.watchAhead(req.seconds, 9)
-      } catch (err) {
-        return {
-          error:
-            (err as DOMException)?.name === 'NotAllowedError'
-              ? 'The camera is not permitted, so I cannot see anything.'
-              : `The camera could not be read: ${(err as Error)?.message ?? err}`,
-        }
-      } finally {
-        if (held) camera.releaseCamera()
-        store.getState().setLooking(null)
-      }
-    })
-
-    // The interface is JARVIS's to drive. These arrive out of band, pushed
-    // mid-turn the way panels are, so a command can retint the reactor or put
-    // something into orbit while he is still speaking the sentence about it.
-    watchUi((op, args) => {
-      const s = store.getState()
-      const a = (args ?? {}) as Record<string, never>
-      switch (op) {
-        case 'patch':
-          s.applyUi(args)
-          break
-        case 'orbit':
-          if (a.action === 'add') s.addOrbit(args)
-          else if (a.action === 'remove') s.removeOrbit(String(a.id))
-          else s.clearOrbits()
-          break
-        case 'effect':
-          s.fireEffect(a.kind)
-          break
-        case 'reset':
-          s.resetUi()
-          break
-        case 'screen':
-          s.clearScreen(a.what ?? 'all')
-          break
-        default:
-          console.warn('[jarvis] unknown ui op:', op, args)
-      }
-    })
-    // In bridge mode the conversation lives in the agent session, which is tied
-    // to the socket — so a drop silently wipes his memory while the transcript
-    // on screen still shows it. Better to say so than to let him quietly forget.
-    watchConnection((state) => {
-      if (state === 'lost') {
-        store.getState().setError('Bridge connection lost — reconnecting.')
-      } else if (state === 'reconnected') {
-        store
-          .getState()
-          .setError('Bridge reconnected. The previous conversation was not kept.')
-      }
-    })
+    bindBridgeEvents()
     // The bridge is the only brain, and it reports whether it can reach its
-    // model. Nothing to check here: there is no key to be missing and no second
-    // backend to fall back to.
+    // model. Text chat can also connect before this voice startup path runs.
     const warming = warm().catch((err: Error) => s.setError(err.message))
 
     // Auto mode follows the bridge's RAM plan. A static GitHub Pages view cannot
@@ -584,6 +665,8 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      const { commandPaletteOpen, modelManagerOpen, chatOpen } = store.getState()
+      if (commandPaletteOpen || modelManagerOpen || chatOpen) return
 
       // V auditions the next British voice installed on this machine. Which
       // ones exist varies per Mac, so hearing them beats trusting a ranking.
@@ -702,9 +785,13 @@ export default function App() {
 
   return (
     <>
-      <Scene />
-      <Hud onStart={() => void powerOn()} />
-      <Boot />
+      <Suspense fallback={<div className="scene-loading" aria-hidden="true" />}>
+        <Scene />
+      </Suspense>
+      <Hud onStart={() => void powerOn()} onSendMessage={sendChatMessage} />
+      {/* Remount on each boot session so its clock starts at zero without an
+          effect synchronously setting component state. */}
+      <Boot key={phase === 'boot' ? 'booting' : 'idle'} />
       <Diagnostics />
     </>
   )

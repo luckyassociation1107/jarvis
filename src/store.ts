@@ -52,12 +52,21 @@ export type Blade = {
   hold: 'turn' | 'sticky'
 }
 
+export type TurnTelemetry = {
+  /** Time until the first visible answer delta, measured in milliseconds. */
+  firstTokenMs: number
+  /** Full model-turn duration through the final answer, measured in milliseconds. */
+  totalMs: number
+}
+
 export type Turn = {
   id: string
   role: 'user' | 'jarvis'
   text: string
   /** Tool names invoked while producing this turn, for the HUD readout. */
   tools?: string[]
+  /** Measured timing for the local inference, not an estimate. */
+  telemetry?: TurnTelemetry
 }
 
 /**
@@ -212,6 +221,10 @@ const MAX_ORBITS = 8
 
 type State = {
   phase: Phase
+  /** Global overlay state, shared by the command palette and their launchers. */
+  chatOpen: boolean
+  commandPaletteOpen: boolean
+  modelManagerOpen: boolean
   /** 0..1 mic loudness, drives the reactor pulse. */
   level: number
   /** What JARVIS is currently reading aloud or has just said. */
@@ -242,6 +255,9 @@ type State = {
   ui: UiState
 
   setVoice: (v: string) => void
+  setChatOpen: (open: boolean) => void
+  setCommandPaletteOpen: (open: boolean) => void
+  setModelManagerOpen: (open: boolean) => void
   setGestures: (on: boolean) => void
   setLooking: (why: string | null) => void
   setBootNote: (n: string) => void
@@ -260,18 +276,24 @@ type State = {
   setConnected: (c: string[]) => void
   pushTurn: (t: Turn) => void
   appendToLastTurn: (text: string) => void
+  appendToolToLastTurn: (tool: string) => void
+  setTurnTelemetry: (id: string, telemetry: TurnTelemetry) => void
 
   applyUi: (patch: UiPatch) => void
   addOrbit: (o: OrbitObject) => void
   removeOrbit: (id: string) => void
   clearOrbits: () => void
   fireEffect: (kind: UiEffect['kind']) => void
+  clearEffect: (at: number) => void
   resetUi: () => void
   clearScreen: (what: 'all' | 'panels' | 'transcript') => void
 }
 
 export const useStore = create<State>((set) => ({
   phase: 'offline',
+  chatOpen: false,
+  commandPaletteOpen: false,
+  modelManagerOpen: false,
   level: 0,
   caption: '',
   turns: [],
@@ -289,6 +311,9 @@ export const useStore = create<State>((set) => ({
   ui: defaultUi(),
 
   setVoice: (voice) => set({ voice }),
+  setChatOpen: (chatOpen) => set({ chatOpen }),
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+  setModelManagerOpen: (modelManagerOpen) => set({ modelManagerOpen }),
   setGestures: (gestures) => set({ gestures }),
   setLooking: (looking) => set({ looking }),
   setBootNote: (bootNote) => set({ bootNote }),
@@ -361,6 +386,23 @@ export const useStore = create<State>((set) => ({
       turns[turns.length - 1] = { ...last, text: last.text + text }
       return { turns }
     }),
+  appendToolToLastTurn: (tool) =>
+    set((s) => {
+      const turns = [...s.turns]
+      const index = turns.length - 1
+      const last = turns[index]
+      if (!last || last.role !== 'jarvis' || (last.tools ?? []).includes(tool)) return {}
+      turns[index] = { ...last, tools: [...(last.tools ?? []), tool] }
+      return { turns }
+    }),
+  setTurnTelemetry: (id, telemetry) =>
+    set((s) => {
+      const index = s.turns.findIndex((turn) => turn.id === id && turn.role === 'jarvis')
+      if (index < 0) return {}
+      const turns = [...s.turns]
+      turns[index] = { ...turns[index], telemetry }
+      return { turns }
+    }),
 
   // Deep on purpose. "Make the reactor red" arrives as a patch touching only
   // reactor.color, and a shallow merge would take the scale, spin and style
@@ -394,7 +436,14 @@ export const useStore = create<State>((set) => ({
     set((s) => ({ ui: { ...s.ui, orbits: s.ui.orbits.filter((o) => o.id !== id) } })),
   clearOrbits: () => set((s) => ({ ui: { ...s.ui, orbits: [] } })),
   fireEffect: (kind) =>
-    set((s) => ({ ui: { ...s.ui, effect: { kind, at: Date.now() } } })),
+    set((s) => ({
+      ui: {
+        ...s.ui,
+        effect: { kind, at: Math.max(Date.now(), (s.ui.effect?.at ?? 0) + 1) },
+      },
+    })),
+  clearEffect: (at) =>
+    set((s) => ({ ui: s.ui.effect?.at === at ? { ...s.ui, effect: null } : s.ui })),
   resetUi: () => set({ ui: defaultUi() }),
   // An explicit order outranks the sticky flag. `hold: 'sticky'` only ever
   // meant "survive the next turn boundary"; when someone says "clear the

@@ -21,7 +21,7 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, withLocalSpeechModel } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { install as autopilotInstall, planSummary, ladder as autopilotLadder, tierProfiles } from './autopilot.mjs'
@@ -708,7 +708,7 @@ const handleRequest = async (req, res) => {
     try {
       const requested = requestUrl.searchParams.get('lang') ?? 'auto'
       const language = /^(auto|[a-z]{2,3})$/i.test(requested) ? requested : 'auto'
-      const out = await transcribe(Buffer.concat(chunks), { language })
+      const out = await withLocalSpeechModel(() => transcribe(Buffer.concat(chunks), { language }))
       res.writeHead(200, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: true, ...out }))
     } catch (error) {
@@ -745,6 +745,8 @@ const handleRequest = async (req, res) => {
         engine: rung.engine ?? undefined,
         dtype: rung.dtype ?? undefined,
         quality: rung.quality,
+        parametersB: rung.parametersB ?? undefined,
+        multimodal: rung.multimodal ?? undefined,
         note: rung.note ?? undefined,
         multilingual: rung.multilingual ?? undefined,
         englishOnly: rung.englishOnly ?? undefined,
@@ -1000,8 +1002,8 @@ server.listen(PORT)
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
 console.log(`[jarvis] max ${EFFORT} tool turns`)
 
-// The pipeline, named slot by slot. Printed because "which model just answered
-// that" is a fair question and the answer is three different ones.
+// The pipeline, named slot by slot. Printed because "which route answered
+// that" is a fair question; multiple routes may share one fitted model.
 for (const [slot, spec] of Object.entries(PIPELINE)) {
   console.log(`[jarvis]   ${slot.padEnd(7)} ${spec.model}  @ ${spec.url}`)
 }
@@ -1014,8 +1016,9 @@ if (model.ok) {
   console.log('[jarvis] all models reachable')
 } else {
   for (const slot of model.slots.filter((s) => !s.ok)) {
-    console.warn(`[jarvis] ${slot.slot} MODEL NOT REACHABLE — ${slot.error}`)
-    console.warn(`[jarvis]   start it with: ollama run ${slot.model}`)
+    const label = slot.capability === false ? 'VISION CAPABILITY NOT VERIFIED' : 'MODEL NOT REACHABLE'
+    console.warn(`[jarvis] ${slot.slot} ${label} — ${slot.error}`)
+    if (slot.capability !== false) console.warn(`[jarvis]   start it with: ollama run ${slot.model}`)
   }
   console.warn(
     '[jarvis]   (or set JARVIS_MODEL_*_URL / JARVIS_MODEL_BASE_URL to wherever yours lives)',

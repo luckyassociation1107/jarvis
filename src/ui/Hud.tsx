@@ -7,6 +7,8 @@ import { BladeSweep, Blades } from './Blades'
 import { Effects } from './Effects'
 import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
+import { Chat } from './Chat'
+import { CommandPalette } from './CommandPalette'
 
 /* ------------------------------------------------------------------ decode */
 
@@ -65,9 +67,10 @@ function scramble(s: string, seed: number) {
  */
 function DecodeText({ text }: { text: string }) {
   const reduced = useReducedMotion()
-  const settled = useRef(0)
+  const frontier = useRef(0)
   const raf = useRef(0)
   const latest = useRef(text)
+  const [visible, setVisible] = useState(0)
   const [tick, bump] = useState(0)
 
   useEffect(() => {
@@ -77,10 +80,12 @@ function DecodeText({ text }: { text: string }) {
     latest.current = text
 
     if (reduced) {
-      settled.current = text.length
+      frontier.current = text.length
+      if (raf.current) cancelAnimationFrame(raf.current)
+      raf.current = 0
       return
     }
-    if (raf.current || settled.current >= text.length) return
+    if (raf.current || frontier.current >= text.length) return
 
     let prev = performance.now()
     let painted = 0
@@ -92,18 +97,20 @@ function DecodeText({ text }: { text: string }) {
       prev = now
 
       const target = latest.current.length
-      const rate = Math.max(MIN_RATE, (target - settled.current) / (MAX_LAG_MS / 1000))
-      settled.current = Math.min(target, settled.current + rate * dt)
+      const rate = Math.max(MIN_RATE, (target - frontier.current) / (MAX_LAG_MS / 1000))
+      frontier.current = Math.min(target, frontier.current + rate * dt)
 
       if (now - painted >= FRAME_MS) {
         painted = now
+        setVisible(Math.floor(frontier.current))
         bump((n) => n + 1)
       }
 
-      if (settled.current < latest.current.length) {
+      if (frontier.current < latest.current.length) {
         raf.current = requestAnimationFrame(step)
       } else {
         raf.current = 0
+        setVisible(Math.floor(frontier.current))
         bump((n) => n + 1)
       }
     }
@@ -118,21 +125,26 @@ function DecodeText({ text }: { text: string }) {
     [],
   )
 
-  const n = Math.floor(settled.current)
-  if (reduced || n >= text.length) return <>{text}</>
+  if (reduced || visible >= text.length) return <>{text}</>
 
   return (
     <>
-      {text.slice(0, n)}
-      <span className="decode-ghost">{scramble(text.slice(n, n + GHOST), tick)}</span>
-      <span className="decode-veil">{text.slice(n + GHOST)}</span>
+      {text.slice(0, visible)}
+      <span className="decode-ghost">{scramble(text.slice(visible, visible + GHOST), tick)}</span>
+      <span className="decode-veil">{text.slice(visible + GHOST)}</span>
     </>
   )
 }
 
 /* --------------------------------------------------------------------- hud */
 
-export function Hud({ onStart }: { onStart: () => void }) {
+export function Hud({
+  onStart,
+  onSendMessage,
+}: {
+  onStart: () => void
+  onSendMessage: (message: string) => Promise<void>
+}) {
   const phase = useStore((s) => s.phase)
   const caption = useStore((s) => s.caption)
   const turns = useStore((s) => s.turns)
@@ -158,9 +170,11 @@ export function Hud({ onStart }: { onStart: () => void }) {
   }, [ui.background])
 
   return (
-    <div className="hud" style={{ ['--accent' as string]: colour }}>
+    <div className="hud" data-phase={phase} style={{ ['--accent' as string]: colour }}>
       {/* Instrument layer stays behind the live transcript and assistant surfaces. */}
       <CommandDeck onStart={onStart} />
+      <Chat onSend={onSendMessage} />
+      <CommandPalette onStart={onStart} />
       <BladeSweep />
 
       <AnimatePresence>
@@ -252,7 +266,7 @@ export function Hud({ onStart }: { onStart: () => void }) {
           {looking ? `LOOKING — ${looking.toUpperCase()}` : 'CAMERA ON · G TO STOP'}
         </div>
       )}
-      <GestureGuide live={gestures} />
+      <GestureGuide key={gestures ? 'camera-live' : 'camera-idle'} live={gestures} />
     </div>
   )
 }

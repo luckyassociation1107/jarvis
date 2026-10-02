@@ -17,17 +17,18 @@ import { WebSocket } from 'ws'
 const PORT = 8791
 const MODEL_PORT = 11499
 const MODEL = 'stub-model'
-// The pipeline's real defaults. The stub answers /v1/models with only its own
-// name, so the bridge's slot check reports them all missing — which is correct
-// behaviour and also why the turn still runs: the model name is passed through
-// regardless of what is loaded.
-const CHAT = 'huihui_ai/qwen2.5-abliterate:0.5b'
-const REASON = 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q4_k_m'
-const VISION = 'huihui_ai/qwen2.5-vl-abliterated:3b'
+// Use distinct deterministic route sentinels so this smoke harness can observe
+// chat/reason/vision dispatch, even though the real catalogue shares one Qwen3.5
+// multimodal tag across those slots. The stub exposes only `stub-model`; the
+// local route still runs with these configured ids to exercise the full bridge.
+const CHAT = 'smoke/qwen3.5-chat'
+const REASON = 'smoke/qwen3.5-reason'
+const VISION = 'smoke/qwen3.5-vision'
 
 // Keep this test deterministic regardless of the runner's real RAM or Ollama.
 process.env.JARVIS_BRIDGE_PORT = String(PORT)
 process.env.JARVIS_MODEL_BASE_URL = `http://localhost:${MODEL_PORT}/v1`
+process.env.JARVIS_OLLAMA_URL = `http://localhost:${MODEL_PORT}`
 process.env.JARVIS_MODEL_CHAT = CHAT
 process.env.JARVIS_MODEL_REASON = REASON
 process.env.JARVIS_MODEL_VISION = VISION
@@ -47,7 +48,41 @@ let visionSawImage = false
 let visionSawIntent = false
 let coderSawCombinedVisionPrompt = false
 let coderSawEnglishTranslation = false
+let visionCapabilityProbeCount = 0
+const resourceEvents = []
 const http = createServer((req, res) => {
+  if (req.url === '/api/tags') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ models: [{ name: MODEL }] }))
+  }
+  if (req.url === '/api/show' && req.method === 'POST') {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      const { model } = JSON.parse(Buffer.concat(chunks).toString() || '{}')
+      visionCapabilityProbeCount++
+      const capabilities = model === 'smoke/qwen3.5-text-only' ? ['completion'] : ['completion', 'vision']
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ capabilities, model_info: {} }))
+    })
+    return
+  }
+  if (req.url === '/api/chat' && req.method === 'POST') {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      const payload = JSON.parse(Buffer.concat(chunks).toString() || '{}')
+      if (payload.keep_alive === 0) resourceEvents.push(`unload:${payload.model}`)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: payload.model, done: true, done_reason: 'unload' }))
+    })
+    return
+  }
+  if (req.url === '/test/speech-started' && req.method === 'POST') {
+    resourceEvents.push('speech')
+    res.writeHead(204)
+    return res.end()
+  }
   if (req.url === '/v1/models') {
     res.writeHead(200, { 'content-type': 'application/json' })
     return res.end(JSON.stringify({ data: [{ id: MODEL }] }))
@@ -61,6 +96,7 @@ const http = createServer((req, res) => {
   req.on('end', () => {
     const payload = JSON.parse(Buffer.concat(body).toString())
     if (payload.stream === false) {
+      resourceEvents.push(`inference:${payload.model}`)
       const userText = lastText(payload.messages)
       let result
       if (payload.model === VISION) {
@@ -169,15 +205,27 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
   && autopilotData.tiers.at(-1)?.ramGb === 32
   && autopilotData.tiers.every((tier) => {
     const slots = tier.slots
-    if (!slots?.chat?.model || !slots?.reason?.model) return false
+    if (!slots?.chat?.model || !slots?.reason?.model || !slots?.vision?.model) return false
+    const routeModelsOkay = tier.ramGb === 32
+      ? slots.chat.model === slots.reason.model && slots.chat.model !== slots.vision.model
+      : slots.chat.model === slots.vision.model && slots.vision.model === slots.reason.model
     return Object.values(slots).every((slot) => validTierStates.has(slot.state) && slot.fits === (slot.state === 'fits'))
-      && (!slots.vision?.fits || /abliterat/i.test(slots.vision.model ?? ''))
+      && routeModelsOkay
+      && slots.vision.multimodal === true
+      && ['fits', 'best-effort'].includes(slots.vision.state)
+      && /abliterat/i.test(slots.vision.model)
   })
 const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
   ['/autopilot returns model-status slots and notes', Array.isArray(autopilotData.modelSlots) && Array.isArray(autopilotData.notes)],
-  ['/autopilot includes all 33 reference RAM profiles with valid slot statuses and abliterated vision', tierCatalogOkay],
+  ['/autopilot includes 33 truthful RAM profiles with a multimodal vision slot in every tier', tierCatalogOkay],
+  ['/autopilot exposes explicit model size and quant metadata for routed slots', (() => {
+    const slots = Object.fromEntries((autopilotData.fits ?? []).map((slot) => [slot.id, slot]))
+    return Boolean(slots.chat?.parametersB && slots.reason?.parametersB
+      && slots.vision?.multimodal && slots.vision.parametersB
+      && slots.vision.quant && Number.isFinite(slots.chat.downloadGb))
+  })()],
   ['auto STT can identify only an explicitly selected Whisper slot', !speechPlan || (speechPlan.kind === 'whisper' && typeof speechPlan.fits === 'boolean')],
 ]
 
@@ -274,7 +322,7 @@ const netChecks = [
 // This verifies that intent extraction, image analysis, prompt fusion, and
 // downstream code routing happen in the intended order without claiming a live
 // Ollama conversation.
-const { runTurn } = await import('./bridge/local-llm.mjs')
+const { runTurn, modelVisionCapability } = await import('./bridge/local-llm.mjs')
 const teluguMessage = { role: 'user', content: 'ఈ Python ఫంక్షన్‌ని డీబగ్ చేయి' }
 const translatedConversation = [teluguMessage]
 const translatedReply = await runTurn({
@@ -301,10 +349,57 @@ const visionReply = await runTurn({
   gate: () => true,
   translate: false,
 })
+const unsupportedVision = await modelVisionCapability(`http://localhost:${MODEL_PORT}/v1`, 'smoke/qwen3.5-text-only')
 const visionChecks = [
   ['the vision model receives both pixels and the original user intent', visionSawImage && visionSawIntent],
+  ['Ollama vision capability is checked before sending image input', visionCapabilityProbeCount > 0],
+  ['a text-only GGUF import is rejected for image requests', unsupportedVision?.supported === false && /image requests are blocked/i.test(unsupportedVision.error ?? '')],
   ['vision observations and coding intent are fused for the coding model', coderSawCombinedVisionPrompt],
   ['the fused vision/code request reaches an answer', visionReply.includes('sir')],
+]
+
+// Verify the one-model-at-a-time budget around shared route tags, the distinct
+// 32 GB vision model, and local Whisper. This uses a second module instance with
+// the same mock Ollama, not the host's installed-model state.
+const resourceEventStart = resourceEvents.length
+const memoryEnvKeys = ['JARVIS_MODEL_CHAT', 'JARVIS_MODEL_REASON', 'JARVIS_MODEL_VISION']
+const priorMemoryEnv = Object.fromEntries(memoryEnvKeys.map((key) => [key, process.env[key]]))
+let memoryTestError = ''
+try {
+  process.env.JARVIS_MODEL_CHAT = 'smoke/shared-text'
+  process.env.JARVIS_MODEL_REASON = 'smoke/shared-text'
+  process.env.JARVIS_MODEL_VISION = 'smoke/native-vision'
+  const guardedLLM = await import(`./bridge/local-llm.mjs?memory-test=${Date.now()}`)
+  await guardedLLM.complete('chat', [{ role: 'user', content: 'chat test' }])
+  await guardedLLM.complete('reason', [{ role: 'user', content: 'reason test' }])
+  await guardedLLM.complete('vision', [{ role: 'user', content: 'vision test' }])
+  await guardedLLM.complete('chat', [{ role: 'user', content: 'speech follows' }])
+  await guardedLLM.withLocalSpeechModel(async () => {
+    const response = await fetch(`http://localhost:${MODEL_PORT}/test/speech-started`, { method: 'POST' })
+    if (!response.ok) throw new Error(`speech reservation callback returned HTTP ${response.status}`)
+  })
+} catch (error) {
+  memoryTestError = String(error?.message ?? error)
+} finally {
+  for (const key of memoryEnvKeys) {
+    if (priorMemoryEnv[key] === undefined) delete process.env[key]
+    else process.env[key] = priorMemoryEnv[key]
+  }
+}
+const memoryEvents = resourceEvents.slice(resourceEventStart)
+const expectedMemoryEvents = [
+  'inference:smoke/shared-text',
+  'inference:smoke/shared-text',
+  'unload:smoke/shared-text',
+  'inference:smoke/native-vision',
+  'unload:smoke/native-vision',
+  'inference:smoke/shared-text',
+  'unload:smoke/shared-text',
+  'speech',
+]
+const memoryChecks = [
+  ['shared chat/reason weights stay warm, but distinct vision weights are unloaded before the switch', !memoryTestError && JSON.stringify(memoryEvents.slice(0, 5)) === JSON.stringify(expectedMemoryEvents.slice(0, 5))],
+  ['the local Whisper reservation unloads the retained LLM before speech inference', !memoryTestError && JSON.stringify(memoryEvents.slice(5)) === JSON.stringify(expectedMemoryEvents.slice(5))],
 ]
 
 // Routing is a pure function of the conversation, so it is checked directly
@@ -361,13 +456,20 @@ for (const [name, ok] of visionChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
   if (!ok) visionFailed++
 }
+let memoryFailed = 0
+for (const [name, ok] of memoryChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) memoryFailed++
+}
+if (memoryTestError) console.error(`  model-memory test error: ${memoryTestError}`)
 if (netFailed) failed += netFailed
 if (autopilotFailed) failed += autopilotFailed
 if (routeFailed) failed += routeFailed
 if (multilingualFailed) failed += multilingualFailed
 if (visionFailed) failed += visionFailed
+if (memoryFailed) failed += memoryFailed
 
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision`)
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory`)
 
 ws.close()
 ws2.close()

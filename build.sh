@@ -183,12 +183,12 @@ install_ollama_if_needed() {
   printf '  Ollama is installed; the selected model setup will start its service if necessary.\n'
 }
 
+[[ -f package.json && -f package-lock.json ]] || fail 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
 printf '\nJ.A.R.V.I.S. — web setup, build, and run\n'
 printf '%s\n' '======================================='
 printf '%s\n' 'This builds the browser UI only; no desktop app or EXE is created.'
 ensure_node
 
-[[ -f package.json && -f package-lock.json ]] || fail 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
 printf 'Node.js %s; npm %s\n' "$(node --version)" "$(npm --version)"
 
 needs_install=0

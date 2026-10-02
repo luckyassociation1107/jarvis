@@ -33,6 +33,80 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    // Keep the interactive shell lean and split heavyweight vendors into
+    // bounded chunks. The WebGL scene and neural TTS are already lazy-loaded;
+    // their dependencies should not turn the initial UI request into a single
+    // multi-megabyte transfer.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'graphics',
+              test: (id) => {
+                const path = id.replaceAll('\\', '/')
+                return ['/node_modules/three/', '/node_modules/@react-three/', '/node_modules/postprocessing/']
+                  .some((needle) => path.includes(needle))
+              },
+              priority: 10,
+              maxSize: 420 * 1024,
+              minModuleSize: 8 * 1024,
+            },
+            {
+              name: 'react-runtime',
+              test: (id) => {
+                const path = id.replaceAll('\\', '/')
+                return ['/node_modules/react/', '/node_modules/react-dom/', '/node_modules/scheduler/']
+                  .some((needle) => path.includes(needle))
+              },
+              priority: 9,
+              maxSize: 320 * 1024,
+              minModuleSize: 8 * 1024,
+            },
+            {
+              name: 'motion',
+              test: (id) => {
+                const path = id.replaceAll('\\', '/')
+                return ['/node_modules/framer-motion/', '/node_modules/motion-dom/', '/node_modules/motion-utils/']
+                  .some((needle) => path.includes(needle))
+              },
+              priority: 8,
+              maxSize: 360 * 1024,
+              minModuleSize: 8 * 1024,
+            },
+            {
+              // Kokoro and its phonemizer/ONNX runtime are only needed when
+              // neural speech is actually selected. Keep them out of the
+              // initial shell instead of letting a shared vendor chunk pull
+              // the 1.3 MB espeak table into every page load.
+              name: 'neural-tts',
+              test: (id) => {
+                const path = id.replaceAll('\\', '/')
+                return [
+                  '/node_modules/kokoro-js/',
+                  '/node_modules/phonemizer/',
+                  '/node_modules/@huggingface/transformers/',
+                  '/node_modules/onnxruntime-web/',
+                  '/node_modules/onnxruntime-common/',
+                ].some((needle) => path.includes(needle))
+              },
+              priority: 12,
+              maxSize: 420 * 1024,
+              minModuleSize: 8 * 1024,
+            },
+            {
+              name: 'vendor',
+              test: (id) => id.includes('node_modules'),
+              priority: 1,
+              maxSize: 420 * 1024,
+              minModuleSize: 8 * 1024,
+            },
+          ],
+        },
+      },
+    },
+  },
   optimizeDeps: {
     // kokoro-js pulls in `phonemizer`, which carries espeak-ng as inline WASM.
     // Vite's dependency pre-bundler rewrites that initialisation and the

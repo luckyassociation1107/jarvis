@@ -42,28 +42,21 @@ export const AUTOPILOT_PLAN = AUTOPILOT
 const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
 
 /**
- * The model pipeline.
+ * The model pipeline keeps separate chat, vision and reason routes so each
+ * task is dispatched deliberately. RAM autopilot usually points all three at
+ * one abliterated Qwen3.5 multimodal tag; the 32 GB profile uses a larger Q2_K
+ * text/coding candidate and keeps images on the native Ollama Q8_0 vision tag.
+ * Per-slot JARVIS_MODEL_* overrides can still route tasks to other local
+ * servers/models. A shared tag can stay warm between routes; a different local
+ * tag or Whisper releases it first to preserve the one-model memory ceiling.
  *
- * One model is a compromise: a small one answers fast and cannot use tools, a
- * large one uses tools and takes seconds per sentence. Three models split that
- * compromise along the only axis that actually matters — what the question
- * needs — and on a 16 GB machine they all fit resident at once.
+ *   chat    multilingual conversation and intent translation.
+ *   vision  reads pixels; image questions never fall back to text-only guesses.
+ *   reason  coding, tool use and technical questions.
  *
- * Every slot is an ordinary model name on the same server. Nothing here needs a
- * router or three processes; Ollama loads and unloads them itself.
- *
- *   chat    the default. Small and fast. Conversation.
- *   vision  reads images. Only this slot can answer "what am I holding".
- *   reason  the large one. Anything shaped like a tool call or a technical
- *           question, because a small model mishandles both.
- *
- * All three defaults are ABLITERATED builds — the refusal direction has been
- * surgically removed from the weights, so they answer without hedging, and
- * because the ablation is applied to an instruct build they still follow
- * instructions and still call tools. Roughly 7 GB resident in total.
- *
- * Set JARVIS_MODEL_NAME to pin every slot to one model, which is the right
- * thing to do if you only have one worth running.
+ * The local models are abliterated instruct builds, not base checkpoints; they
+ * can follow instructions and emit tool calls. Set JARVIS_MODEL_NAME to pin
+ * every route manually if needed.
  *
  * IMPORTANT — instruct, never base, and abliterated is not base. A base model
  * predicts the next token and has never been taught that a function call is a
@@ -337,7 +330,7 @@ const NEEDS_A_TOOL =
  * Words that mean "this needs thinking".
  *
  * The reason slot is a code model, so it is at its best on anything shaped like
- * a technical question — which is also where a 0.5B is at its worst.
+ * a technical question — which is also where the smallest 0.873B rung is at its worst.
  */
 const TECHNICAL =
   /\b(code|function|bug|error|stack ?trace|refactor|typescript|javascript|python|java|rust|sql|regex|api|json|schema|compile|build|test|debug|explain how|how does|why does|algorithm|complexity|optimise|optimize|architecture|library|framework|dependency|docker|linux|git)\b/i
@@ -401,7 +394,7 @@ const NARRATES_INSTEAD =
 
 /** How many characters to hold back before deciding. The longest opener above
  *  is "I am going to show", so this leaves plenty of room and costs a few
- *  milliseconds on a 0.5B. */
+ *  milliseconds on the smallest 0.873B rung. */
 const NARRATION_WINDOW = 48
 
 /**
@@ -459,20 +452,153 @@ function ollamaRootFor(url) {
   return null
 }
 
+const visionCapabilityChecks = new Map()
+
+// The planner budgets one local model at a time. Keep a shared tag warm across
+// chat/reason routes, but serialize local model work and evict a different tag
+// before switching models or handing the reserved memory to Whisper.
+const localWarmModels = new Map()
+let localModelResourceQueue = Promise.resolve()
+
+function withLocalModelResource(operation) {
+  const result = localModelResourceQueue.then(operation, operation)
+  localModelResourceQueue = result.then(() => undefined, () => undefined)
+  return result
+}
+
+function localOllamaRoot(url) {
+  const root = ollamaRootFor(url)
+  if (!root) return null
+  try {
+    const hostname = new URL(root).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+    return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname)
+      ? root
+      : null
+  } catch {
+    return null
+  }
+}
+
+const localModelKey = (root, model) => `${root}::${model}`
+
+function rememberLocalOllamaModel(slot) {
+  const model = modelFor(slot)
+  const root = localOllamaRoot(urlFor(slot))
+  if (!model || !root) return
+  localWarmModels.set(localModelKey(root, model), { root, model })
+}
+
+async function unloadOllamaModel(root, model) {
+  const response = await fetch(`${root}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, messages: [], keep_alive: 0, stream: false }),
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) throw new Error(`Ollama returned HTTP ${response.status} while unloading ${model}.`)
+  await response.arrayBuffer().catch(() => {})
+}
+
+async function unloadWarmLocalOllamaModels(keepKey = null) {
+  for (const [key, { root, model }] of localWarmModels) {
+    if (key === keepKey) continue
+    try {
+      await unloadOllamaModel(root, model)
+      localWarmModels.delete(key)
+    } catch (error) {
+      throw new Error(`Could not free the previous local model ${model}: ${String(error?.message ?? error)}`)
+    }
+  }
+}
+
+async function prepareLocalOllamaSlot(slot) {
+  const root = localOllamaRoot(urlFor(slot))
+  const model = modelFor(slot)
+  if (!root || !model) return
+  await unloadWarmLocalOllamaModels(localModelKey(root, model))
+}
+
+/** Run local Whisper only after JARVIS releases any model it kept warm. */
+export async function withLocalSpeechModel(operation) {
+  if (typeof operation !== 'function') throw new TypeError('local speech operation must be a function')
+  return withLocalModelResource(async () => {
+    await unloadWarmLocalOllamaModels()
+    return operation()
+  })
+}
+
+/**
+ * Check Ollama's explicit model metadata before sending pixels. Other
+ * OpenAI-compatible runtimes do not have `/api/show`, so their capability
+ * remains the runtime operator's responsibility.
+ */
+export async function modelVisionCapability(url, model) {
+  const root = ollamaRootFor(url)
+  if (!root || !model) return null
+  const key = `${root}\n${model}`
+  if (!visionCapabilityChecks.has(key)) {
+    visionCapabilityChecks.set(key, (async () => {
+      try {
+        const response = await fetch(`${root}/api/show`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model }),
+          signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+        })
+        if (!response.ok) {
+          return { supported: false, error: `Ollama could not verify image support for ${model} (/api/show returned ${response.status}).` }
+        }
+        const details = await response.json()
+        let supported
+        if (Array.isArray(details?.capabilities)) {
+          supported = details.capabilities.some((capability) => String(capability).toLowerCase() === 'vision')
+        } else {
+          const modelInfo = details?.model_info && typeof details.model_info === 'object' ? details.model_info : {}
+          supported = Object.keys(modelInfo).some((keyName) => /(?:^|\.)vision(?:\.|$)/i.test(keyName))
+        }
+        return supported
+          ? { supported: true }
+          : { supported: false, error: `Ollama does not advertise image input for ${model}; image requests are blocked instead of using a text-only guess.` }
+      } catch (error) {
+        return { supported: false, error: `Could not verify image support for ${model}: ${String(error?.message ?? error)}.` }
+      }
+    })())
+  }
+  const check = await visionCapabilityChecks.get(key)
+  // A failed probe can become valid after Ollama imports the projector; avoid
+  // pinning a transient missing-model result for the whole bridge lifetime.
+  if (!check?.supported) visionCapabilityChecks.delete(key)
+  return check
+}
+
+async function assertVisionCapability(slot, url, model) {
+  if (slot !== 'vision') return
+  const check = await modelVisionCapability(url, model)
+  if (check?.supported === false) throw new Error(check.error)
+}
+
 async function releaseOllamaSlot(slot) {
   const model = modelFor(slot)
-  const root = ollamaRootFor(urlFor(slot))
+  const url = urlFor(slot)
+  const root = ollamaRootFor(url)
   if (!model || !root) return
+  // Several routes may share a fitted tag (usually all three; the 32 GB
+  // profile shares chat/reason). Keep it loaded for the next route instead of
+  // unloading and paying a cold-start cost between stages.
+  const sharedByAnotherRoute = Object.entries(PIPELINE).some(([other, spec]) =>
+    other !== slot && spec.model === model && spec.url === url,
+  )
+  if (sharedByAnotherRoute) return
   try {
-    await fetch(`${root}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: [], keep_alive: 0, stream: false }),
-      signal: AbortSignal.timeout(2500),
-    })
-  } catch {
-    // Inference has already completed; failure to evict is reported by the
-    // Ollama residency diagnostics, not allowed to replace a successful reply.
+    await unloadOllamaModel(root, model)
+    const localRoot = localOllamaRoot(url)
+    if (localRoot) localWarmModels.delete(localModelKey(localRoot, model))
+  } catch (error) {
+    // Do not replace a successful answer. Local models stay in the residency
+    // set after failure so a later switch to another rung can retry the unload.
+    if (localOllamaRoot(url)) {
+      console.warn(`[jarvis] could not unload local model ${model}: ${String(error?.message ?? error)}`)
+    }
   }
 }
 
@@ -480,11 +606,19 @@ async function streamChat(spec) {
   if (!modelFor(spec.slot)) {
     throw new Error(`${spec.slot} model is unavailable under this RAM plan; open Model Stack to see the closest supported tier.`)
   }
-  try {
-    return await streamChatRequest(spec)
-  } finally {
-    await releaseOllamaSlot(spec.slot)
+  const run = async () => {
+    await assertVisionCapability(spec.slot, urlFor(spec.slot), modelFor(spec.slot))
+    await prepareLocalOllamaSlot(spec.slot)
+    rememberLocalOllamaModel(spec.slot)
+    try {
+      return await streamChatRequest(spec)
+    } finally {
+      await releaseOllamaSlot(spec.slot)
+    }
   }
+  return localOllamaRoot(urlFor(spec.slot))
+    ? withLocalModelResource(run)
+    : run()
 }
 
 async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
@@ -801,8 +935,9 @@ export async function runTurn({
  * why. A missing model is the most common first-run problem, so each slot is
  * named rather than discovered by the user mid-sentence.
  *
- * All three slots usually share one server, so the reachability check is done
- * once and the per-model check is done against that one response.
+ * All three slots usually share one server, so reachability is checked once.
+ * Ollama vision slots also require explicit `/api/show` image-capability
+ * metadata; a text-only import is reported and blocked rather than guessed.
  *
  * @returns {Promise<{ ok: boolean, slots: object[], error?: string }>}
  */
@@ -855,19 +990,24 @@ export async function modelStatus() {
       // Ollama answers with the bare name, others with `namespace/name`.
       // Compare on the tail so both shapes count as a match.
       const have = ids.some((id) => id === model || id.endsWith(`/${model}`))
+      const present = have || (ids.length === 0 && !ollamaRootFor(url))
+      const visionCheck = slot === 'vision' && present
+        ? await modelVisionCapability(url, model)
+        : null
+      const error = !present
+        ? `not loaded — available: ${ids.slice(0, 8).join(', ')}`
+        : visionCheck?.supported === false
+          ? visionCheck.error
+          : undefined
       slots.push({
         slot,
         model,
         url,
         fits: slotSpec.fits,
         residentBytes: slotSpec.residentBytes,
-        // An empty list means the server does not enumerate — assume it knows
-        // what it is doing rather than failing a working setup.
-        ok: have || ids.length === 0,
-        error:
-          have || ids.length === 0
-            ? undefined
-            : `not loaded — available: ${ids.slice(0, 8).join(', ')}`,
+        capability: slot === 'vision' ? visionCheck?.supported ?? null : undefined,
+        ok: present && visionCheck?.supported !== false,
+        error,
       })
     }
   }
@@ -898,28 +1038,36 @@ export async function complete(slot, messages, opts = {}) {
   const chosen = PIPELINE[slot] ?? PIPELINE.chat
   const resolvedSlot = PIPELINE[slot] ? slot : 'chat'
   if (!chosen.model) throw new Error(`${resolvedSlot} model is unavailable under this RAM plan.`)
-  try {
-    const res = await fetch(`${chosen.url}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: chosen.model,
-        messages,
-        temperature: opts.temperature ?? 0.1,
-        max_tokens: opts.maxTokens ?? 400,
-        stream: false,
-      }),
-      signal: opts.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? 30_000)])
-        : AbortSignal.timeout(opts.timeoutMs ?? 30_000),
-    })
-    if (!res.ok) throw new Error(`${resolvedSlot} completion failed: HTTP ${res.status}`)
-    const data = await res.json()
-    return data?.choices?.[0]?.message?.content ?? ''
-  } finally {
-    await releaseOllamaSlot(resolvedSlot)
+  const run = async () => {
+    await assertVisionCapability(resolvedSlot, chosen.url, chosen.model)
+    await prepareLocalOllamaSlot(resolvedSlot)
+    rememberLocalOllamaModel(resolvedSlot)
+    try {
+      const res = await fetch(`${chosen.url}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: chosen.model,
+          messages,
+          temperature: opts.temperature ?? 0.1,
+          max_tokens: opts.maxTokens ?? 400,
+          stream: false,
+        }),
+        signal: opts.signal
+          ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? 30_000)])
+          : AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+      })
+      if (!res.ok) throw new Error(`${resolvedSlot} completion failed: HTTP ${res.status}`)
+      const data = await res.json()
+      return data?.choices?.[0]?.message?.content ?? ''
+    } finally {
+      await releaseOllamaSlot(resolvedSlot)
+    }
   }
+  return localOllamaRoot(chosen.url)
+    ? withLocalModelResource(run)
+    : run()
 }

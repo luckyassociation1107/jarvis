@@ -4,7 +4,7 @@ import './ModelManager.css'
 
 type PlannedSlot = {
   id: string
-  kind: 'ollama' | 'whisper'
+  kind: 'ollama' | 'whisper' | 'tts'
   model: string
   quant: string | null
   downloadGb: number
@@ -14,6 +14,8 @@ type PlannedSlot = {
   engine?: string
   dtype?: string | null
   quality?: number
+  parametersB?: number
+  multimodal?: boolean
   note?: string
   multilingual?: boolean
   englishOnly?: boolean
@@ -25,6 +27,9 @@ type TierSlot = {
   state: 'fits' | 'best-effort' | 'unavailable'
   engine?: string | null
   dtype?: string | null
+  quant?: string | null
+  parametersB?: number | null
+  multimodal?: boolean
 }
 
 type TierProfile = {
@@ -32,6 +37,13 @@ type TierProfile = {
   aiCapGb: number
   totalDownloadGb: number
   slots: Partial<Record<'chat' | 'vision' | 'reason' | 'speech' | 'tts', TierSlot>>
+}
+
+type RuntimeSlotStatus = {
+  slot: string
+  model: string | null
+  state: 'ready' | 'missing' | 'unknown' | 'unsupported' | 'incompatible'
+  note?: string | null
 }
 
 type PlanPayload = {
@@ -43,6 +55,7 @@ type PlanPayload = {
   maxResidentGb: number
   notes: string[]
   ollama: boolean
+  modelSlots?: RuntimeSlotStatus[]
   tiers?: TierProfile[]
 }
 
@@ -73,6 +86,11 @@ function formatStatus(job: InstallJob | null, starting: boolean) {
   if (job.state === 'completed') return 'INSTALL COMPLETE'
   if (job.state === 'partial') return 'PARTIAL / CHECK LOG'
   return 'INSTALL FAILED'
+}
+
+function formatParameters(parametersB: number) {
+  if (parametersB < 1) return `${Math.round(parametersB * 1000)}M`
+  return `${Number.isInteger(parametersB) ? parametersB : parametersB.toFixed(2).replace(/0$/, '')}B`
 }
 
 export function ModelManager({ onClose }: { onClose: () => void }) {
@@ -173,7 +191,16 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
     if (!slot) return 'UNAVAILABLE'
     if (capability === 'tts') return slot.engine === 'kokoro' ? `Kokoro ${String(slot.dtype ?? '').toUpperCase()}` : 'Browser / OS'
     if (!slot.model) return 'UNAVAILABLE'
-    return slot.state === 'best-effort' ? `${slot.model} · best-effort only` : slot.model
+    const label = slot.parametersB != null
+      ? `Qwen3.5 ${formatParameters(slot.parametersB)} · ${slot.quant ?? 'local'}${slot.multimodal ? ' · image input' : ' · text/coding'}`
+      : slot.model
+    return slot.state === 'best-effort' ? `${label} · best-effort only` : label
+  }
+  const visionRuntimeWarning = (slot: PlannedSlot) => {
+    const runtime = plan?.modelSlots?.find((status) => status.slot === 'vision')
+    return slot.id === 'vision' && runtime?.model === slot.model && runtime.state === 'incompatible'
+      ? runtime.note ?? 'Ollama did not confirm image-input support for this model.'
+      : null
   }
 
   return (
@@ -183,7 +210,7 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
           <div>
             <span className="model-manager-kicker">J.A.R.V.I.S. / LOCAL CONTROL PLANE</span>
             <h2 id="model-manager-title">RAM / MODEL STACK</h2>
-            <p>Autopilot chooses the largest per-task models that fit the reserved memory ceiling.</p>
+            <p>Autopilot chooses progressive abliterated chat/coding models with an independently verified multimodal vision route.</p>
           </div>
           <button type="button" className="model-manager-close" onClick={onClose} aria-label="Close model stack">×</button>
         </header>
@@ -208,15 +235,23 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
               <div className="budget-segment budget-os"><i /><span>OS / 35%</span><b>{plan.ram.osGb.toFixed(1)} GB</b></div>
               <div className="budget-segment budget-apps"><i /><span>OTHER APPS / 25%</span><b>{plan.ram.appsGb.toFixed(1)} GB</b></div>
               <div className="budget-segment budget-ai"><i /><span>JARVIS CAP / 40%</span><b>{plan.ram.modelsGb.toFixed(1)} GB</b></div>
-              <div className="budget-current"><span>ACTIVE-MODEL CEILING</span><b>{plan.ram.effectiveModelGb.toFixed(2)} GB</b><small>{plan.ram.currentFreeGb.toFixed(1)} GB currently free</small></div>
+              <div className="budget-current"><span>ACTIVE-MODEL CEILING</span><b>{plan.ram.effectiveModelGb.toFixed(2)} GB</b><small>{plan.ram.currentFreeGb.toFixed(1)} GB free at bridge start</small></div>
             </div>
 
             <div className="model-manager-grid">
               {plan.fits.map((slot) => (
                 <article className={`model-slot-card slot-${slot.id} ${slot.fits ? 'slot-fit' : 'slot-best-effort'}`} key={slot.id}>
                   <div className="model-slot-top"><span>{slot.id === 'reason' ? 'CODING / REASON' : slot.id.toUpperCase()}</span><b>{slot.fits ? 'WITHIN PLAN' : 'BEST EFFORT'}</b></div>
-                  <strong className="model-slot-model" title={slot.model}>{slot.model}</strong>
-                  <div className="model-slot-meta"><span>{slot.multilingual ? 'MULTILINGUAL' : slot.englishOnly ? 'ENGLISH CODING' : slot.quant ?? slot.kind.toUpperCase()}</span><span>{slot.downloadGb.toFixed(2)} GB DOWNLOAD</span><span>≈{slot.residentGb.toFixed(2)} GB ACTIVE</span></div>
+                  <strong className="model-slot-model" title={slot.model}>{slot.parametersB != null ? `Qwen3.5 ${formatParameters(slot.parametersB)} / ABLITERATED` : slot.model}</strong>
+                  <div className="model-slot-meta">
+                    <span>{slot.multilingual ? 'MULTILINGUAL' : slot.englishOnly ? 'ENGLISH CODING' : 'LOCAL MODEL'}</span>
+                    {slot.parametersB != null && <span>{formatParameters(slot.parametersB)} PARAMS</span>}
+                    {slot.quant && <span>{slot.quant}</span>}
+                    {slot.multimodal && <span>TEXT + IMAGE</span>}
+                    <span>{slot.downloadGb.toFixed(2)} GB DOWNLOAD</span>
+                    <span>≈{slot.residentGb.toFixed(2)} GB ACTIVE</span>
+                  </div>
+                  {visionRuntimeWarning(slot) && <p className="model-slot-runtime-warning">IMAGE CAPABILITY / {visionRuntimeWarning(slot)}</p>}
                   {slot.note && <p>{slot.note}</p>}
                 </article>
               ))}
@@ -235,10 +270,10 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
                   <span>FULL RAM TIER CATALOGUE / 0.5–32 GB</span>
                   <small>33 reference profiles · opens for comparison</small>
                 </summary>
-                <p className="tier-catalog-note">These reference rows assume all reported RAM is free. The setup script selects only this machine’s fitting tier; it never downloads every row. Best-effort chat/coder entries and unsupported local capabilities are labelled honestly.</p>
+                <p className="tier-catalog-note">Vision is provisioned in all 33 tiers. Most tiers share one abliterated multimodal Qwen3.5 tag; the 32 GB row splits higher-parameter Q2_K chat/coding from native Q8_0 vision. Above the reference grid, the extended plan can reach the native 122B-tag / 125B Q4_K_M workstation rung at about 240 GB total RAM; at 256 GB it can also fit browser-cached Kokoro FP32. Distinct tags count once each. Rows assume all RAM is free; below 4 GB the smallest 0.8B Q8 model is best-effort only and never auto-run.</p>
                 <div className="tier-table-wrap">
                   <table>
-                    <thead><tr><th>RAM</th><th>JARVIS cap</th><th>Multilingual chat</th><th>Abliterated vision</th><th>English coding</th><th>Multilingual STT</th><th>TTS</th><th>Assets</th></tr></thead>
+                    <thead><tr><th>RAM</th><th>JARVIS cap</th><th>Chat</th><th>Vision / image</th><th>Coding / reason</th><th>Multilingual STT</th><th>TTS</th><th>Assets</th></tr></thead>
                     <tbody>
                       {plan.tiers.map((tier) => (
                         <tr key={tier.ramGb}>

@@ -30,7 +30,7 @@ try {
 }
 
 const problems = Array.isArray(report.problems) ? report.problems : []
-const allowed = /^extraneous: @lumen-labs-dev\/whisper-node@/i
+const allowed = /^extraneous: @lumen-labs-dev\/whisper-node@0\.4\.1(?:\s|$)/i
 const blocking = problems.filter((problem) => !allowed.test(String(problem)))
 if (blocking.length || (result.status !== 0 && problems.length === 0)) {
   if (blocking.length) {

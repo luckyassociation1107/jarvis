@@ -14,6 +14,15 @@ import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { plan as planRam } from '../bridge/autopilot.mjs'
 import { vendorWasm } from './vendor-mediapipe.mjs'
+import {
+  canStartLocalOllama,
+  configuredModelBaseUrl,
+  configuredModelName,
+  displayEndpoint,
+  isLocalOllamaApi,
+  MODEL_SLOTS,
+  ollamaListenAddress,
+} from './ollama-endpoints.mjs'
 
 const writes = process.argv.includes('--writes')
 
@@ -27,6 +36,41 @@ const paint = (tag, colour) => (line) =>
     .join('\n')
 
 const children = []
+let stopping = false
+let shutdownPromise = null
+
+function childHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null || child.spawnFailed === true
+}
+
+function waitForChild(child) {
+  if (childHasExited(child)) return Promise.resolve()
+  return new Promise((resolve) => child.once('close', resolve))
+}
+
+function shutdown(code) {
+  if (shutdownPromise) return shutdownPromise
+  stopping = true
+  const pending = children.map(waitForChild)
+  const forceStop = setTimeout(() => {
+    for (const child of children) {
+      if (childHasExited(child)) continue
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }
+  }, 5000)
+  forceStop.unref()
+
+  for (const child of children) {
+    if (childHasExited(child)) continue
+    try { child.kill('SIGTERM') } catch { /* already gone */ }
+  }
+
+  shutdownPromise = Promise.all(pending).then(() => {
+    clearTimeout(forceStop)
+    process.exit(code)
+  })
+  return shutdownPromise
+}
 
 function run(name, command, args, colour, env) {
   const label = paint(name, colour)
@@ -36,67 +80,47 @@ function run(name, command, args, colour, env) {
   })
   child.stdout.on('data', (d) => process.stdout.write(label(d) + '\n'))
   child.stderr.on('data', (d) => process.stderr.write(label(d) + '\n'))
-  child.on('exit', (code) => {
+  child.once('error', (error) => {
+    child.spawnFailed = true
+    console.error(`\x1b[${colour}m${name}\x1b[0m could not start: ${error.message}`)
+    if (!stopping) void shutdown(1)
+  })
+  child.once('exit', (code, signal) => {
+    if (stopping) return
     // If either half dies the other is useless, so take the whole thing down
     // rather than leave a half-running app that looks alive but cannot answer.
-    console.log(`\x1b[${colour}m${name}\x1b[0m exited (${code}); stopping the rest.`)
-    shutdown(code ?? 0)
+    console.log(`\x1b[${colour}m${name}\x1b[0m exited (${code ?? signal ?? 'unknown'}); stopping the rest.`)
+    void shutdown(code === 0 && signal === null ? 0 : 1)
   })
   children.push(child)
   return child
 }
 
-let stopping = false
-function shutdown(code) {
-  if (stopping) return
-  stopping = true
-  for (const c of children) {
-    try {
-      c.kill('SIGTERM')
-    } catch {
-      /* already gone */
-    }
-  }
-  setTimeout(() => process.exit(code), 300)
-}
-
-process.on('SIGINT', () => shutdown(0))
-process.on('SIGTERM', () => shutdown(0))
+process.on('SIGINT', () => { void shutdown(0) })
+process.on('SIGTERM', () => { void shutdown(0) })
 
 const OLLAMA_URL = (process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '')
 const runtimePlan = planRam()
-const needsLocalModels = ['chat', 'vision', 'reason'].some((cap) => {
-  const choice = runtimePlan.choices[cap]
-  return Boolean(choice?.fits && choice.model)
+const localModelSlots = MODEL_SLOTS.filter((slot) => {
+  const model = configuredModelName(slot, runtimePlan.choices[slot])
+  return Boolean(model) && isLocalOllamaApi(configuredModelBaseUrl(slot), OLLAMA_URL)
 })
 
-function loopback(hostname) {
-  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '')
-  return host === 'localhost' || host === '::1' || host === '127.0.0.1' || host.startsWith('127.')
-}
-
-function sameLocalModelEndpoint() {
-  try {
-    const model = new URL(process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1')
-    const ollama = new URL(OLLAMA_URL)
-    return loopback(model.hostname) && loopback(ollama.hostname)
-      && model.hostname === ollama.hostname
-      && model.port === ollama.port
-      && /\/v1\/?$/.test(model.pathname)
-  } catch {
-    return false
-  }
-}
-
 async function startOllamaIfNeeded() {
-  if (!needsLocalModels || !sameLocalModelEndpoint()) return
+  const endpointLabel = displayEndpoint(OLLAMA_URL)
+  if (!localModelSlots.length) return
   try {
     const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })
     if (response.ok) {
-      console.log(`Ollama is already responding at ${OLLAMA_URL}.`)
+      console.log(`Ollama is already responding at ${endpointLabel}.`)
       return
     }
   } catch { /* start the installed daemon below */ }
+
+  if (!canStartLocalOllama(OLLAMA_URL)) {
+    console.warn(`Ollama at ${endpointLabel} is unavailable and cannot be started directly. The web UI will still start; local model replies need the configured server.`)
+    return
+  }
 
   const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
   const check = spawnSync(binary, ['--version'], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
@@ -105,26 +129,22 @@ async function startOllamaIfNeeded() {
     return
   }
 
-  const env = { ...process.env }
-  try {
-    const endpoint = new URL(OLLAMA_URL)
-    if (endpoint.port) {
-      const host = endpoint.hostname.includes(':') ? `[${endpoint.hostname}]` : endpoint.hostname
-      env.OLLAMA_HOST = `${host}:${endpoint.port}`
-    }
-  } catch { /* the bridge will report an invalid configured endpoint */ }
-
+  const env = { ...process.env, OLLAMA_HOST: ollamaListenAddress(OLLAMA_URL) }
   const daemon = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  let daemonError = null
   daemon.stdout.on('data', (chunk) => process.stdout.write(`[ollama] ${chunk}`))
   daemon.stderr.on('data', (chunk) => process.stderr.write(`[ollama] ${chunk}`))
-  daemon.once('error', (error) => console.warn(`[ollama] could not start: ${error.message}`))
+  daemon.once('error', (error) => {
+    daemonError = error
+    console.warn(`[ollama] could not start: ${error.message}`)
+  })
   daemon.once('exit', (code) => {
     if (!stopping) console.warn(`[ollama] server exited (${code}); local inference may be unavailable.`)
   })
   children.push(daemon)
-  console.log(`Starting the local Ollama server at ${OLLAMA_URL}…`)
+  console.log(`Starting the local Ollama server at ${endpointLabel}…`)
   const deadline = Date.now() + 15_000
-  while (Date.now() < deadline && daemon.exitCode === null) {
+  while (Date.now() < deadline && daemon.exitCode === null && !daemonError) {
     try {
       const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(900) })
       if (response.ok) {

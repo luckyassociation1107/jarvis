@@ -8,42 +8,52 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { install, plan, planSummary } from '../bridge/autopilot.mjs'
+import {
+  canStartLocalOllama,
+  configuredModelBaseUrl,
+  configuredModelName,
+  displayEndpoint,
+  hasExplicitModelOverride,
+  isLocalOllamaApi,
+  MODEL_SLOTS,
+  ollamaListenAddress,
+} from './ollama-endpoints.mjs'
 
 const GB = 1024 ** 3
 const OLLAMA_URL = (process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '')
 const args = new Set(process.argv.slice(2))
+const knownArgs = new Set(['--install', '--plan-json', '--needs-local-ollama-install'])
+const unknownArgs = [...args].filter((argument) => !knownArgs.has(argument))
+if (unknownArgs.length) {
+  console.error(`Unknown option${unknownArgs.length === 1 ? '' : 's'}: ${unknownArgs.join(', ')}`)
+  process.exit(2)
+}
+
 const currentPlan = plan()
-const fittedOllamaSlots = ['chat', 'vision', 'reason'].filter((cap) => {
+const fittedOllamaSlots = MODEL_SLOTS.filter((cap) => {
   const choice = currentPlan.choices[cap]
   return Boolean(choice?.fits && choice.model)
 })
-const fittedDownloadSlots = Object.entries(currentPlan.choices).filter(([cap, choice]) =>
-  choice.fits && cap !== 'tts' && Boolean(choice.model || choice.file),
+// Only install planner-selected tags for slots that actually use this local
+// Ollama instance. Explicit model overrides and alternate URLs remain untouched.
+const installableOllamaSlots = fittedOllamaSlots.filter((cap) =>
+  !hasExplicitModelOverride(cap)
+  && isLocalOllamaApi(configuredModelBaseUrl(cap), OLLAMA_URL),
 )
-
-function isLoopback(hostname) {
-  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '')
-  return host === 'localhost' || host === '::1' || host === '127.0.0.1' || host.startsWith('127.')
-}
-
-function ollamaEndpoint() {
-  try { return new URL(OLLAMA_URL) } catch { return null }
-}
-
-function usesOllamaByDefault() {
-  try {
-    const modelUrl = new URL(process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1')
-    const ollamaUrl = ollamaEndpoint()
-    return Boolean(
-      ollamaUrl && isLoopback(modelUrl.hostname) && isLoopback(ollamaUrl.hostname)
-      && modelUrl.hostname === ollamaUrl.hostname
-      && modelUrl.port === ollamaUrl.port
-      && /\/v1\/?$/.test(modelUrl.pathname),
-    )
-  } catch {
-    return false
-  }
-}
+const configuredLocalOllamaSlots = MODEL_SLOTS.filter((cap) =>
+  Boolean(configuredModelName(cap, currentPlan.choices[cap]))
+  && isLocalOllamaApi(configuredModelBaseUrl(cap), OLLAMA_URL),
+)
+const installableDownloadSlots = Object.entries(currentPlan.choices).filter(([cap, choice]) =>
+  choice.fits && (
+    (choice.kind === 'whisper' && Boolean(choice.file))
+    || installableOllamaSlots.includes(cap) && Boolean(choice.model)
+  ),
+)
+const automaticDownloadBytes = [...new Map(installableDownloadSlots.map(([, choice]) => [
+  choice.kind === 'whisper' ? `whisper:${choice.file}` : `ollama:${choice.model}`,
+  choice.bytes,
+])).values()].reduce((sum, bytes) => sum + bytes, 0)
 
 function hasOllamaCli() {
   const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
@@ -65,15 +75,13 @@ async function ollamaReady() {
   }
 }
 
-function activeOllamaNames() {
-  return fittedOllamaSlots.map((cap) => `${cap}: ${currentPlan.choices[cap].model}`).join('\n')
+function activeOllamaNames(slots = installableOllamaSlots) {
+  return slots.map((cap) => `${cap}: ${currentPlan.choices[cap].model}`).join('\n')
 }
 
 if (args.has('--needs-local-ollama-install')) {
-  const endpoint = ollamaEndpoint()
-  const shouldPull = fittedOllamaSlots.length > 0 && usesOllamaByDefault()
-  const shouldInstall = shouldPull && endpoint && isLoopback(endpoint.hostname)
-    && !hasOllamaCli() && !(await ollamaReady())
+  const shouldCheck = installableOllamaSlots.length > 0 && canStartLocalOllama(OLLAMA_URL)
+  const shouldInstall = shouldCheck && !hasOllamaCli() && !(await ollamaReady())
   process.stdout.write(shouldInstall ? 'yes' : 'no')
   process.exit(0)
 }
@@ -94,7 +102,10 @@ if (args.has('--plan-json')) {
     ramGb: +currentPlan.budget.gb.toFixed(2),
     capGb: +(currentPlan.effectiveModelBytes / GB).toFixed(2),
     totalDownloadGb: +(currentPlan.totalDownloadBytes / GB).toFixed(2),
+    automaticDownloadGb: +(automaticDownloadBytes / GB).toFixed(2),
     fittedOllamaSlots,
+    installableOllamaSlots,
+    configuredLocalOllamaSlots,
     slots,
   }, null, 2))
   process.exit(0)
@@ -109,36 +120,40 @@ console.log('\nJARVIS automatic local model setup')
 console.log('----------------------------------')
 console.log(planSummary(currentPlan))
 console.log(`Selected Ollama slots that fit: ${fittedOllamaSlots.length ? fittedOllamaSlots.join(', ') : 'none'}`)
-if (fittedOllamaSlots.length) console.log(activeOllamaNames())
-console.log(`Fitting local model assets: ${fittedDownloadSlots.length ? fittedDownloadSlots.map(([cap]) => cap).join(', ') : 'none'}`)
-console.log(`Estimated selected asset size: ${(currentPlan.totalDownloadBytes / GB).toFixed(2)} GB maximum (already installed files are reused; neural TTS is cached by the browser on first use).`)
+if (installableOllamaSlots.length) {
+  console.log(`Planner weights eligible for this local Ollama: ${installableOllamaSlots.join(', ')}`)
+  console.log(activeOllamaNames())
+} else if (fittedOllamaSlots.length) {
+  console.log('Planner Ollama weights will not be pulled: configured model overrides or non-local endpoints are left unchanged.')
+}
+console.log(`Fitting assets eligible for setup: ${installableDownloadSlots.length ? installableDownloadSlots.map(([cap]) => cap).join(', ') : 'none'}`)
+console.log(`Estimated automatic download size: ${(automaticDownloadBytes / GB).toFixed(2)} GB maximum (installed files are reused; neural TTS is cached by the browser on first use).`)
 console.log('Only this detected RAM plan is eligible for installation. Non-fitting and other-tier models are not downloaded.')
 
-if (!fittedDownloadSlots.length) {
-  console.log('No local model assets fit this RAM/free-memory plan. JARVIS will use the supported browser/OS or configured remote fallbacks.')
+if (!installableDownloadSlots.length) {
+  console.log('No local model assets need automatic installation. JARVIS will use the configured model endpoint and supported browser/OS fallbacks.')
   process.exit(0)
 }
 
 let daemon = null
 let daemonExit = null
 let daemonError = null
-const endpoint = ollamaEndpoint()
-const wantsOllama = fittedOllamaSlots.length > 0 && usesOllamaByDefault()
-const localOllama = Boolean(endpoint && isLoopback(endpoint.hostname))
+let stopDaemonPromise = null
 
 async function startTemporaryOllama() {
-  if (!wantsOllama) {
-    if (fittedOllamaSlots.length && !usesOllamaByDefault()) {
-      console.log('A custom model endpoint is configured; the setup will not install or start a separate Ollama server.')
+  const endpointLabel = displayEndpoint(OLLAMA_URL)
+  if (!installableOllamaSlots.length) {
+    if (configuredLocalOllamaSlots.length) {
+      console.log('A configured local Ollama model is manually selected; its server and weights will not be changed by the planner installer.')
     }
     return false
   }
   if (await ollamaReady()) {
-    console.log(`Ollama API is already available at ${OLLAMA_URL}.`)
+    console.log(`Ollama API is already available at ${endpointLabel}.`)
     return true
   }
-  if (!localOllama) {
-    console.warn(`Ollama API at ${OLLAMA_URL} is not reachable; model pulls will be skipped. Configured remote fallbacks are left unchanged.`)
+  if (!canStartLocalOllama(OLLAMA_URL)) {
+    console.warn(`Ollama API at ${endpointLabel} is not reachable and is not a directly startable loopback endpoint; model pulls will be skipped.`)
     return false
   }
   if (!hasOllamaCli()) {
@@ -147,11 +162,7 @@ async function startTemporaryOllama() {
   }
 
   const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
-  const env = { ...process.env }
-  if (endpoint?.port) {
-    const host = endpoint.hostname.includes(':') ? `[${endpoint.hostname}]` : endpoint.hostname
-    env.OLLAMA_HOST = `${host}:${endpoint.port}`
-  }
+  const env = { ...process.env, OLLAMA_HOST: ollamaListenAddress(OLLAMA_URL) }
   daemon = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   daemon.stdout.on('data', (chunk) => process.stdout.write(`[ollama] ${chunk}`))
   daemon.stderr.on('data', (chunk) => process.stderr.write(`[ollama] ${chunk}`))
@@ -161,7 +172,7 @@ async function startTemporaryOllama() {
   const deadline = Date.now() + 45_000
   while (Date.now() < deadline) {
     if (await ollamaReady()) {
-      console.log(`Started a temporary Ollama server at ${OLLAMA_URL} for model setup.`)
+      console.log(`Started a temporary Ollama server at ${endpointLabel} for model setup.`)
       return true
     }
     if (daemonError || daemonExit !== null) break
@@ -172,18 +183,30 @@ async function startTemporaryOllama() {
 }
 
 function stopTemporaryOllama() {
-  if (daemon && daemon.exitCode === null && !daemon.killed) {
-    try { daemon.kill('SIGTERM') } catch { /* already stopped */ }
-  }
+  if (stopDaemonPromise) return stopDaemonPromise
+  if (!daemon || daemon.exitCode !== null || daemon.signalCode !== null) return Promise.resolve()
+
+  stopDaemonPromise = new Promise((resolve) => {
+    const forceStop = setTimeout(() => {
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        try { daemon.kill('SIGKILL') } catch { /* already stopped */ }
+      }
+    }, 3000)
+    forceStop.unref()
+    daemon.once('close', () => {
+      clearTimeout(forceStop)
+      resolve()
+    })
+    try { daemon.kill('SIGTERM') } catch { clearTimeout(forceStop); resolve() }
+  })
+  return stopDaemonPromise
 }
 
 process.once('SIGINT', () => {
-  stopTemporaryOllama()
-  process.exit(130)
+  void stopTemporaryOllama().finally(() => process.exit(130))
 })
 process.once('SIGTERM', () => {
-  stopTemporaryOllama()
-  process.exit(143)
+  void stopTemporaryOllama().finally(() => process.exit(143))
 })
 
 try {
@@ -191,7 +214,7 @@ try {
   const result = await install({
     planned: currentPlan,
     dir: 'models',
-    skipOllamaModels: !usesOllamaByDefault(),
+    onlyOllamaSlots: installableOllamaSlots,
     onStep: (step) => {
       if (step.phase === 'plan') return
       const slot = step.cap ? `[${String(step.cap).toUpperCase()}] ` : ''
@@ -218,5 +241,5 @@ try {
   console.error(`Model setup failed: ${error?.message ?? error}`)
   process.exitCode = 1
 } finally {
-  stopTemporaryOllama()
+  await stopTemporaryOllama()
 }

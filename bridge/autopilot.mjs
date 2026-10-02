@@ -1,17 +1,20 @@
 /**
  * RAM-aware local model planner and explicit installer.
  *
- * The OS/apps/model split is fixed at 35/25/40. Text, vision, coding and
- * Whisper are planned as sequential workloads: only one Ollama model is allowed
- * to remain resident at a time, and each pick has runtime/context headroom on
- * top of its download size. Downloads are a disk-space concern, not a sum of
- * simultaneously resident model weights.
+ * The OS/apps/model split is fixed at 35/25/40. Chat, vision, coding and
+ * Whisper are planned with runtime/context headroom. Most tiers share one
+ * Qwen3.5 multimodal tag across chat, vision and reason; the 32 GB tier uses a
+ * larger-parameter Q2_K text/reason rung plus a native Ollama Q8_0 vision rung.
+ * Beyond the 32 GB reference catalogue, an official 125B Q4_K_M multimodal
+ * tag is reserved for workstation-class RAM where its estimated 96 GB resident
+ * footprint stays inside the same 40% ceiling.
+ * Distinct model downloads count once each. Identical local tags can stay warm
+ * between routes; the bridge unloads them before a different local tag or
+ * Whisper uses the one-model resident budget.
  *
- * This is deliberately honest at the 1 GB end. The smallest chat/coder weights
- * are about 398 MB each and can be offered as best-effort, but there is not
- * enough reserved RAM to guarantee inference once runtime overhead is included.
- * General image Q&A is unavailable below the tiny vision tier. No capability is
- * silently reported as fitting when it does not.
+ * Vision is part of every reference profile. At the smallest RAM tiers it is
+ * explicitly best-effort, not installed or invoked; the planner never claims
+ * that an over-budget model can safely run.
  */
 
 import { execFile, execFileSync } from 'node:child_process'
@@ -36,35 +39,58 @@ const WHISPER_DIR = 'models'
 const ACTIVE_WHISPER_FILE = '.whisper-active'
 
 /**
- * Rung sizes use catalogue download sizes. residentBytes adds a conservative
- * CPU/context estimate; it is not a guarantee because KV cache and runtime
- * versions vary. All language and coding entries must be abliterated instruct
- * builds. Vision uses only the supplied abliterated Qwen2.5-VL tiers; there is
- * no substitute VLM below their honest resident-memory floor.
+ * The same abliterated Qwen3.5 family backs chat, vision and coding. Most
+ * tiers share one multimodal Ollama tag across all three routes. The 32 GB
+ * tier uses a larger Q2_K text/coding candidate but keeps vision on a separate
+ * native Q8_0 Ollama model so image capability does not depend on GGUF import.
+ *
+ * Sizes follow the published Ollama catalogue. residentBytes includes
+ * conservative runtime/context headroom, not a guarantee. The 32 GB profile
+ * uses a larger 27.8B Q2_K text/reason GGUF alongside a native 9.65B Q8_0
+ * vision model. The Q2_K Ollama import is not yet exercised by the test suite;
+ * image input never depends on it. Native 27B/36B Q8_0, 36B F16, and the
+ * official 125B Q4_K_M remain on high-memory rungs only when their resident
+ * estimates fit.
  */
+const NATIVE_MULTIMODAL = [
+  // Ollama's official 122B tag is a 125B-parameter Q4_K_M multimodal model.
+  // Keep its 81 GB download / 96 GB resident estimate out of normal machines;
+  // at least 240 GB total RAM is needed for the fixed 40% planner ceiling.
+  { model: 'huihui_ai/qwen3.5-abliterated:122B', quant: 'Q4_K_M', parametersB: 125.0, bytes: 81.0 * GB, residentBytes: 96.0 * GB, quality: 5, multimodal: true, note: 'Official 122B tag (125B parameters), Q4_K_M, text + image; estimated 96 GB resident. Requires workstation-class RAM and remains subject to current-free-memory planning.' },
+  { model: 'huihui_ai/qwen3.5-abliterated:35b-a3b-fp16', quant: 'F16', parametersB: 36.0, bytes: 72.0 * GB, residentBytes: 80.0 * GB, quality: 5, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:35b-a3b-q8_0', quant: 'Q8_0', parametersB: 36.0, bytes: 39.0 * GB, residentBytes: 46.0 * GB, quality: 5, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:27b-q8_0', quant: 'Q8_0', parametersB: 27.8, bytes: 30.0 * GB, residentBytes: 35.0 * GB, quality: 5, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:35b', quant: 'Q4_K_M', parametersB: 36.0, bytes: 24.0 * GB, residentBytes: 28.0 * GB, quality: 5, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:27b', quant: 'Q4_K_M', parametersB: 27.8, bytes: 17.0 * GB, residentBytes: 20.0 * GB, quality: 5, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:9b-q8_0', quant: 'Q8_0', parametersB: 9.65, bytes: 11.0 * GB, residentBytes: 12.3 * GB, quality: 5, multimodal: true, note: 'Native Ollama multimodal Q8_0 tag; image-input capability is checked against Ollama before pixels are sent.' },
+  { model: 'huihui_ai/qwen3.5-abliterated:9b', quant: 'Q4_K_M', parametersB: 9.65, bytes: 6.6 * GB, residentBytes: 7.8 * GB, quality: 4, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:4B-q8_0', quant: 'Q8_0', parametersB: 4.54, bytes: 5.2 * GB, residentBytes: 6.1 * GB, quality: 4, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:4b', quant: 'Q4_K_M', parametersB: 4.54, bytes: 3.3 * GB, residentBytes: 4.1 * GB, quality: 3, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:2B-q8_0', quant: 'Q8_0', parametersB: 2.27, bytes: 2.7 * GB, residentBytes: 3.15 * GB, quality: 3, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:2b', quant: 'Q4_K_M', parametersB: 2.27, bytes: 1.9 * GB, residentBytes: 2.35 * GB, quality: 2, multimodal: true },
+  { model: 'huihui_ai/qwen3.5-abliterated:0.8b', quant: 'Q8_0', parametersB: 0.873, bytes: 1.0 * GB, residentBytes: 1.3 * GB, quality: 1, multimodal: true },
+]
+
+const HIGH_PARAMETER_TEXT = [
+  ...NATIVE_MULTIMODAL.slice(0, 6),
+  {
+    model: 'hf.co/mradermacher/Huihui-Qwen3.5-27B-abliterated-GGUF:Q2_K',
+    quant: 'Q2_K',
+    parametersB: 27.8,
+    bytes: 10.9 * GB,
+    residentBytes: 12.4 * GB,
+    quality: 3,
+    multimodal: false,
+    note: '27.8B Q2_K text/coding rung; estimate includes the repository’s separate Q8_0 projector. The Ollama HF import is untested here; image requests use the separate native Qwen3.5 vision rung.',
+  },
+  ...NATIVE_MULTIMODAL.slice(6),
+]
+
 const LADDERS = {
-  chat: [
-    { model: 'huihui_ai/qwen2.5-abliterate:14b', quant: 'Q4_K_M', bytes: 9.0 * GB, residentBytes: 10.8 * GB, quality: 5 },
-    { model: 'huihui_ai/qwen2.5-abliterate:7b', quant: 'Q4_K_M', bytes: 4.7 * GB, residentBytes: 5.7 * GB, quality: 4 },
-    { model: 'huihui_ai/qwen2.5-abliterate:3b', quant: 'Q4_K_M', bytes: 1.9 * GB, residentBytes: 2.4 * GB, quality: 3 },
-    { model: 'huihui_ai/qwen2.5-abliterate:1.5b', quant: 'Q4_K_M', bytes: 986 * MB, residentBytes: 1.25 * GB, quality: 2 },
-    { model: 'huihui_ai/qwen2.5-abliterate:0.5b', quant: 'Q4_K_M', bytes: 398 * MB, residentBytes: 510 * MB, quality: 1 },
-  ],
-  vision: [
-    { model: 'huihui_ai/qwen2.5-vl-abliterated:7b', quant: 'Q4_K_M', bytes: 6.0 * GB, residentBytes: 7.5 * GB, quality: 4 },
-    { model: 'huihui_ai/qwen2.5-vl-abliterated:3b', quant: 'Q4_K_M', bytes: 3.2 * GB, residentBytes: 4.1 * GB, quality: 3 },
-  ],
-  reason: [
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:14b', quant: 'Q4_K_M', bytes: 9.0 * GB, residentBytes: 10.8 * GB, quality: 5 },
-    // The requested abliterated 7B coder, with genuine Ollama quant tags for
-    // tighter budgets rather than silently swapping in an aligned model.
-    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q4_k_m', quant: 'Q4_K_M', bytes: 4.7 * GB, residentBytes: 5.7 * GB, quality: 4 },
-    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q3_k_m', quant: 'Q3_K_M', bytes: 3.8 * GB, residentBytes: 4.65 * GB, quality: 3 },
-    { model: 'dagbs/qwen2.5-coder-7b-instruct-abliterated:q2_k', quant: 'Q2_K', bytes: 3.0 * GB, residentBytes: 3.75 * GB, quality: 2 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:3b', quant: 'Q4_K_M', bytes: 1.9 * GB, residentBytes: 2.4 * GB, quality: 2 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:1.5b', quant: 'Q4_K_M', bytes: 1.1 * GB, residentBytes: 1.4 * GB, quality: 1 },
-    { model: 'huihui_ai/qwen2.5-coder-abliterate:0.5b', quant: 'Q4_K_M', bytes: 398 * MB, residentBytes: 510 * MB, quality: 0 },
-  ],
+  chat: HIGH_PARAMETER_TEXT,
+  vision: NATIVE_MULTIMODAL,
+  reason: HIGH_PARAMETER_TEXT,
+
   speech: [
     { kind: 'whisper', file: 'ggml-large-v3-turbo-q5_0.bin', quant: 'Q5_0', bytes: 550 * MB, residentBytes: 1.35 * GB, quality: 5, multilingual: true },
     { kind: 'whisper', file: 'ggml-medium-q5_0.bin', quant: 'Q5_0', bytes: 539 * MB, residentBytes: 1.25 * GB, quality: 4, multilingual: true },
@@ -91,10 +117,11 @@ function assertModelPolicy() {
   for (const cap of ['chat', 'reason', 'vision']) {
     for (const rung of LADDERS[cap]) {
       if (!/abliterat/i.test(rung.model ?? '')) problems.push(`${cap}: ${rung.model}`)
+      if (cap === 'vision' && rung.multimodal !== true) problems.push(`vision model is not multimodal: ${rung.model}`)
     }
   }
   if (problems.length) {
-    throw new Error(`refusing a non-abliterated chat/coding model: ${problems.join(', ')}`)
+    throw new Error(`refusing a non-abliterated or non-multimodal model: ${problems.join(', ')}`)
   }
   for (const rung of LADDERS.speech) {
     if (/\.en\./i.test(rung.file)) throw new Error(`Whisper model must be multilingual: ${rung.file}`)
@@ -172,15 +199,18 @@ function selectRung(cap, ramBudget, selected, skipped) {
     selected[cap] = { ...rung, ...languagePolicy, fits: true, mode: 'within-budget' }
     return
   }
-  // Keep the minimum chat/coder as an explicit opt-in best-effort pick instead
-  // of pretending it fits. Vision has no 1 GB miracle model; omit it entirely.
-  if (cap === 'chat' || cap === 'reason') {
+  // Keep the nearest multimodal rung visible as best-effort in every LLM role,
+  // but never auto-install or invoke it when the reserved memory ceiling says
+  // no. This keeps image support in every RAM profile without pretending a
+  // sub-1.3 GB VLM can run inside a 0.2–1.2 GB budget.
+  if (['chat', 'vision', 'reason'].includes(cap)) {
     const floor = smallest(ladder)
     selected[cap] = { ...floor, ...languagePolicy, fits: false, mode: 'best-effort' }
-    skipped.push({ cap, model: floor.model, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `minimum ${cap} model estimates ${ (floor.residentBytes / GB).toFixed(2) } GB resident; the reserved JARVIS budget is ${(ramBudget / GB).toFixed(2)} GB. Best-effort only.` })
+    skipped.push({ cap, model: floor.model, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `minimum ${cap} model estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident; the reserved JARVIS budget is ${(ramBudget / GB).toFixed(2)} GB. Best-effort only.` })
     return
   }
-  skipped.push({ cap, model: null, needsGb: +(smallest(ladder).residentBytes / GB).toFixed(2), why: `${cap} is unavailable within this RAM tier. The smallest supported choice estimates ${(smallest(ladder).residentBytes / GB).toFixed(2)} GB resident.` })
+  const floor = smallest(ladder)
+  skipped.push({ cap, model: null, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `${cap} is unavailable within this RAM tier. The smallest supported choice estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident.` })
 }
 
 /**
@@ -215,22 +245,41 @@ export function plan(options = {}) {
   choices.tts = { ...(selectedTts ?? LADDERS.tts.at(-1)), fits: true, mode: 'within-budget' }
 
   const fittingChoices = Object.values(choices).filter((rung) => rung.fits)
+  const uniqueAssets = new Map()
+  for (const rung of fittingChoices) {
+    const key = rung.kind === 'whisper'
+      ? `whisper:${rung.file}`
+      : rung.kind === 'tts'
+        ? `tts:${rung.model}`
+        : `ollama:${rung.model}`
+    if (!uniqueAssets.has(key)) uniqueAssets.set(key, rung)
+  }
   const maxResidentBytes = primaryPeak + choices.tts.residentBytes
-  const totalDownloadBytes = fittingChoices.reduce((sum, rung) => sum + rung.bytes, 0)
+  const totalDownloadBytes = [...uniqueAssets.values()].reduce((sum, rung) => sum + rung.bytes, 0)
+  const llmModelCount = new Set(['chat', 'vision', 'reason'].map((cap) => choices[cap]?.model).filter(Boolean)).size
+  const sharedModelNote = llmModelCount <= 1
+    ? 'Chat, vision and coding share one abliterated multimodal model at this RAM tier; its download is counted once and the fitting model stays warm across those slots.'
+    : `Chat/vision/coding use ${llmModelCount} distinct model tags at this RAM tier; repeated tags are counted once. Vision stays on a native multimodal Ollama rung.`
   const notes = [
     '35% reserved for the OS, 25% for other apps, 40% maximum for JARVIS.',
-    'Models are selected for sequential loading; Ollama residency is released after each local request.',
+    sharedModelNote,
     `Only ${(ceiling / GB).toFixed(2)} GB is currently planned for one active model at a time; context/runtime estimates vary by backend.`,
     choices.tts.engine === 'system'
       ? 'TTS uses the browser/OS voice at this RAM tier; voice language availability depends on the installed OS voices.'
       : `TTS selects browser-local Kokoro ${choices.tts.dtype} (${(choices.tts.bytes / MB).toFixed(0)} MB weights). The browser downloads and caches it on first use; resident use is an estimate, not a measured guarantee.`,
   ]
   if (skipped.some((item) => item.cap === 'vision')) {
-    notes.push('Full image Q&A is not available in this RAM tier; the supplied Qwen2.5-VL 3B model alone downloads at about 3.2 GB and needs additional runtime memory.')
+    const vision = choices.vision
+    const totalFloorGb = vision.residentBytes / (BUDGET.models * GB)
+    notes.push(`Vision is present in every tier as ${vision.model}, but is best-effort here: its smallest multimodal rung estimates ${(vision.residentBytes / GB).toFixed(2)} GB resident and first fits at about ${totalFloorGb.toFixed(1)} GB total RAM when free memory is available.`)
   }
   if (skipped.some((item) => item.cap === 'chat' || item.cap === 'reason')) {
-    notes.push('The minimum abliterated 0.5B text weights are offered as best-effort only; 1 GB total RAM cannot guarantee inference inside the 0.4 GB JARVIS cap.')
+    notes.push('The smallest 0.8B Q8 multimodal model estimates 1.30 GB resident; below the plan ceiling it remains best-effort and is not installed or invoked.')
   }
+  const selectedModelNotes = new Set(['chat', 'vision', 'reason']
+    .map((cap) => choices[cap]?.fits ? choices[cap].note : null)
+    .filter(Boolean))
+  notes.push(...selectedModelNotes)
   const g = b.gpuInfo
   if (g) notes.push(`${g.name}: ${(g.usable / GB).toFixed(1)} GB advisory VRAM; the fixed system-RAM limit still applies.`)
 
@@ -251,24 +300,46 @@ export function plan(options = {}) {
 
 export function planSummary(input) {
   const p = input ?? plan()
-  const picked = Object.entries(p.choices)
-    .map(([cap, rung]) => `${cap} ${rung.quant ?? 'unknown'}${rung.fits ? '' : ' (best-effort)'}`)
-    .join(', ')
-  return `autopilot: ${p.budget.gb.toFixed(1)} GB RAM → ${(p.budget.models / GB).toFixed(1)} GB JARVIS cap | ${picked}`
+  const llmSlots = ['chat', 'vision', 'reason']
+  const shared = llmSlots.map((cap) => p.choices[cap])
+  const sharesOneModel = shared.every((rung) => rung?.model && rung.model === shared[0]?.model)
+  const describeParameters = (parametersB) => parametersB == null
+    ? ''
+    : parametersB < 1
+      ? `${Math.round(parametersB * 1000)}M `
+      : `${Number.isInteger(parametersB) ? parametersB : Number(parametersB.toFixed(2))}B `
+  const picks = []
+  if (sharesOneModel) {
+    const rung = shared[0]
+    picks.push(`${describeParameters(rung.parametersB)}${rung.quant ?? 'unknown'} ${rung.fits ? 'shared chat/vision/coding' : 'shared chat/vision/coding (best-effort only)'}`)
+  }
+  for (const [cap, rung] of Object.entries(p.choices)) {
+    if (sharesOneModel && llmSlots.includes(cap)) continue
+    picks.push(`${cap} ${rung.quant ?? 'unknown'}${rung.fits ? '' : ' (best-effort)'}`)
+  }
+  return `autopilot: ${p.budget.gb.toFixed(1)} GB RAM → ${(p.budget.models / GB).toFixed(1)} GB JARVIS cap | ${picks.join(', ')}`
 }
 
 /** Install only after an explicit local UI action or setup-script invocation. */
 export async function install(opts = {}) {
-  const { dry = false, onStep = () => {}, dir = WHISPER_DIR, planned, skipOllamaModels = false } = opts
+  const { dry = false, onStep = () => {}, dir = WHISPER_DIR, planned, skipOllamaModels = false, onlyOllamaSlots } = opts
   const p = planned ?? plan()
   const log = []
   const root = resolve(dir)
+  const allowedOllamaSlots = skipOllamaModels
+    ? new Set()
+    : Array.isArray(onlyOllamaSlots)
+      ? new Set(onlyOllamaSlots)
+      : null
+  const usesOllamaSlot = (cap, rung) =>
+    rung.fits && rung.kind !== 'whisper' && rung.kind !== 'tts' && Boolean(rung.model)
+    && (allowedOllamaSlots === null || allowedOllamaSlots.has(cap))
   onStep({ phase: 'plan', summary: planSummary(p), notes: p.notes, totalDownloadBytes: p.totalDownloadBytes })
   if (dry) return { log, plan: p, installed: [] }
 
   await mkdir(root, { recursive: true })
-  const hasFittingOllamaModels = !skipOllamaModels && Object.values(p.choices).some((rung) =>
-    rung.fits && rung.kind !== 'whisper' && rung.kind !== 'tts' && Boolean(rung.model),
+  const hasFittingOllamaModels = !skipOllamaModels && Object.entries(p.choices).some(([cap, rung]) =>
+    usesOllamaSlot(cap, rung),
   )
   const ollamaReady = hasFittingOllamaModels ? await ollamaUp() : false
   const existingModels = ollamaReady ? await installedOllamaModels() : new Set()
@@ -282,8 +353,10 @@ export async function install(opts = {}) {
       continue
     }
 
-    if (skipOllamaModels && rung.kind !== 'whisper' && rung.kind !== 'tts' && rung.model) {
-      const note = 'skipped: a non-Ollama model endpoint is configured; no local Ollama weights were downloaded'
+    if (rung.kind !== 'whisper' && rung.kind !== 'tts' && rung.model && !usesOllamaSlot(cap, rung)) {
+      const note = skipOllamaModels
+        ? 'skipped: a non-Ollama model endpoint is configured; no local Ollama weights were downloaded'
+        : 'skipped: this slot is not routed to the local Ollama selected for automatic setup; planner weights were left untouched'
       onStep({ phase: 'skip', cap, model: rung.model, status: note, fits: rung.fits })
       log.push({ cap, id: rung.model, ok: true, skipped: true, fits: rung.fits, note })
       continue
@@ -480,6 +553,8 @@ export function ladder() {
         downloadGb: +(rung.bytes / GB).toFixed(2),
         residentGb: +(rung.residentBytes / GB).toFixed(2),
         quality: rung.quality,
+        parametersB: rung.parametersB ?? undefined,
+        multimodal: rung.multimodal ?? undefined,
         multilingual: rung.multilingual ?? undefined,
         note: rung.note ?? undefined,
       })),
@@ -501,10 +576,13 @@ export function tierProfiles() {
       cap,
       {
         model: rung.model ?? rung.file ?? null,
+        quant: rung.quant ?? null,
+        parametersB: rung.parametersB ?? null,
         fits: Boolean(rung.fits),
-        state: rung.fits ? 'fits' : ['chat', 'reason'].includes(cap) ? 'best-effort' : 'unavailable',
+        state: rung.fits ? 'fits' : ['chat', 'vision', 'reason'].includes(cap) ? 'best-effort' : 'unavailable',
         engine: rung.engine ?? null,
         dtype: rung.dtype ?? null,
+        multimodal: rung.multimodal ?? false,
       },
     ]))
     return {

@@ -616,12 +616,9 @@ export function Blades() {
 
   // Bound here rather than in App, and only while something is open, so E and X
   // are free for anything else the moment the last blade closes.
-  const live = useRef(false)
-  live.current = blades.length > 0
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!live.current) return
+      if (!front) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
       if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return

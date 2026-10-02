@@ -10,13 +10,35 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Refresh-SessionPath {
-  $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = "$machinePath;$userPath"
-  $ollamaUserDir = Join-Path $env:LOCALAPPDATA 'Programs\Ollama'
-  if (Test-Path (Join-Path $ollamaUserDir 'ollama.exe')) { $env:Path = "$ollamaUserDir;$env:Path" }
-  $programNode = Join-Path $env:ProgramFiles 'nodejs'
-  if (Test-Path (Join-Path $programNode 'node.exe')) { $env:Path = "$programNode;$env:Path" }
+  # Preserve paths supplied by the current shell (for example, a version
+  # manager) while adding locations written by the just-completed installer.
+  $paths = @(
+    $env:Path
+    [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    [Environment]::GetEnvironmentVariable('Path', 'User')
+  )
+  if ($env:LOCALAPPDATA) {
+    $ollamaUserDir = Join-Path $env:LOCALAPPDATA 'Programs\Ollama'
+    if (Test-Path (Join-Path $ollamaUserDir 'ollama.exe')) { $paths += $ollamaUserDir }
+  }
+  if ($env:ProgramFiles) {
+    $programNode = Join-Path $env:ProgramFiles 'nodejs'
+    if (Test-Path (Join-Path $programNode 'node.exe')) { $paths += $programNode }
+  }
+  $entries = $paths | ForEach-Object { if ($_){ $_ -split ';' } }
+  $env:Path = ($entries | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join ';'
+}
+
+function Get-NodeVersion {
+  param([Parameter(Mandatory)][string]$Executable)
+  try {
+    $output = & $Executable -p 'process.versions.node' 2>$null
+    if ($LASTEXITCODE -ne 0) { return '' }
+    $version = ($output | Out-String).Trim()
+    if ($version -match '^(\d+\.\d+\.\d+)') { return $Matches[1] }
+  }
+  catch { return '' }
+  return ''
 }
 
 function Install-OllamaIfNeeded {
@@ -63,6 +85,10 @@ function Install-OllamaIfNeeded {
 Push-Location $repo
 
 try {
+  if (-not (Test-Path 'package.json') -or -not (Test-Path 'package-lock.json')) {
+    throw 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
+  }
+
   Write-Host ''
   Write-Host 'J.A.R.V.I.S. — web setup, build, and run' -ForegroundColor Cyan
   Write-Host '======================================='
@@ -71,12 +97,9 @@ try {
   $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
   $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
   if (-not $npmCommand) { $npmCommand = Get-Command npm -ErrorAction SilentlyContinue }
-  $nodeVersion = ''
+  $nodeVersion = if ($nodeCommand) { Get-NodeVersion -Executable $nodeCommand.Source } else { '' }
   $nodeMajor = 0
-  if ($nodeCommand) {
-    $nodeVersion = (& $nodeCommand.Source -p 'process.versions.node').Trim()
-    $nodeMajor = [int]($nodeVersion.Split('.')[0])
-  }
+  if ($nodeVersion -match '^(\d+)\.') { $nodeMajor = [int]$Matches[1] }
 
   if (-not $nodeCommand -or $nodeMajor -lt 20 -or -not $npmCommand) {
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
@@ -88,30 +111,24 @@ try {
     & $winget.Source install --id OpenJS.NodeJS.LTS --exact --source winget --force --silent --disable-interactivity --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) { throw 'WinGet could not install Node.js LTS. Install it from https://nodejs.org, then rerun this script.' }
 
-    # Refresh PATH for this PowerShell process; the MSI updates the registry,
-    # which the current process inherited before the installer ran.
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $env:Path = "$machinePath;$userPath"
-    $programNode = Join-Path $env:ProgramFiles 'nodejs'
-    if (Test-Path (Join-Path $programNode 'node.exe')) { $env:Path = "$programNode;$env:Path" }
+    # The MSI updates the registry, which this PowerShell process inherited
+    # before the installer ran. Preserve shell paths while refreshing both.
+    Refresh-SessionPath
 
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $npmCommand) { $npmCommand = Get-Command npm -ErrorAction SilentlyContinue }
     if (-not $nodeCommand -or -not $npmCommand) { throw 'Node.js was installed, but this shell cannot find node/npm. Open a new PowerShell window and rerun build.ps1.' }
-    $nodeVersion = (& $nodeCommand.Source -p 'process.versions.node').Trim()
-    $nodeMajor = [int]($nodeVersion.Split('.')[0])
-    if ($nodeMajor -lt 20) { throw "WinGet installed Node.js $nodeVersion, which is below the required version 20." }
+    $nodeVersion = Get-NodeVersion -Executable $nodeCommand.Source
+    $nodeMajor = 0
+    if ($nodeVersion -match '^(\d+)\.') { $nodeMajor = [int]$Matches[1] }
+    if ($nodeMajor -lt 20) { throw "WinGet did not provide a working Node.js 20+ runtime (detected '$nodeVersion')." }
   }
 
   # npm.cmd avoids PowerShell execution-policy issues with npm.ps1 on Windows.
   $npmPath = $npmCommand.Source
-  if (-not (Test-Path 'package.json') -or -not (Test-Path 'package-lock.json')) {
-    throw 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
-  }
-
-  $npmVersion = (& $npmPath --version).Trim()
+  $npmVersion = (& $npmPath --version 2>&1 | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $npmVersion) { throw 'npm is present but could not run. Reinstall Node.js 20+ and rerun build.ps1.' }
   Write-Host "Node.js $nodeVersion; npm $npmVersion"
 
   $needsInstall = -not (Test-Path 'node_modules/.package-lock.json') -or -not (Test-Path 'node_modules/vite/bin/vite.js')
