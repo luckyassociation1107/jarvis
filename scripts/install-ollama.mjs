@@ -132,449 +132,300 @@ function availableRam() {
  * We import it so the CLI and the page always agree on what is available.
  */
 async function getModelTiers() {
-  // Dynamic import so this script works even without the full bridge built
   try {
-    const { plan } = await import('../bridge/autopilot.mjs')
+    const { plan, ladder } = await import('../bridge/autopilot.mjs')
     const p = plan()
-    const tiers = []
-    // Build a flat list from the ladder entries the planner considered
-    for (const [cap, choice] of Object.entries(p.choices)) {
-      if (!choice.model) continue
-      tiers.push({
-        cap,
-        model: choice.model,
-        fits: choice.fits,
-        bytes: choice.bytes ?? 0,
-        residentBytes: choice.residentBytes ?? 0,
-        quality: choice.quality ?? 0,
-        note: choice.note ?? '',
-      })
-    }
-    return { tiers, plan: p, ok: true }
+    const ladders = ladder()
+    return { tiers: [], plan: p, ladders, ok: true }
   } catch {
-    return { tiers: [], plan: null, ok: false }
+    return { tiers: [], plan: null, ladders: null, ok: false }
   }
 }
+
+/* ──────────────── model picker with quantization filter ───────────────── */
 
 /**
- * Build a user-facing tier table from the autopilot's RAM-profile catalogue.
+ * Interactive model picker.
  *
- * The planner already computed which rungs fit. We present them as a numbered
- * list so the user types one number and that model is pulled — no guessing,
- * no hidden defaults.
+ * Flow:
+ *   1. Show machine info (RAM, budget)
+ *   2. Show available quantization levels → user picks one
+ *   3. Show parameter sizes for that quant → user picks one
+ *   4. Confirm & pull
  */
-function buildTierTable(tiers, freeRam) {
-  const models = tiers
-    .filter((t) => t.cap === 'chat') // one entry per distinct model; chat covers the shared tag
-    .sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))
-
-  const seen = new Set()
-  return models.filter((m) => {
-    if (seen.has(m.model)) return false
-    seen.add(m.model)
-    return true
-  })
-}
-
-/* ────────────────────────── download URL ─────────────────────────────── */
-
-function binaryTarballUrl() {
-  if (plat === 'linux') {
-    if (cpu === 'arm64') return 'https://ollama.com/download/ollama-linux-arm64.tgz'
-    return 'https://ollama.com/download/ollama-linux-amd64.tgz'
-  }
-  if (plat === 'darwin') {
-    if (cpu === 'arm64') return 'https://ollama.com/download/ollama-darwin-arm64.tgz'
-    return 'https://ollama.com/download/ollama-darwin-amd64.tgz'
-  }
-  return null
-}
-
-/* ──────────────────────── install methods ────────────────────────────── */
-
-async function installViaScript() {
-  line(info, 'Downloading the official Ollama install script…')
-
-  let script
-  try {
-    const res = await fetch('https://ollama.com/install.sh', { signal: AbortSignal.timeout(30_000) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    script = await res.text()
-  } catch (err) {
-    line(warn, `Could not download the install script: ${err.message}`)
-    return { ok: false, error: err.message, method: 'script' }
-  }
-
-  const tmpScript = '/tmp/jarvis-ollama-install.sh'
-  writeFileSync(tmpScript, script, { mode: 0o755 })
-
-  line(info, 'Running the installer (may ask for your password)…')
-
-  return new Promise((resolve) => {
-    const child = spawn('sh', [tmpScript], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      env: { ...process.env },
-    })
-
-    child.stdout.on('data', (d) => {
-      for (const l of d.toString().split('\n')) {
-        if (l.trim()) line(info, l.trim())
-      }
-    })
-    child.stderr.on('data', (d) => {
-      for (const l of d.toString().split('\n')) {
-        if (l.trim()) line(info, l.trim())
-      }
-    })
-
-    child.once('close', (code) => {
-      try { unlinkSync(tmpScript) } catch { /* ok */ }
-      resolve({ ok: code === 0, error: code !== 0 ? `installer exited with code ${code}` : null, method: 'script' })
-    })
-    child.once('error', (err) => {
-      try { unlinkSync(tmpScript) } catch { /* ok */ }
-      resolve({ ok: false, error: err.message, method: 'script' })
-    })
-  })
-}
-
-async function installViaBinary() {
-  const url = binaryTarballUrl()
-  if (!url) return { ok: false, error: `no binary available for ${plat}/${cpu}`, method: 'binary' }
-
-  line(info, `Downloading Ollama binary from ${url}…`)
-
-  const tmpTgz = '/tmp/ollama-install.tgz'
-  const tmpDir = '/tmp/ollama-extract'
-
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5 * 60 * 1000) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
-    const total = Number(res.headers.get('content-length') ?? 0)
-    let downloaded = 0
-    let lastPrint = 0
-
-    const counter = new (await import('node:stream')).Transform({
-      transform(chunk, _enc, cb) {
-        downloaded += chunk.length
-        const now = Date.now()
-        if (now - lastPrint > 2000 && total) {
-          lastPrint = now
-          line(info, `  downloading… ${(downloaded / GB).toFixed(1)} / ${(total / GB).toFixed(1)} GB`)
-        }
-        cb(null, chunk)
-      },
-    })
-
-    await pipeline(Readable.fromWeb(res.body), counter, createWriteStream(tmpTgz))
-    line(tick, 'Download complete.')
-  } catch (err) {
-    return { ok: false, error: `download failed: ${err.message}`, method: 'binary' }
-  }
-
-  line(info, 'Extracting…')
-  try {
-    sh(`rm -rf ${tmpDir}`)
-    mkdirSync(tmpDir, { recursive: true })
-    execSync(`tar xzf ${tmpTgz} -C ${tmpDir}`, { timeout: 60_000 })
-  } catch (err) {
-    return { ok: false, error: `extraction failed: ${err.message}`, method: 'binary' }
-  }
-
-  const binCandidates = [join(tmpDir, 'bin/ollama'), join(tmpDir, 'ollama')]
-  const binPath = binCandidates.find((p) => existsSync(p))
-  if (!binPath) return { ok: false, error: 'ollama binary not found in the archive', method: 'binary' }
-
-  const installDir = process.getuid?.() === 0 ? INSTALL_DIR_LINUX : join(homedir(), '.local/bin')
-  const target = join(installDir, 'ollama')
-
-  try {
-    mkdirSync(installDir, { recursive: true })
-    copyFileSync(binPath, target)
-    chmodSync(target, 0o755)
-    line(tick, `Installed to ${target}`)
-  } catch {
-    try {
-      execSync(`sudo mkdir -p ${INSTALL_DIR_LINUX}`, { timeout: 10_000 })
-      execSync(`sudo cp ${binPath} ${INSTALL_DIR_LINUX}/ollama`, { timeout: 10_000 })
-      execSync(`sudo chmod 755 ${INSTALL_DIR_LINUX}/ollama`, { timeout: 10_000 })
-      line(tick, `Installed to ${INSTALL_DIR_LINUX}/ollama (via sudo)`)
-    } catch (err2) {
-      return { ok: false, error: `cannot install binary: ${err2.message}`, method: 'binary' }
-    }
-  }
-
-  try { unlinkSync(tmpTgz) } catch { /* ok */ }
-  try { sh(`rm -rf ${tmpDir}`) } catch { /* ok */ }
-
-  return { ok: true, method: 'binary' }
-}
-
-async function installOllama() {
-  line(info, `Platform: ${plat} · Arch: ${cpu} · GPU hint: ${detectGpu()}`)
-
-  const scriptResult = await installViaScript()
-  if (scriptResult.ok) return scriptResult
-
-  line(warn, `Install script failed (${scriptResult.error}). Trying direct binary download…`)
-
-  const binaryResult = await installViaBinary()
-  return binaryResult
-}
-
-/* ──────────────────────── start & verify ─────────────────────────────── */
-
-async function startOllamaDaemon() {
-  const running = await isOllamaRunning()
-  if (running) {
-    line(tick, `Ollama is already running at ${OLLAMA_DEFAULT_URL}`)
-    return { ok: true, alreadyRunning: true }
-  }
-
-  line(info, 'Starting Ollama…')
-
-  if (plat === 'linux') {
-    const systemd = sh('systemctl is-active ollama 2>/dev/null')
-    if (systemd === 'active') {
-      line(tick, 'Ollama is already running as a systemd service.')
-      return { ok: true, alreadyRunning: true }
-    }
-
-    const started = sh('sudo systemctl start ollama 2>&1')
-    if (started !== null) {
-      for (let i = 0; i < 15; i++) {
-        await sleep(1000)
-        if (await isOllamaRunning()) {
-          line(tick, 'Ollama started via systemd.')
-          return { ok: true, method: 'systemd' }
-        }
-      }
-    }
-  }
-
-  const env = {
-    ...process.env,
-    OLLAMA_HOST: OLLAMA_DEFAULT_URL.replace(/^https?:\/\//, ''),
-    ...(existsSync(OLLAMA_MODELS_DIR) ? { OLLAMA_MODELS: OLLAMA_MODELS_DIR } : {}),
-  }
-
-  const child = spawn('ollama', ['serve'], {
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  })
-
-  child.stdout?.on('data', (d) => {
-    for (const l of d.toString().split('\n')) {
-      if (l.trim()) line(info, `[ollama] ${l.trim()}`)
-    }
-  })
-  child.stderr?.on('data', (d) => {
-    for (const l of d.toString().split('\n')) {
-      if (l.trim()) line(info, `[ollama] ${l.trim()}`)
-    }
-  })
-  child.unref()
-
-  for (let i = 0; i < 20; i++) {
-    await sleep(1000)
-    if (await isOllamaRunning()) {
-      line(tick, `Ollama started at ${OLLAMA_DEFAULT_URL}`)
-      return { ok: true, method: 'direct', pid: child.pid }
-    }
-  }
-
-  return { ok: false, error: 'Ollama did not respond within 20 seconds' }
-}
-
-/* ────────────────────── model pull (user-driven) ─────────────────────── */
-
-async function pullModel(model) {
-  line(info, `Pulling ${model}…`)
-
-  const res = await fetch(`${OLLAMA_DEFAULT_URL}/api/pull`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: model, stream: true }),
-    signal: AbortSignal.timeout(60 * 60 * 1000),
-  })
-
-  if (!res.ok) {
-    line(fail, `Pull failed: HTTP ${res.status}`)
-    return false
-  }
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let lastStatus = ''
-
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const l of lines) {
-      if (!l.trim()) continue
-      try {
-        const evt = JSON.parse(l)
-        if (evt.error) {
-          line(fail, `Pull error: ${evt.error}`)
-          return false
-        }
-        const status = evt.status ?? ''
-        const pct = evt.total ? ` ${Math.round((evt.completed / evt.total) * 100)}%` : ''
-        const msg = `${status}${pct}`
-        if (msg !== lastStatus) {
-          lastStatus = msg
-          process.stdout.write(`\r  ↓  ${msg.padEnd(60)}`)
-        }
-      } catch { /* partial line */ }
-    }
-  }
-  console.log('') // newline after progress
-  line(tick, `${model} pulled successfully.`)
-  return true
-}
-
 async function promptModelChoice() {
+  const { plan: p, ladders, ok } = await getModelTiers()
+  const freeRam = availableRam()
+
+  // Build the full catalogue from the ladder
+  const catalogue = buildCatalogue(ladders)
+
+  if (!catalogue.length) {
+    line(warn, 'No models available.')
+    return promptFromHardcoded()
+  }
+
   console.log('')
   console.log('  Choose a model to pull')
   console.log('  ═══════════════════════')
 
-  // Get the RAM plan
-  const { tiers, plan: p, ok } = await getModelTiers()
-  const freeRam = availableRam()
-
-  if (!ok || !tiers.length) {
-    // Fallback: show the known abliterated catalogue directly
-    line(warn, 'Could not load the RAM plan. Showing the default model catalogue.')
-    console.log('')
-    return promptFromCatalogue()
-  }
-
-  // Show machine info
+  // Machine info
   const totalRamGb = (totalmem() / GB).toFixed(1)
   const freeRamGb = (freeRam / GB).toFixed(1)
   const budgetGb = p ? (p.effectiveModelBytes / GB).toFixed(1) : '?'
   line(info, `RAM: ${totalRamGb} GB total · ${freeRamGb} GB free · ${budgetGb} GB AI ceiling`)
-  line(info, `Plan: ${p ? `${(p.budget.share * 100).toFixed(0)}% of free RAM` : 'default'}`)
-  if (p?.budget.capGb) line(info, `Hard cap: ${p.budget.capGb} GB`)
+  line(info, `GPU: ${detectGpu()}`)
+  if (p?.budget) {
+    line(info, `Plan: ${(p.budget.share * 100).toFixed(0)}% of free RAM${p.budget.capGb ? ` · hard cap ${p.budget.capGb} GB` : ''}`)
+  }
   console.log('')
 
-  // Build the table — unique models sorted by size, largest first
-  const uniqueModels = new Map()
-  for (const t of tiers) {
-    if (t.model && !uniqueModels.has(t.model)) {
-      uniqueModels.set(t.model, t)
-    }
-  }
+  // ── Step 1: Pick quantization level ──
+  const quantLevels = getAvailableQuants(catalogue)
+  const quantChoice = await pickQuantization(quantLevels, catalogue, freeRam)
+  if (!quantChoice) return null
 
-  const sorted = [...uniqueModels.values()].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))
+  // ── Step 2: Pick parameter size ──
+  const filtered = catalogue.filter((m) => m.quant === quantChoice)
+  const model = await pickParameterSize(filtered, freeRam)
+  if (!model) return null
 
-  if (!sorted.length) {
-    line(warn, 'No models found in the plan. Showing the default catalogue.')
-    console.log('')
-    return promptFromCatalogue()
-  }
-
-  // Show numbered list
-  console.log('  #   Model                                          Size       Fits')
-  console.log('  ─── ────────────────────────────────────────────── ────────── ────')
-
-  const recIdx = sorted.findIndex((m) => m.fits)
-  sorted.forEach((m, i) => {
-    const num = String(i + 1).padStart(3)
-    const name = (m.model ?? '').padEnd(48)
-    const size = m.bytes ? `${(m.bytes / GB).toFixed(1)} GB`.padStart(10) : '       ?  '
-    const fits = m.fits ? ' ✓' : ' ✗ (too large)'
-    const rec = i === recIdx ? '  ← recommended' : ''
-    console.log(`  ${num} ${name} ${size}${fits}${rec}`)
-  })
-
+  // ── Step 3: Confirm ──
   console.log('')
-  const rec = recIdx >= 0 ? recIdx + 1 : 1
-  const answer = await ask(`  Enter number (1–${sorted.length}) [${rec} = recommended]: `)
+  line(info, `Model: ${model.model}`)
+  line(info, `Quant: ${model.quant} · ${model.params}B · ${model.sizeGb.toFixed(1)} GB download`)
+  line(info, `Fits:  ${model.sizeGb * 1.3 <= freeRam / GB ? 'yes' : '⚠ tight — may need swap'}`)
 
-  let chosen = rec // default to recommended
-  if (answer) {
-    const num = Number(answer)
-    if (Number.isInteger(num) && num >= 1 && num <= sorted.length) {
-      chosen = num
-    } else {
-      line(warn, `Invalid choice "${answer}". Using recommended (${rec}).`)
-    }
-  }
-
-  const selected = sorted[chosen - 1]
-  console.log('')
-  line(info, `Selected: ${selected.model}`)
-  line(info, `Size:     ${selected.bytes ? `${(selected.bytes / GB).toFixed(1)} GB` : 'unknown'}`)
-  line(info, `Fits:     ${selected.fits ? 'yes' : 'no — may fail on this machine'}`)
-
-  const confirm = await ask(`\n  Pull ${selected.model}? [Y/n] `)
+  const confirm = await ask(`\n  Pull ${model.model}? [Y/n] `)
   if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
     line(info, 'Cancelled. No model pulled.')
     return null
   }
 
-  return selected.model
+  return model.model
 }
 
-/** Fallback catalogue when the autopilot plan cannot be loaded. */
-async function promptFromCatalogue() {
-  const catalogue = [
-    { model: 'huihui_ai/qwen3.5-abliterated:9b-q8_0', size: '11.0 GB', params: '9.65B Q8_0', note: 'best quality, needs ~12 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:9b',       size: ' 6.6 GB', params: '9.65B Q4_K_M', note: 'good quality, needs ~8 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:4B-q8_0',  size: ' 5.2 GB', params: '4.54B Q8_0', note: 'needs ~6 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:4b',       size: ' 3.3 GB', params: '4.54B Q4_K_M', note: 'balanced, needs ~4 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:2B-q8_0',  size: ' 2.7 GB', params: '2.27B Q8_0', note: 'lightweight, needs ~3 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:2b',       size: ' 1.9 GB', params: '2.27B Q4_K_M', note: 'small, needs ~2.5 GB RAM' },
-    { model: 'huihui_ai/qwen3.5-abliterated:0.8b',     size: ' 1.0 GB', params: '0.87B Q8_0', note: 'tiny, fits almost anywhere' },
-  ]
+/**
+ * Build a flat catalogue from the autopilot ladder.
+ * Deduplicates by model name, keeps the best metadata.
+ */
+function buildCatalogue(ladders) {
+  if (!ladders?.chat?.rungs) return []
 
-  const freeRamGb = (availableRam() / GB).toFixed(1)
-  line(info, `Free RAM: ${freeRamGb} GB`)
-  console.log('')
+  const seen = new Set()
+  const models = []
 
-  console.log('  #   Model                                          Size       Note')
-  console.log('  ─── ────────────────────────────────────────────── ────────── ────────────────────')
-
-  // Pick recommended based on free RAM
-  let rec = catalogue.length // default: smallest
-  const freeGb = availableRam() / GB
-  for (let i = 0; i < catalogue.length; i++) {
-    const sizeGb = parseFloat(catalogue[i].size)
-    if (sizeGb <= freeGb * 0.85) { rec = i; break }
+  for (const rung of ladders.chat.rungs) {
+    if (!rung.model || seen.has(rung.model)) continue
+    seen.add(rung.model)
+    models.push({
+      model: rung.model,
+      quant: rung.quant ?? '?',
+      params: rung.parametersB ?? 0,
+      sizeGb: rung.downloadGb ?? 0,
+      residentGb: rung.residentGb ?? 0,
+      quality: rung.quality ?? 0,
+      multimodal: rung.multimodal ?? false,
+      note: rung.note ?? '',
+    })
   }
 
-  catalogue.forEach((m, i) => {
-    const num = String(i + 1).padStart(3)
-    const name = m.model.padEnd(48)
-    const size = m.size.padStart(10)
-    const note = m.note
-    const marker = i === rec ? '  ← recommended' : ''
-    console.log(`  ${num} ${name} ${size} ${note}${marker}`)
-  })
+  return models.sort((a, b) => b.sizeGb - a.sizeGb)
+}
 
-  console.log('')
-  const answer = await ask(`  Enter number (1–${catalogue.length}) [${rec + 1} = recommended]: `)
+/**
+ * Get unique quantization levels from the catalogue, ordered by quality.
+ */
+function getAvailableQuants(catalogue) {
+  const QUANT_ORDER = ['F16', 'Q8_0', 'Q6_K', 'Q5_K_M', 'Q4_K_M', 'Q3_K_M', 'Q2_K']
+  const present = new Set(catalogue.map((m) => m.quant))
+  const ordered = QUANT_ORDER.filter((q) => present.has(q))
+  // Add any quants not in our order list at the end
+  for (const q of present) {
+    if (!ordered.includes(q)) ordered.push(q)
+  }
+  return ordered
+}
 
-  let chosen = rec
-  if (answer) {
-    const num = Number(answer)
-    if (Number.isInteger(num) && num >= 1 && num <= catalogue.length) {
-      chosen = num - 1
-    } else {
-      line(warn, `Invalid choice "${answer}". Using recommended (${rec + 1}).`)
+/**
+ * Step 1: Let the user pick a quantization level.
+ *
+ * Shows each level with quality description, model count, and size range.
+ */
+async function pickQuantization(quants, catalogue, freeRam) {
+  const QUANT_INFO = {
+    'F16':    { label: 'Full precision (F16)',     quality: '★★★★★ largest, best quality' },
+    'Q8_0':   { label: 'High quality (Q8_0)',      quality: '★★★★☆ near-lossless, large' },
+    'Q6_K':   { label: 'Good quality (Q6_K)',      quality: '★★★★ good balance' },
+    'Q5_K_M': { label: 'Balanced (Q5_K_M)',        quality: '★★★☆ solid middle ground' },
+    'Q4_K_M': { label: 'Compact (Q4_K_M)',         quality: '★★★ most popular, smaller' },
+    'Q3_K_M': { label: 'Small (Q3_K_M)',           quality: '★★☆ fast, some quality loss' },
+    'Q2_K':   { label: 'Smallest (Q2_K)',          quality: '★★ fastest, noticeable loss' },
+  }
+
+  // Find recommended quant based on free RAM
+  const freeGb = freeRam / GB
+  let recIdx = quants.length - 1 // default: smallest
+  for (let i = 0; i < quants.length; i++) {
+    const smallestInQuant = catalogue.filter((m) => m.quant === quants[i]).sort((a, b) => a.sizeGb - b.sizeGb)[0]
+    if (smallestInQuant && smallestInQuant.sizeGb * 1.3 <= freeGb) {
+      recIdx = i
+      break
     }
   }
 
-  const selected = catalogue[chosen]
+  console.log('  Step 1: Quantization level')
+  console.log('  ───────────────────────────')
   console.log('')
-  line(info, `Selected: ${selected.model} (${selected.params}, ${selected.size})`)
+
+  quants.forEach((q, i) => {
+    const num = String(i + 1).padStart(3)
+    const info = QUANT_INFO[q] ?? { label: q, quality: '' }
+    const modelsInQuant = catalogue.filter((m) => m.quant === q)
+    const sizeRange = modelsInQuant.length
+      ? `${modelsInQuant[modelsInQuant.length - 1].sizeGb.toFixed(1)}–${modelsInQuant[0].sizeGb.toFixed(1)} GB`
+      : ''
+    const rec = i === recIdx ? '  ← recommended' : ''
+    console.log(`  ${num}  ${info.label.padEnd(32)} ${info.quality.padEnd(30)} ${sizeRange.padStart(14)}  (${modelsInQuant.length} models)${rec}`)
+  })
+
+  console.log('')
+  const answer = await ask(`  Pick quantization (1–${quants.length}) [${recIdx + 1}]: `)
+
+  let chosen = recIdx
+  if (answer) {
+    const num = Number(answer)
+    if (Number.isInteger(num) && num >= 1 && num <= quants.length) {
+      chosen = num - 1
+    } else {
+      line(warn, `Invalid. Using recommended (${recIdx + 1}).`)
+    }
+  }
+
+  return quants[chosen]
+}
+
+/**
+ * Step 2: Let the user pick a parameter size for the chosen quantization.
+ *
+ * Shows models sorted by parameter count (smallest to largest).
+ */
+async function pickParameterSize(models, freeRam) {
+  if (!models.length) {
+    line(warn, 'No models for this quantization.')
+    return null
+  }
+
+  // Sort by parameter size ascending
+  const sorted = [...models].sort((a, b) => a.params - b.params)
+
+  // Find recommended: largest model that fits
+  const freeGb = freeRam / GB
+  let recIdx = 0
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (sorted[i].sizeGb * 1.3 <= freeGb) { recIdx = i; break }
+  }
+
+  console.log('')
+  console.log(`  Step 2: Parameter size (${sorted[0].quant})`)
+  console.log('  ──────────────────────────────────────')
+  console.log('')
+  console.log('  #   Params     Model                                          Download    Resident    Fits?')
+  console.log('  ─── ────────── ────────────────────────────────────────────── ─────────── ─────────── ────')
+
+  sorted.forEach((m, i) => {
+    const num = String(i + 1).padStart(3)
+    const params = `${m.params.toFixed(1)}B`.padEnd(10)
+    const name = m.model.length > 48 ? m.model.slice(0, 45) + '…' : m.model.padEnd(48)
+    const size = `${m.sizeGb.toFixed(1)} GB`.padStart(11)
+    const resident = `${m.residentGb.toFixed(1)} GB`.padStart(11)
+    const fits = m.sizeGb * 1.3 <= freeGb ? ' ✓' : ' ✗'
+    const rec = i === recIdx ? '  ← recommended' : ''
+    console.log(`  ${num}  ${params} ${name} ${size}     ${resident} ${fits}${rec}`)
+  })
+
+  console.log('')
+  const answer = await ask(`  Pick model (1–${sorted.length}) [${recIdx + 1}]: `)
+
+  let chosen = recIdx
+  if (answer) {
+    const num = Number(answer)
+    if (Number.isInteger(num) && num >= 1 && num <= sorted.length) {
+      chosen = num - 1
+    } else {
+      line(warn, `Invalid. Using recommended (${recIdx + 1}).`)
+    }
+  }
+
+  return sorted[chosen]
+}
+
+/** Fallback when the autopilot ladder cannot be loaded. */
+async function promptFromHardcoded() {
+  const catalogue = [
+    { model: 'huihui_ai/qwen3.5-abliterated:9b-q8_0',   quant: 'Q8_0',   params: 9.65,  sizeGb: 11.0, residentGb: 12.3 },
+    { model: 'huihui_ai/qwen3.5-abliterated:9b',         quant: 'Q4_K_M', params: 9.65,  sizeGb: 6.6,  residentGb: 7.8 },
+    { model: 'huihui_ai/qwen3.5-abliterated:4B-q8_0',    quant: 'Q8_0',   params: 4.54,  sizeGb: 5.2,  residentGb: 6.1 },
+    { model: 'huihui_ai/qwen3.5-abliterated:4b',         quant: 'Q4_K_M', params: 4.54,  sizeGb: 3.3,  residentGb: 4.1 },
+    { model: 'huihui_ai/qwen3.5-abliterated:2B-q8_0',    quant: 'Q8_0',   params: 2.27,  sizeGb: 2.7,  residentGb: 3.15 },
+    { model: 'huihui_ai/qwen3.5-abliterated:2b',         quant: 'Q4_K_M', params: 2.27,  sizeGb: 1.9,  residentGb: 2.35 },
+    { model: 'huihui_ai/qwen3.5-abliterated:0.8b',       quant: 'Q8_0',   params: 0.873, sizeGb: 1.0,  residentGb: 1.3 },
+  ]
+
+  const freeRam = availableRam()
+  const freeGb = freeRam / GB
+
+  console.log('')
+  console.log('  Choose a model to pull')
+  console.log('  ═══════════════════════')
+  line(info, `Free RAM: ${freeGb.toFixed(1)} GB`)
+  console.log('')
+
+  // Step 1: quant
+  const quants = ['Q8_0', 'Q4_K_M']
+  console.log('  Step 1: Quantization level')
+  console.log('  ───────────────────────────')
+  console.log('')
+  console.log('    1  High quality (Q8_0)              ★★★★☆ near-lossless, larger')
+  console.log('    2  Compact (Q4_K_M)                 ★★★   most popular, smaller   ← recommended')
+  console.log('')
+  const qAnswer = await ask('  Pick quantization (1–2) [2]: ')
+  const qIdx = qAnswer === '1' ? 0 : 1
+  const chosenQuant = quants[qIdx]
+
+  // Step 2: parameter size
+  const filtered = catalogue.filter((m) => m.quant === chosenQuant)
+  let recIdx = 0
+  for (let i = filtered.length - 1; i >= 0; i--) {
+    if (filtered[i].sizeGb * 1.3 <= freeGb) { recIdx = i; break }
+  }
+
+  console.log('')
+  console.log(`  Step 2: Parameter size (${chosenQuant})`)
+  console.log('  ──────────────────────────────────────')
+  console.log('')
+
+  filtered.forEach((m, i) => {
+    const num = String(i + 1).padStart(3)
+    const params = `${m.params.toFixed(1)}B`.padEnd(10)
+    const name = m.model.padEnd(48)
+    const size = `${m.sizeGb.toFixed(1)} GB`.padStart(10)
+    const fits = m.sizeGb * 1.3 <= freeGb ? ' ✓' : ' ✗'
+    const rec = i === recIdx ? '  ← recommended' : ''
+    console.log(`  ${num}  ${params} ${name} ${size}  ${fits}${rec}`)
+  })
+
+  console.log('')
+  const mAnswer = await ask(`  Pick model (1–${filtered.length}) [${recIdx + 1}]: `)
+  let mIdx = recIdx
+  if (mAnswer) {
+    const n = Number(mAnswer)
+    if (Number.isInteger(n) && n >= 1 && n <= filtered.length) mIdx = n - 1
+  }
+
+  const selected = filtered[mIdx]
+  console.log('')
+  line(info, `Selected: ${selected.model} (${selected.quant}, ${selected.params}B, ${selected.sizeGb} GB)`)
 
   const confirm = await ask(`\n  Pull ${selected.model}? [Y/n] `)
   if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
