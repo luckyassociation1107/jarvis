@@ -8,27 +8,29 @@ reason it is not built yet stated plainly rather than dressed up.
 
 ### 1. One download, one click, from a downloaded folder
 
-`START.cmd` (Windows), `START.command` (macOS), `START.sh` (Linux) — double-click
-any of them in the extracted folder and the whole thing happens: Node is found or
-bootstrapped, `npm ci` installs from the lockfile, the UI is built, the bridge
-and the HUD start, and the setup page opens. One button on that page downloads
-the model runtime and the stack this machine fits.
+`START.cmd` — double-click it in the extracted folder and the whole thing
+happens: Node is found or bootstrapped, `npm ci` installs from the lockfile, the
+UI is built, the bridge and the HUD start, and the setup page opens. One button
+on that page downloads the model runtime and the stack this machine fits.
+Windows is the only target: the macOS and Linux launchers were removed with the
+rest of the non-Windows code, and Linux remains only as the host the test suites
+run on.
 
-`START.cmd auto` / `./START.sh auto` (or `build.sh --auto` / `build.ps1 -Auto`)
-goes further: the fitting stack is chosen by the same rule the page preselects,
-installed in the open, printed step by step, and the assistant is usable when it
-finishes. That is the actual one-click path.
+`START.cmd auto` (or `build.ps1 -Auto`) goes further: the fitting stack is
+chosen by the same rule the page preselects, installed in the open, printed step
+by step, and the assistant is usable when it finishes. That is the actual
+one-click path.
 
 ### 2. The runtime downloads with resume and a checksum
 
-`bridge/portable-runtime.mjs` resolves the archive from the release's own asset
-list (the names moved from `.tgz` to `.tar.zst` and will move again), downloads
-it to a `.part` file, resumes with a `Range` request when the connection drops,
-verifies the SHA-256 the release publishes (or says `verified: false` when it
-publishes none), and unpacks it — tar, tar.gz, tar.zst and zip — in Node itself,
-so Windows needs no `unzip` and Linux needs no `zstd` binary. Covered by
-`npm run test:runtime` against a local mock release with a Range server, a
-deliberately dropped connection, a corrupt checksum and a hand-built zip.
+`bridge/portable-runtime.mjs` resolves the Windows zip from the release's own
+asset list (so a rename upstream cannot 404 an install), downloads it to a
+`.part` file, resumes with a `Range` request when the connection drops, verifies
+the SHA-256 the release publishes (or says `verified: false` when it publishes
+none), and unpacks it in Node itself with a CRC check per entry — Windows has no
+`unzip`. Covered by `npm run test:runtime` against a local mock release with a
+Range server, a deliberately dropped connection, a corrupt checksum, a bad CRC
+and a hostile entry.
 
 ### 3. AMD vs NVIDIA is a real choice, not a guess
 

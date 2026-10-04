@@ -15,18 +15,12 @@
  * fails.
  */
 
-/** Where the official installer lives for each platform. */
+/** The official Windows installer, for people who would rather manage it themselves. */
 export const OLLAMA_DOWNLOAD = Object.freeze({
   win32: 'https://ollama.com/download/OllamaSetup.exe',
-  darwin: 'https://ollama.com/download/Ollama.dmg',
-  // The Linux archive name changes with the release format, so link the page.
-  linux: 'https://ollama.com/download',
 })
 
-/** The one-line command for the platforms where a package manager is normal. */
-export const OLLAMA_COMMAND = 'curl -fsSL https://ollama.com/install.sh | sh'
-
-const PLATFORM_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
+const PLATFORM_NAME = { win32: 'Windows' }
 
 /**
  * The whole page, as a string.
@@ -34,13 +28,11 @@ const PLATFORM_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
  * @param {{ platform?: string, port?: number, hudUrl?: string }} options
  */
 export function installerPage({ platform = process.platform, port = 8787, hudUrl = null } = {}) {
-  const download = OLLAMA_DOWNLOAD[platform] ?? OLLAMA_DOWNLOAD.linux
-  const osName = PLATFORM_NAME[platform] ?? platform
+  const download = OLLAMA_DOWNLOAD.win32
+  const osName = PLATFORM_NAME[platform] ?? 'Windows'
   const runtimeLine = platform === 'win32'
-    ? `Download the installer and run it, then come back and press re-check.`
-    : platform === 'darwin'
-      ? `Open the disk image and copy Ollama to Applications, then press re-check.`
-      : `Unpack it anywhere on your PATH, or run the command below, then press re-check.`
+    ? 'Download the installer and run it, then come back and press re-check.'
+    : `This page sets up Windows; this host is ${platform}, so the project runtime cannot be unpacked here. Every other part still runs.`
 
   return `<!doctype html>
 <html lang="en">
@@ -133,7 +125,6 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
 <script>
 (function () {
   var DOWNLOAD = ${JSON.stringify(download)}
-  var COMMAND = ${JSON.stringify(platform === 'linux' ? OLLAMA_COMMAND : null)}
   var HUD = ${JSON.stringify(hudUrl)}
   var OS = ${JSON.stringify(osName)}
   var state = { plan: null, tiers: [], selected: null, job: null, poll: null, fitsOnly: false, runtime: null, variant: 'default' }
@@ -174,7 +165,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     var portable = rt.portable || {}
     var html = '<div class="grid">'
       + stat('ollama', running ? 'running' : (rt.ollamaInstalled ? 'installed, not running' : 'not installed'), running ? 'ok' : 'bad')
-      + stat('project runtime', portable.present ? 'ready in models/runtime' : (portable.supported ? 'not downloaded yet' : 'not published for this platform'), portable.present ? 'ok' : '')
+      + stat('project runtime', portable.present ? 'ready in models/runtime' : (portable.supported ? 'not downloaded yet' : 'Windows only — this host cannot run it'), portable.present ? 'ok' : '')
       + stat('models ready', ready + ' / ' + slots.length, ready === slots.length && slots.length ? 'ok' : 'bad')
       + '</div>'
       + (running && ready < slots.length
@@ -204,9 +195,8 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
         })
         html += '</div>'
       }
-      html += '<p class="note muted" style="font-size:13px">Already have Ollama, or want it managed by the system? ' + ${JSON.stringify(runtimeLine)} + '</p>'
+      html += '<p class="note muted" style="font-size:13px">Already have Ollama, or want it managed by Windows itself? ' + ${JSON.stringify(runtimeLine)} + '</p>'
       html += '<div class="actions"><a href="' + DOWNLOAD + '" target="_blank" rel="noreferrer"><button>Download the ' + OS + ' installer instead</button></a>'
-      if (COMMAND) html += '<code>' + COMMAND + '</code>'
       html += '<span style="flex:1"></span><button id="recheck">Re-check</button></div>'
     }
     el('runtime').innerHTML = html

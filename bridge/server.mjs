@@ -499,9 +499,9 @@ This machine — the command line and the desktop:
   an unfocused type is a message to the wrong program — the worst kind of
   silent failure. When the target is a browser page you can name, use the
   \`chrome_*\` tools instead; they are exact where a click is approximate.
-- Check \`desktop_capabilities\` before promising pointer control. On a headless
-  host, or with xdotool or cliclick missing, say what is missing rather than
-  reporting an action that never happened.
+- Check \`desktop_capabilities\` before promising pointer control. JARVIS drives
+  the desktop on Windows through PowerShell and user32 — nothing to install. On
+  any other host it is off, and saying so is the honest answer.
 - Climbing the ladder, worst case last: the browser tools, then the desktop
   tools, then the command line. Prefer the narrowest tool that finishes the job.
 - Launching, typing, clicking and quitting all change the user's screen while
@@ -541,8 +541,9 @@ Using tools:
  * Where /file is permitted to read from, and how big a read may get.
  *
  * The roots are realpath'd once at boot so the containment check below compares
- * like with like — on macOS os.tmpdir() is a symlink into /private/var, and a
- * string prefix test against the unresolved form would reject every screenshot.
+ * like with like: Windows resolves short 8.3 names (PROGRA~1) and junctions to
+ * their long form, and a string prefix test against the unresolved path would
+ * reject a screenshot that is genuinely inside the folder.
  */
 const IMAGE_TYPES = {
   '.png': 'image/png',
@@ -559,16 +560,16 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024
 
 const FILE_ROOTS = [
   homedir(),
-  // Both temp directories, because on macOS os.tmpdir() is the per-user
-  // $TMPDIR under /var/folders while half the tools that take a screenshot
-  // still write it to /tmp. Dropping one of them loses real panels.
+  // The per-user %TEMP%, where almost everything that takes a screenshot and
+  // hands it over writes it.
   tmpdir(),
-  '/tmp',
+  // Something wrote to the machine-wide temp instead: still a real screenshot.
+  process.env.SystemRoot ? join(process.env.SystemRoot, 'Temp') : null,
   ...(process.env.JARVIS_FILE_ROOTS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-].map((root) => {
+].filter(Boolean).map((root) => {
   try {
     return realpathSync(root)
   } catch {
@@ -904,7 +905,7 @@ const handleRequest = async (req, res) => {
         totalRamGb: +(totalmem() / 1073741824).toFixed(1),
         diskFreeGb: diskFreeGb(),
         ollamaInstalled: Boolean(programPath('ollama')),
-        downloadUrl: OLLAMA_DOWNLOAD[process.platform] ?? OLLAMA_DOWNLOAD.linux,
+        downloadUrl: OLLAMA_DOWNLOAD.win32,
         // The standalone build the page can fetch for a machine that has
         // nothing yet: same binary, no installer, unpacked inside this repo.
         // Read per request so a download that just finished shows up here.
@@ -1425,8 +1426,8 @@ const handleConnection = async (socket) => {
     // The command line. Programs are checked against an allowlist unless the
     // user asked for the whole shell; the deny list holds in every mode.
     jarvis_shell: shellServer({ allowWrites: ALLOW_WRITES }),
-    // The rest of the desktop: windows, pointer, keyboard and installed apps,
-    // on all three platforms. Acting tools are built only in write mode.
+    // The rest of the desktop: windows, pointer, keyboard and installed apps.
+    // Windows only, and acting tools are built only in write mode.
     jarvis_desktop: desktopServer({ allowWrites: ALLOW_WRITES }),
   }
 

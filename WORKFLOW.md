@@ -34,7 +34,7 @@ first.
 ## RAM planner and models
 
 There is no fixed split. At bridge startup the planner samples how much RAM is
-free right now — `MemAvailable` on Linux, so reclaimable page cache counts —
+free right now — the figure Windows reports as available —
 and gives the AI the share the user asked for, 100% by default, optionally
 bounded by a hard gigabyte cap. The share comes from the MODEL STACK panel
 (APPLY / RESCAN), from `JARVIS_RAM_SHARE` / `JARVIS_RAM_CAP_GB`, or from the
@@ -137,30 +137,31 @@ Three built-in servers reach the machine, and all of them share one write gate:
   (`JARVIS_SHELL_ALLOW` extends it, `JARVIS_SHELL_MODE=full` skips it) plus a
   deny list that holds in every mode. Working directories are confined to home,
   temp and the project unless `JARVIS_SHELL_ROOTS` adds more.
-- `jarvis_desktop` — the rest of the desktop on Windows, macOS and Linux:
+- `jarvis_desktop` — the rest of the desktop, on Windows:
   installed apps, windows, pointer, keyboard and typed text. `list_apps`,
   `list_windows` and `desktop_capabilities` are read-only; `launch_app`,
   `quit_app`, `focus_window`, `window_action`, `type_text`, `press_keys`,
   `move_mouse`, `click` and `scroll` are registered only in write mode.
 
 Run `npm run bridge:writes` or `npm start -- --writes` for the acting surface.
-`npm run test:control` checks the policy helpers and per-platform arguments
-without running a command or moving a pointer. `desktop_capabilities` reports
-what this session can actually do — a headless host, a Wayland session or a
-missing `xdotool`/`cliclick` is stated rather than silently ignored. This is not
-an unrestricted shell and does not produce an EXE or desktop bundle. Other
-effectful MCP tools remain behind the same write gate.
+`npm run test:control` checks the policy helpers and the Windows argv every
+operation turns into without running a command or moving a pointer.
+`desktop_capabilities` reports what this host can actually do: PowerShell,
+`user32` and SendKeys are already there on Windows, and on anything else the
+tools say so rather than half-working. This is not an unrestricted shell and
+does not produce an EXE or desktop bundle. Other effectful MCP tools remain
+behind the same write gate.
 
 ## Local setup
 
-Download the folder, open it, and double-click the launcher: `START.cmd` on
-Windows, `START.command` on macOS, `START.sh` on Linux. One click does the whole
-first run — Node check, `npm ci`, web build, preflight, bridge and HUD — and
-opens the setup page, where one button installs the runtime and the stack this
-machine fits. Add `auto` (`START.cmd auto`, `./START.sh auto`) to skip even that
-press: the fitting stack is chosen and installed with its progress printed in
-the window. `bash ./build.sh --auto` and `./build.ps1 -Auto` are the same path
-from a terminal.
+Download the folder, open it, and double-click `START.cmd`. JARVIS is a Windows
+program, so that is the only launcher; there is no macOS or Linux one. One click
+does the whole first run — Node check, `npm ci`, web build, preflight, bridge and
+HUD — and opens the setup page, where one button installs the runtime and the
+stack this machine fits. Add `auto` (`START.cmd auto`) to skip even that press:
+the fitting stack is chosen and installed with its progress printed in the
+window. `powershell -ExecutionPolicy Bypass -File .\build.ps1 -Auto` is the same
+path from a terminal.
 
 ### The manual route
 
@@ -185,30 +186,25 @@ pieces stay apart: `npm run doctor` reports, `npm run setup` hosts the page, and
 `npm run models:plan` / `npm run models:install` remain the scripted path (the
 planner is exercised by `npm run test:installers`).
 
-The platform scripts still exist and no longer install anything themselves:
+The build script still exists and no longer installs anything itself:
 
 ```powershell
 .\build.ps1
 ```
 
-```bash
-bash ./build.sh
-```
-
-They check for Node.js 20+ and npm. If Node is missing, `build.ps1` tries
-WinGet; `build.sh` uses a version manager/Homebrew or downloads and verifies a
-user-local Node 24 LTS binary. If Windows blocks the script, invoke it with
-`powershell -ExecutionPolicy Bypass -File .\build.ps1`. They then install missing
-npm packages, vendor required browser assets, build the web UI, run the
-read-only `npm run doctor` preflight, and start the bridge and Vite together —
+It checks for Node.js 20+ and npm. If Node is missing, `build.ps1` tries WinGet,
+and falls back to downloading and verifying a user-local Node 24 LTS build. If
+Windows blocks the script, invoke it with
+`powershell -ExecutionPolicy Bypass -File .\build.ps1`. It then installs missing
+npm packages, vendors required browser assets, builds the web UI, runs the
+read-only `npm run doctor` preflight, and starts the bridge and Vite together —
 and because `npm start` is what launches them, the setup page opens
 automatically whenever the stack is incomplete. Open the printed URL in Chrome
 or Edge, click **INITIALISE**, and allow the microphone. Keep the terminal open;
-Ctrl-C stops the app. `bash ./build.sh --skip-ai-models` or
-`.\build.ps1 -SkipAiModels` builds and launches without the model checks (they
-now only point at the setup page); `--no-launch` / `-NoLaunch` skips the launch.
-The scripts remain web-only: no desktop/EXE bundle. Ollama defaults to port
-`11434`; the bridge uses port `8787`.
+Ctrl-C stops the app. `.\build.ps1 -SkipAiModels` builds and launches without
+the model checks (they now only point at the setup page); `-NoLaunch` skips the
+launch. The script remains web-only: no desktop/EXE bundle. Ollama defaults to
+port `11434`; the bridge uses port `8787`.
 
 
 For a manual development workflow, run `npm ci`, `npm run build`, and
@@ -216,11 +212,10 @@ For a manual development workflow, run `npm ci`, `npm run build`, and
 
 ## The launchers
 
-`START.cmd`, `START.command` and `START.sh` are small: they call the build script
-for the platform and keep the window open so a failure can be read. All the
-substance stays in `build.sh` / `build.ps1`, so there is one setup path and not
-two — the launchers exist because a user who downloaded a folder should not have
-to know that `npm ci` is a thing.
+`START.cmd` is small: it calls `build.ps1` and keeps the window open so a failure
+can be read. All the substance stays in the PowerShell script, so there is one
+setup path and not two — the launcher exists because a user who downloaded a
+folder should not have to know that `npm ci` is a thing.
 
 ## The terminal client
 

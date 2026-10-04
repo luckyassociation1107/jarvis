@@ -131,7 +131,7 @@ function run(bin, args) {
 /** Resolve a binary on PATH, or accept an explicit path. */
 async function which(bin) {
   if (bin.includes('/') || bin.includes('\\')) return (await fileAt(bin)) ? bin : null
-  const candidates = process.platform === 'win32' && !extname(bin) ? [`${bin}.exe`, bin] : [bin]
+  const candidates = extname(bin) ? [bin] : [`${bin}.exe`, bin]
   for (const directory of (process.env.PATH ?? '').split(delimiter)) {
     if (!directory) continue
     for (const name of candidates) {

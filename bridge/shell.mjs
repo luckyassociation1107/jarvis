@@ -49,9 +49,9 @@ const MAX_OUTPUT_CHARS = 20_000
  * it, "sh -c anything" would pass every check that follows.
  */
 const SHELL_ESCAPES = new Set([
-  'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh',
-  'env', 'xargs', 'sudo', 'su', 'doas', 'nohup', 'setsid', 'script',
-  'tmux', 'screen', 'expect', 'runuser', 'pkexec',
+  'cmd', 'powershell', 'pwsh', 'wscript', 'cscript', 'mshta', 'rundll32',
+  'wmic', 'schtasks', 'reg', 'regedit', 'msiexec', 'forfiles', 'start',
+  'wt', 'conhost', 'psexec',
 ])
 
 /**
@@ -60,38 +60,33 @@ const SHELL_ESCAPES = new Set([
  * the write gate in front of the whole server is the real control.
  */
 export const DEFAULT_ALLOW = Object.freeze([
-  // files and text
-  'ls', 'pwd', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'fd', 'file',
-  'stat', 'du', 'df', 'tree', 'echo', 'printf', 'sort', 'uniq', 'cut', 'tr',
-  'sed', 'awk', 'jq', 'yq', 'diff', 'patch', 'touch', 'mkdir', 'cp', 'mv', 'rm',
-  'rmdir', 'trash', 'ln', 'chmod', 'chown', 'basename', 'dirname', 'realpath',
-  'readlink', 'tee', 'kill', 'pkill', 'killall',
-  'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'xz', 'zstd', 'base64', 'xxd',
-  'md5sum', 'sha256sum', 'shasum', 'openssl', 'uuidgen', 'date', 'cal', 'seq',
-  'sleep', 'which', 'where', 'whoami', 'id', 'hostname', 'uname', 'uptime',
-  'printenv', 'locale', 'wc', 'less', 'more',
+  // files and text — cmd and PowerShell aliases that resolve to real programs
+  'dir', 'type', 'find', 'findstr', 'sort', 'more', 'fc', 'comp',
+  'copy', 'xcopy', 'robocopy', 'move', 'ren', 'del', 'mkdir', 'rmdir', 'tree',
+  'attrib', 'icacls', 'takeown', 'mklink', 'where', 'whoami', 'hostname',
+  'echo', 'set', 'path', 'date', 'time', 'ver', 'systeminfo', 'fsutil', 'compact',
+  'certutil', 'clip', 'tar', 'expand', 'makecab', 'cabarc',
+  'base64',
   // system and process inspection
-  'ps', 'top', 'htop', 'free', 'vm_stat', 'lsof', 'ss', 'netstat', 'ifconfig',
-  'ip', 'ping', 'dig', 'nslookup', 'host', 'traceroute', 'curl', 'wget',
-  'systemctl', 'journalctl', 'launchctl', 'sc', 'tasklist', 'taskkill',
-  'defaults', 'sw_vers', 'osascript', 'open', 'xdg-open', 'wl-copy', 'pbcopy',
-  'pbpaste', 'xclip', 'caffeinate',
+  'tasklist', 'taskkill', 'sc', 'net', 'netstat', 'ping', 'tracert', 'pathping',
+  'nslookup', 'ipconfig', 'route', 'arp', 'getmac', 'nbtstat', 'netsh',
+  'powercfg', 'shutdown', 'openfiles', 'query', 'quser',
+  'curl', 'wget', 'bitsadmin', 'telnet', 'ftp', 'ssh', 'scp', 'sftp',
+  'pnputil', 'driverquery', 'wevtutil', 'logman', 'perfmon', 'typeperf',
   // editors and viewers
-  'nano', 'vim', 'nvim', 'code', 'mate', 'subl',
+  'notepad', 'code', 'code-insiders', 'subl', 'notepad++', 'explorer',
   // toolchains (a developer machine is the expected host)
   'node', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'deno',
-  'python', 'python3', 'pip', 'pip3', 'uv', 'poetry', 'pytest',
-  'git', 'gh', 'svn', 'hg',
-  'make', 'cmake', 'ninja', 'cargo', 'rustc', 'go', 'gofmt',
-  'java', 'javac', 'mvn', 'gradle', 'dotnet', 'ruby', 'gem', 'bundle',
-  'php', 'composer', 'perl', 'lua',
+  'python', 'python3', 'py', 'pip', 'pip3', 'uv', 'poetry', 'pytest',
+  'git', 'gh', 'svn', 'hg', 'winget', 'choco', 'scoop',
+  'make', 'cmake', 'ninja', 'msbuild', 'cargo', 'rustc', 'go', 'gofmt',
+  'java', 'javac', 'mvn', 'gradle', 'dotnet',
+  'ruby', 'gem', 'bundle', 'php', 'composer', 'perl', 'lua',
   'docker', 'podman', 'docker-compose', 'kubectl', 'helm', 'terraform',
   'ansible', 'vagrant',
   'sqlite3', 'psql', 'mysql', 'mongosh', 'redis-cli',
-  'brew', 'apt', 'apt-get', 'snap', 'dnf', 'pacman', 'yum', 'pipx',
-  'ffmpeg', 'ffprobe', 'convert', 'magick', 'pandoc', 'pdftotext', 'qpdf',
-  'sips', 'mediafiles', 'optipng', 'pngquant', 'cwebp',
-  'ollama', 'whisper', 'whisper-cli', 'yt-dlp', 'gh',
+  'ffmpeg', 'ffprobe', 'magick', 'pandoc', 'pdftotext', 'qpdf',
+  'ollama', 'whisper', 'whisper-cli', 'yt-dlp',
 ].filter((program) => !SHELL_ESCAPES.has(program)))
 
 /**
@@ -116,6 +111,11 @@ export const DENY_RULES = Object.freeze([
   { re: /:\s*\(\s*\)\s*\{[^}]*\}\s*;\s*:/, reason: 'fork bomb' },
   { re: /\b(sudo|doas|su)\s+(-\w+\s+)*(rm|dd|mkfs|shutdown|reboot)\b/i, reason: 'privileged destructive command' },
   { re: /\breg\s+(delete|add)\b/i, reason: 'registry write' },
+  { re: /\b(del|erase|rd|rmdir)\b[^\n]*\s[a-z]:\\?(\s|$|\*)/i, reason: 'delete of a whole drive' },
+  { re: /\b(del|erase|rd|rmdir)\b[^\n]*\s(\*\.[a-z0-9]+\s*$|[a-z]:\\?(Windows|Program Files|ProgramData|Users)\b)/i, reason: 'delete of a system directory or every file of a kind' },
+  { re: /\bRemove-Item\b[^\n]*(-Recurse|-Force)[^\n]*[a-z]:\\?(Windows|Program Files|ProgramData|Users)?(\s|$|\*)/i, reason: 'recursive delete of a drive or system directory' },
+  { re: /\b(vssadmin\s+delete|wbadmin\s+delete|bcdedit|bootrec|vssadmin\s+resize|cipher\s+\/w)\b/i, reason: 'recovery options or boot configuration destroyed' },
+  { re: /\b(iwr|Invoke-WebRequest|Invoke-RestMethod)\b[^\n|]*\|\s*(iex|Invoke-Expression)/i, reason: 'piping a download straight into an interpreter' },
   { re: /\bnc\b[^\n]*\s-[a-z]*e[a-z]*\b/i, reason: 'reverse shell' },
   { re: /\bhistory\s+-c\b|\bclear\s*;?\s*$|>\s*~\/\.\w*(history|profile|bashrc|zshrc)/i, reason: 'tampering with shell history or startup files' },
 ])
@@ -250,12 +250,12 @@ export function withinRoots(target, roots = shellRoots()) {
   return roots.some((root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep))
 }
 
-/** Resolve a program against PATH, honouring PATHEXT on Windows. */
+/** Resolve a program against PATH, honouring PATHEXT. */
 export function programPath(program, env = process.env) {
   const name = String(program ?? '').trim()
   if (!name) return null
   const candidates = [name]
-  if (process.platform === 'win32' && !/\.[a-z0-9]+$/i.test(name)) {
+  if (!/\.[a-z0-9]+$/i.test(name)) {
     for (const ext of String(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';')) {
       if (ext.trim()) candidates.push(`${name}${ext.trim().toLowerCase()}`)
     }
@@ -346,13 +346,11 @@ export async function commandInfo(program, env = process.env) {
   }
 }
 
-/** Read-only process inventory, in the platform's own shape. */
+/** Read-only process inventory, as Windows reports it. */
 export async function listProcesses({ match, limit = 40 } = {}) {
   const cap = Math.min(Math.max(Number(limit) || 40, 1), 200)
   try {
-    const rows = process.platform === 'win32'
-      ? await execFileAsync('tasklist', ['/fo', 'csv', '/nh'], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 })
-      : await execFileAsync('ps', ['-axo', 'pid,ppid,pcpu,pmem,comm,args'], { maxBuffer: 4 * 1024 * 1024 })
+    const rows = await execFileAsync('tasklist', ['/fo', 'csv', '/nh'], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 })
     const lines = String(rows.stdout ?? '').split(/\r?\n/).filter(Boolean)
     const filtered = match ? lines.filter((line) => line.toLowerCase().includes(String(match).toLowerCase())) : lines
     const shown = filtered.slice(0, cap)

@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * The one-click runtime, proved without a 1.3 GiB download.
+ * The one-click Windows runtime, proved without a 1.3 GiB download.
  *
  * Everything here runs against two local servers: one that answers like
- * GitHub's release API, and one that serves real archives (built during the
- * test) with Range support, so resume and checksum verification are exercised
- * for real rather than described. The archives are tiny — the layouts are what
+ * GitHub's release API, and one that serves real zips (built during the test)
+ * with Range support, so resume and checksum verification are exercised for
+ * real rather than described. The archives are tiny — the layouts are what
  * matter, and the layouts are what would break an install.
+ *
+ * The zip is written by hand here for the same reason the module unpacks it by
+ * hand: neither Windows nor the sandbox has `unzip` on PATH, and a test that
+ * skipped the real format would be a test of nothing.
  *
  * Run: node scripts/test-runtime.mjs
  */
@@ -61,63 +65,8 @@ mkdirSync(served, { recursive: true })
 
 /* ------------------------------------------------------------------ archives */
 
-/** A tar entry: 512-byte header plus padded data. */
-function tarHeader(name, size, type = '0', link = '') {
-  const header = Buffer.alloc(512)
-  header.write(name, 0, 100, 'utf8')
-  header.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'utf8')
-  header.write(type, 156, 1, 'utf8')
-  if (link) header.write(link, 157, 100, 'utf8')
-  header.write('ustar\0' + '00', 257, 8, 'utf8')
-  // Checksum: sum of the header with the checksum field read as spaces.
-  header.write('        ', 148, 8, 'utf8')
-  let sum = 0
-  for (const byte of header) sum += byte
-  header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'utf8')
-  return header
-}
-
-function tarEntry(name, body, type = '0', link = '') {
-  const data = Buffer.isBuffer(body) ? body : Buffer.from(body)
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512)
-  data.copy(padded)
-  return { header: tarHeader(name, data.length, type, link), data: padded }
-}
-
-function buildTar(entries) {
-  const parts = []
-  for (const entry of entries) parts.push(entry.header, entry.data)
-  parts.push(Buffer.alloc(1024))
-  return Buffer.concat(parts)
-}
-
-const binary = '#!/bin/sh\necho fake ollama\n'
-const tarPlain = buildTar([
-  tarEntry('bin/', Buffer.alloc(0), '5'),
-  tarEntry('bin/ollama', binary),
-  tarEntry('lib/', Buffer.alloc(0), '5'),
-  tarEntry('lib/thing.so', 'not really a library'),
-])
-const tarWithLink = buildTar([
-  tarEntry('bin/', Buffer.alloc(0), '5'),
-  tarEntry('bin/ollama', binary),
-  tarEntry('bin/ollama-alias', Buffer.alloc(0), '2', 'ollama'),
-])
-
-const archives = {
-  'ollama-linux-amd64.tar.zst': typeof zlib.zstdCompressSync === 'function'
-    ? zlib.zstdCompressSync(tarPlain)
-    : null,
-  'ollama-linux-amd64.tgz': zlib.gzipSync(tarPlain),
-  'ollama-linux-amd64-rocm.tar.zst': typeof zlib.zstdCompressSync === 'function'
-    ? zlib.zstdCompressSync(buildTar([tarEntry('bin/', Buffer.alloc(0), '5'), tarEntry('bin/ollama', '#!/bin/sh\necho rocm ollama\n')]))
-    : null,
-  'ollama-windows-amd64.zip': null, // built below, needs a real deflate
-  'ollama-windows-arm64.zip': null,
-  'ollama-darwin.tgz': zlib.gzipSync(buildTar([tarEntry('ollama', binary)])),
-}
-
-/** A zip with a stored entry and a deflated entry, written by hand. */
+/* A zip with stored and deflated entries, written by hand — the same layout
+ * `ollama-windows-amd64.zip` uses: ollama.exe at the root, libraries in lib/. */
 function buildZip(entries) {
   const locals = []
   const central = []
@@ -175,23 +124,34 @@ function crc32(buffer) {
   return ((crc ^ -1) >>> 0) >>> 0
 }
 
+/* A fake ollama.exe. It starts with a shebang and exits immediately so the
+ * sandbox host, which will try to run it, does so quietly: Windows would see a
+ * PE header here, the test only needs the bytes and the size. */
+const exeBody = Buffer.concat([Buffer.from('#!/bin/sh\nexit 1\n'), Buffer.alloc(4096, 0x23)])
 const winZip = buildZip([
-  ['ollama.exe', Buffer.concat([Buffer.from('MZ fake windows binary\n'), Buffer.alloc(4096, 7)]), 8],
+  ['ollama.exe', exeBody, 8],
   ['lib/ollama/', Buffer.alloc(0), 0],
   ['lib/ollama/thing.dll', 'a library', 8],
 ])
-archives['ollama-windows-amd64.zip'] = winZip
-archives['ollama-windows-arm64.zip'] = winZip
+const rocmZip = buildZip([
+  ['ollama.exe', Buffer.concat([Buffer.from('MZ fake rocm binary\n'), Buffer.alloc(2048, 3)]), 8],
+  ['lib/ollama/rocm/thing.dll', 'a rocm library', 8],
+])
+const armZip = buildZip([
+  ['ollama.exe', Buffer.concat([Buffer.from('MZ fake arm binary\n'), Buffer.alloc(1024, 5)]), 0],
+])
 
-for (const [name, body] of Object.entries(archives)) {
-  if (body) writeFileSync(join(served, name), body)
+const archives = {
+  'ollama-windows-amd64.zip': winZip,
+  'ollama-windows-arm64.zip': armZip,
+  'ollama-windows-amd64-rocm.zip': rocmZip,
 }
+
+for (const [name, body] of Object.entries(archives)) writeFileSync(join(served, name), body)
 writeFileSync(join(served, 'LICENSE'), 'not an archive at all')
 
 const digests = Object.fromEntries(
-  Object.entries(archives)
-    .filter(([, body]) => body)
-    .map(([name, body]) => [name, createHash('sha256').update(body).digest('hex')]),
+  Object.entries(archives).map(([name, body]) => [name, createHash('sha256').update(body).digest('hex')]),
 )
 writeFileSync(join(served, 'sha256sum.txt'), Object.entries(digests).map(([name, hash]) => `${hash}  ./${name}`).join('\n'))
 
@@ -229,14 +189,12 @@ const assetServer = createServer((req, res) => {
   res.end(body)
 })
 
-const releaseAssets = Object.keys(archives)
-  .filter((name) => archives[name])
-  .map((name) => ({
-    name,
-    size: statSync(join(served, name)).size,
-    browser_download_url: '', // filled in once the port is known
-    digest: `sha256:${digests[name]}`,
-  }))
+const releaseAssets = Object.keys(archives).map((name) => ({
+  name,
+  size: statSync(join(served, name)).size,
+  browser_download_url: '', // filled in once the port is known
+  digest: `sha256:${digests[name]}`,
+}))
 
 let apiMode = 'ok'
 const apiServer = createServer((req, res) => {
@@ -264,48 +222,57 @@ const env = {
 
 /* ------------------------------------------------------------------ the plan */
 
-assert.deepEqual(
-  candidateNames({ platform: 'linux', arch: 'x64' }).slice(0, 2),
-  ['ollama-linux-amd64.tar.zst', 'ollama-linux-amd64.tgz'],
-  'Linux looks for the current zstd asset first and the older tarball second — the names moved and both exist in the wild',
-)
-assert.ok(candidateNames({ platform: 'linux', arch: 'x64', variant: 'rocm' })[0].includes('rocm'), 'the AMD build is a different asset, not a flag')
+assert.equal(candidateNames({ platform: 'win32', arch: 'x64' })[0], 'ollama-windows-amd64.zip', 'the default Windows build is one zip')
+assert.equal(candidateNames({ platform: 'win32', arch: 'x64', variant: 'rocm' })[0], 'ollama-windows-amd64-rocm.zip', 'the AMD build is a different asset, not a flag')
 assert.equal(candidateNames({ platform: 'win32', arch: 'arm64' })[0], 'ollama-windows-arm64.zip', 'Windows on ARM gets its own zip')
-assert.equal(candidateNames({ platform: 'darwin', arch: 'arm64' })[0], 'ollama-darwin.tgz', 'macOS has one universal archive')
-assert.deepEqual(['a.zip', 'b.tar.zst', 'c.tgz', 'd.tar'].map(archiveKind), ['zip', 'tar.zst', 'tar.gz', 'tar'], 'each naming convention maps to an unpacker')
-assert.equal(archiveKind('ollama-linux-amd64.tar.zst'), 'tar.zst', 'and zstd is not mistaken for gzip')
+assert.deepEqual(candidateNames({ platform: 'darwin', arch: 'arm64' }), [], 'macOS was dropped: nothing is composed for it')
+assert.deepEqual(candidateNames({ platform: 'linux', arch: 'x64' }), [], 'and neither is Linux')
+assert.equal(archiveKind('ollama-windows-amd64.zip'), 'zip', 'the one format Windows ships is the one the module unpacks')
+assert.equal(archiveKind('ollama-linux-amd64.tar.zst'), null, 'a tarball is no longer something this module claims to handle')
 
-const picked = pickAsset(releaseAssets.map((asset) => ({ name: asset.name, size: asset.size })), { platform: 'linux', arch: 'x64' })
-assert.equal(picked.name, 'ollama-linux-amd64.tar.zst', 'the release asset list is what decides, so a rename upstream does not break an install')
-assert.equal(picked.kind, 'tar.zst', 'and the unpacker follows the picked name')
-const rocmPicked = pickAsset(releaseAssets.map((asset) => ({ name: asset.name })), { platform: 'linux', arch: 'x64', variant: 'rocm' })
-assert.equal(rocmPicked.name, 'ollama-linux-amd64-rocm.tar.zst', 'asking for the AMD build gets the AMD archive')
-assert.equal(pickAsset([{ name: 'ollama-linux-amd64.tar.zst' }], { platform: 'linux', arch: 'x64', variant: 'rocm' }), null, 'and it is not silently replaced by the default build')
+const picked = pickAsset(releaseAssets.map((asset) => ({ name: asset.name, size: asset.size })), { platform: 'win32', arch: 'x64' })
+assert.equal(picked.name, 'ollama-windows-amd64.zip', 'the release asset list is what decides, so a rename upstream does not break an install')
+const rocmPicked = pickAsset(releaseAssets.map((asset) => ({ name: asset.name })), { platform: 'win32', arch: 'x64', variant: 'rocm' })
+assert.equal(rocmPicked.name, 'ollama-windows-amd64-rocm.zip', 'asking for the AMD build gets the AMD archive')
+assert.equal(pickAsset([{ name: 'ollama-windows-amd64.zip' }], { platform: 'win32', arch: 'x64', variant: 'rocm' }), null, 'and it is not silently replaced by the default build')
+assert.equal(pickAsset(releaseAssets, { platform: 'linux', arch: 'x64' }), null, 'a Linux host gets no asset at all, rather than a wrong one')
 
-const plan = runtimePlan({ platform: 'linux', arch: 'x64', env: { JARVIS_RUNTIME_DIR: join(root, 'runtime') } })
-assert.equal(plan.bin, join('bin', 'ollama'), 'the Linux binary is under bin/, as the release lays it out')
-assert.ok(plan.path.startsWith(join(root, 'runtime')), 'and it is unpacked inside the folder JARVIS was told to use')
+const plan = runtimePlan({ platform: 'win32', arch: 'x64', env: { JARVIS_RUNTIME_DIR: join(root, 'runtime') } })
+assert.equal(plan.bin, 'ollama.exe', 'the Windows binary is ollama.exe at the archive root')
+assert.equal(plan.path, join(root, 'runtime', 'ollama.exe'), 'and it is unpacked inside the folder JARVIS was told to use')
+assert.equal(plan.kind, 'zip', 'with the unpacker chosen before the download even starts')
 assert.equal(runtimePlan({ platform: 'freebsd', arch: 'x64' }).supported, false, 'an unsupported platform says so instead of guessing')
-assert.equal(runtimePlan({ platform: 'linux', arch: 'riscv64' }).supported, false, 'and so does an unsupported architecture')
-assert.equal(safeEntryPath('/tmp/rt', 'bin/ollama'), '/tmp/rt/bin/ollama', 'ordinary entries land where they should')
-assert.ok(safeEntryPath('/tmp/rt', '../../etc/passwd').startsWith('/tmp/rt/'), 'a traversal entry is contained inside the runtime folder')
-assert.equal(safeEntryPath('/tmp/rt', '/etc/passwd'), null, 'an absolute entry is refused outright, not written')
-assert.equal(safeEntryPath('/tmp/rt', 'C:/Windows/system32'), null, 'and a Windows drive path is refused too')
+assert.equal(runtimePlan({ platform: 'win32', arch: 'riscv64' }).supported, false, 'and so does an unsupported architecture')
+assert.equal(runtimePlan({ platform: 'linux', arch: 'x64' }).supported, false, 'Linux is not a supported target any more, and says so plainly')
+
+const runtimeRoot = join(root, 'rt')
+assert.equal(safeEntryPath(runtimeRoot, 'lib/ollama/thing.dll'), join(runtimeRoot, 'lib', 'ollama', 'thing.dll'), 'ordinary entries land where they should')
+assert.equal(safeEntryPath(runtimeRoot, '../../etc/passwd'), null, 'a traversal entry is refused, not quietly rewritten into the folder')
+assert.equal(safeEntryPath(runtimeRoot, './lib/ollama/thing.dll'), join(runtimeRoot, 'lib', 'ollama', 'thing.dll'), 'while an ordinary ./ prefix is just a path')
+assert.equal(safeEntryPath(runtimeRoot, '/etc/passwd'), null, 'an absolute entry is refused outright, not written')
+assert.equal(safeEntryPath(runtimeRoot, 'C:/Windows/system32'), null, 'and a Windows drive path is refused too')
 
 /* ------------------------------------------------------------------- release */
 
-const release = await fetchRelease({ platform: 'linux', arch: 'x64', env })
+const release = await fetchRelease({ platform: 'win32', arch: 'x64', env })
 assert.equal(release.ok, true, 'the release metadata is read')
 assert.ok(release.asset.size > 0 && release.asset.sha256, 'and carries the real size and the published SHA-256 digest')
 
-const variants = await resolveVariants({ platform: 'linux', arch: 'x64', env })
+const variants = await resolveVariants({ platform: 'win32', arch: 'x64', env })
 assert.equal(variants.variants.length, 2, 'the AMD build is offered beside the default one')
 assert.ok(variants.variants[0].sizeBytes > 0, 'and the page can show how much each one downloads')
 assert.equal(variants.source, 'api', 'the sizes and checksums came from the release, not from a guess')
+assert.equal(variants.variants.every((variant) => variant.kind === 'zip'), true, 'both Windows builds unpack as zips')
 
-/* --------------------------------------------------------------------------- */
-  const suggested = rocmSuggested({ platform: 'linux', env: { ...env, PATH: join(root, 'no-rocm-here') } })
-  assert.equal(suggested, false, 'ROCm is not suggested when nothing AMD is installed')
+const armVariants = await resolveVariants({ platform: 'win32', arch: 'arm64', env })
+assert.equal(armVariants.variants.length, 1, 'ARM Windows is offered exactly the one build that exists for it')
+
+const unsupportedVariants = await resolveVariants({ platform: 'linux', arch: 'x64', env })
+assert.equal(unsupportedVariants.variants.length, 0, 'a host that is not Windows is offered nothing to download')
+assert.equal(unsupportedVariants.source, 'unsupported', 'and it is called unsupported, not a fallback URL that would fetch a zip it cannot run')
+
+const suggested = rocmSuggested({ env: { ...env, PATH: join(root, 'no-rocm-here') } })
+assert.equal(suggested, false, 'ROCm is not suggested when nothing AMD is installed')
 
 /* ------------------------------------------------------------------ download */
 
@@ -322,87 +289,88 @@ assert.ok(steps.some((step) => step.phase === 'runtime-verify'), 'verification i
 const twice = await downloadArchive({ asset: defaultAsset, dir: target, env })
 assert.equal(twice.skipped, true, 'pressing the button twice does not download twice')
 
-/* --------------------------------------------------------------------------- */
-  killAfter = Math.floor(defaultAsset.sizeBytes / 2)
-  const partialDir = join(root, 'resume')
-  const interrupted = await downloadArchive({ asset: defaultAsset, dir: partialDir, env })
-  assert.equal(interrupted.ok, false, 'a connection that drops mid-download fails')
-  assert.match(interrupted.error, /press the button again to resume/, 'and tells the user the download resumes rather than starting over')
-  assert.equal(interrupted.resumable, true, 'and reports itself as resumable')
-  const before = rangeHits
-  killAfter = null
-  const resumed = await downloadArchive({ asset: defaultAsset, dir: partialDir, env })
-  assert.equal(resumed.ok, true, 'the second attempt finishes the download')
-  assert.ok(rangeHits > before, 'using a Range request against the bytes already on disk')
-  assert.equal(statSync(resumed.path).size, defaultAsset.sizeBytes, 'and the finished file is whole')
-  assert.equal(resumed.verified, true, 'and still verified')
+/* A dropped connection, then the same button again. */
+killAfter = Math.floor(defaultAsset.sizeBytes / 2)
+const partialDir = join(root, 'resume')
+const interrupted = await downloadArchive({ asset: defaultAsset, dir: partialDir, env })
+assert.equal(interrupted.ok, false, 'a connection that drops mid-download fails')
+assert.match(interrupted.error, /press the button again to resume/, 'and tells the user the download resumes rather than starting over')
+assert.equal(interrupted.resumable, true, 'and reports itself as resumable')
+const before = rangeHits
+killAfter = null
+const resumed = await downloadArchive({ asset: defaultAsset, dir: partialDir, env })
+assert.equal(resumed.ok, true, 'the second attempt finishes the download')
+assert.ok(rangeHits > before, 'using a Range request against the bytes already on disk')
+assert.equal(statSync(resumed.path).size, defaultAsset.sizeBytes, 'and the finished file is whole')
+assert.equal(resumed.verified, true, 'and still verified')
 
-/* --------------------------------------------------------------------------- */
-  const badDir = join(root, 'corrupt')
-  const badAsset = { ...defaultAsset, sha256: 'f'.repeat(64) }
-  const corrupt = await downloadArchive({ asset: badAsset, dir: badDir, env })
-  assert.equal(corrupt.ok, false, 'a file that fails its checksum is refused')
-  assert.match(corrupt.error, /SHA-256/, 'with an error that names the check')
-  assert.equal(existsSync(join(badDir, badAsset.name)), false, 'and it is deleted rather than unpacked')
+/* A corrupted download must never be unpacked. */
+const badDir = join(root, 'corrupt')
+const badAsset = { ...defaultAsset, sha256: 'f'.repeat(64) }
+const corrupt = await downloadArchive({ asset: badAsset, dir: badDir, env })
+assert.equal(corrupt.ok, false, 'a file that fails its checksum is refused')
+assert.match(corrupt.error, /SHA-256/, 'with an error that names the check')
+assert.equal(existsSync(join(badDir, badAsset.name)), false, 'and it is deleted rather than unpacked')
 
-/* --------------------------------------------------------------------------- */
-  const looseDir = join(root, 'no-checksum')
-  const looseAsset = {
-    ...defaultAsset,
-    name: 'LICENSE',
-    url: `${assetBase}/LICENSE`,
-    sha256: null,
-    size: statSync(join(served, 'LICENSE')).size,
-  }
-  const unverified = await downloadArchive({ asset: looseAsset, dir: looseDir, env })
-  assert.equal(unverified.ok, true, 'a release with no published checksum still installs')
-  assert.equal(unverified.verified, false, 'and says it was not verified instead of pretending')
+/* No published digest is stated, not hidden. */
+const looseDir = join(root, 'no-checksum')
+const looseAsset = {
+  ...defaultAsset,
+  name: 'LICENSE',
+  url: `${assetBase}/LICENSE`,
+  sha256: null,
+  size: statSync(join(served, 'LICENSE')).size,
+}
+const unverified = await downloadArchive({ asset: looseAsset, dir: looseDir, env })
+assert.equal(unverified.ok, true, 'a release with no published checksum still installs')
+assert.equal(unverified.verified, false, 'and says it was not verified instead of pretending')
 
 /* ----------------------------------------------------------------- extraction */
 
 const extractRoot = join(root, 'extract')
-const tgzArchive = join(extractRoot, 'linux.tgz')
 mkdirSync(extractRoot, { recursive: true })
-writeFileSync(tgzArchive, archives['ollama-linux-amd64.tgz'])
-const untarred = await extractArchive({ archive: tgzArchive, kind: 'tar.gz', dir: join(extractRoot, 'tgz') })
-assert.equal(untarred.ok, true, 'a gzipped tar unpacks with no tar binary involved')
-assert.equal(readFileSync(join(extractRoot, 'tgz', 'bin', 'ollama'), 'utf8'), binary, 'with the binary at the path the plan expects')
-assert.equal(readFileSync(join(extractRoot, 'tgz', 'lib', 'thing.so'), 'utf8'), 'not really a library', 'and the other entries intact')
-
-const linkArchive = join(extractRoot, 'links.tgz')
-writeFileSync(linkArchive, zlib.gzipSync(tarWithLink))
-await extractArchive({ archive: linkArchive, kind: 'tar.gz', dir: join(extractRoot, 'links') })
-assert.equal(existsSync(join(extractRoot, 'links', 'bin', 'ollama')), true, 'a symlinked entry does not stop the unpack')
-
-assert.ok(typeof zlib.zstdCompressSync === 'function', 'this Node build has zstd, so the zstd path can be proved here')
-if (archives['ollama-linux-amd64.tar.zst']) {
-  const zstdArchive = join(extractRoot, 'linux.tar.zst')
-  writeFileSync(zstdArchive, archives['ollama-linux-amd64.tar.zst'])
-  const result = await extractArchive({ archive: zstdArchive, kind: 'tar.zst', dir: join(extractRoot, 'zst') })
-  assert.equal(result.ok, true, 'the zstd archive — the one today`s releases actually publish — unpacks in Node')
-  assert.equal(readFileSync(join(extractRoot, 'zst', 'bin', 'ollama'), 'utf8'), binary, 'with the same result as the tarball')
-}
-
 const zipArchive = join(extractRoot, 'windows.zip')
 writeFileSync(zipArchive, winZip)
-const unzipped = await extractArchive({ archive: zipArchive, kind: 'zip', dir: join(extractRoot, 'zip') })
+const unzipped = await extractArchive({ archive: zipArchive, dir: join(extractRoot, 'zip') })
 assert.equal(unzipped.ok, true, 'the Windows zip unpacks without unzip.exe — which Windows does not have')
 assert.equal(existsSync(join(extractRoot, 'zip', 'ollama.exe')), true, 'with ollama.exe at the archive root, where the plan looks for it')
-assert.equal(statSync(join(extractRoot, 'zip', 'ollama.exe')).size, 4096 + 'MZ fake windows binary\n'.length, 'the deflated entry is inflated to its full size')
+assert.equal(statSync(join(extractRoot, 'zip', 'ollama.exe')).size, exeBody.length, 'the deflated entry is inflated to its full size')
 assert.equal(readFileSync(join(extractRoot, 'zip', 'lib', 'ollama', 'thing.dll'), 'utf8'), 'a library', 'nested deflated entries come out too')
 
-const notAnArchive = join(extractRoot, 'broken.zip')
+/* A zip whose payload does not match its CRC is refused, not half-unpacked. */
+const brokenZipPath = join(extractRoot, 'broken-entry.zip')
+const brokenZip = buildZip([['ollama.exe', 'a plausible binary', 0]])
+brokenZip.writeUInt32LE(0xdeadbeef, 30 + 'ollama.exe'.length + 4)
+writeFileSync(brokenZipPath, brokenZip)
+const refusedCrc = await extractArchive({ archive: brokenZipPath, dir: join(extractRoot, 'broken-entry') })
+assert.equal(refusedCrc.ok, false, 'a zip entry that fails its CRC check is refused')
+assert.match(refusedCrc.error, /CRC check/, 'with an error that says which check failed')
+
+/* An entry that tries to leave the folder is skipped and reported. */
+const traversalZip = buildZip([
+  ['ollama.exe', 'the real binary', 0],
+  ['../escaped.txt', 'should not be written', 0],
+])
+const traversalPath = join(extractRoot, 'traversal.zip')
+writeFileSync(traversalPath, traversalZip)
+const skippedEntries = []
+const traversal = await extractArchive({ archive: traversalPath, dir: join(extractRoot, 'traversal'), onFile: (entry) => skippedEntries.push(entry) })
+assert.equal(traversal.ok, true, 'an archive with a hostile entry still unpacks the good ones')
+assert.equal(existsSync(join(extractRoot, 'escaped.txt')), false, 'but the hostile entry is never written outside the folder')
+assert.ok(skippedEntries.some((entry) => entry.skipped), 'and the skip is reported rather than swallowed')
+
+const notAnArchive = join(extractRoot, 'not-a-zip.zip')
 writeFileSync(notAnArchive, 'this is not a zip')
-const refused = await extractArchive({ archive: notAnArchive, kind: 'zip', dir: join(extractRoot, 'broken') })
+const refused = await extractArchive({ archive: notAnArchive, dir: join(extractRoot, 'broken') })
 assert.equal(refused.ok, false, 'a file that is not an archive is refused')
 assert.match(refused.error, /end-of-central-directory/, 'with an error that says why')
 
 /* ---------------------------------------------------------------------- start */
 
 apiMode = 'down'
-const fallback = await fetchRelease({ platform: 'linux', arch: 'x64', env })
+const fallback = await fetchRelease({ platform: 'win32', arch: 'x64', env })
 assert.equal(fallback.ok, false, 'a release API that is down does not take the installer down with it')
-assert.ok(fallback.asset?.url.endsWith('ollama-linux-amd64.tar.zst'), 'the composed URL still points at the right asset name')
+assert.ok(fallback.asset?.url.endsWith('ollama-windows-amd64.zip'), 'the composed URL still points at the right asset name')
 assert.equal(fallback.asset.sha256, null, 'and the page is told there is no checksum for it')
 apiMode = 'ok'
 
@@ -418,38 +386,48 @@ await new Promise((resolve) => modelApi.listen(0, '127.0.0.1', resolve))
 const modelUrl = `http://127.0.0.1:${modelApi.address().port}`
 
 const skipSteps = []
-const already = await ensureRuntime({ platform: 'linux', arch: 'x64', env, url: modelUrl, onStep: (step) => skipSteps.push(step) })
+const already = await ensureRuntime({ platform: 'win32', arch: 'x64', env, url: modelUrl, onStep: (step) => skipSteps.push(step) })
 assert.equal(already.skipped, true, 'a model server that already answers is left alone')
 assert.match(skipSteps.map((step) => step.status).join(' '), /already answers/, 'and the page is told that, rather than starting a second one')
 
 modelApiUp = false
 const endToEndDir = join(root, 'end-to-end')
 const endToEnd = await ensureRuntime({
-  platform: 'linux',
+  platform: 'win32',
   arch: 'x64',
   env: { ...env, JARVIS_RUNTIME_DIR: endToEndDir, PATH: join(root, 'nothing-here'), JARVIS_RUNTIME_MODELS: join(root, 'models') },
   url: modelUrl,
   onStep: () => {},
 })
 assert.equal(endToEnd.ok, false, 'a runtime whose endpoint never answers is reported as failed')
-assert.equal(runtimeStatus({ platform: 'linux', arch: 'x64', env: { ...env, JARVIS_RUNTIME_DIR: endToEndDir } }).present, true, 'even then, the unpacked runtime is kept for the next press')
-assert.ok(existsSync(join(endToEndDir, 'bin', 'ollama')), 'and it is in the project folder, not scattered anywhere else')
+assert.equal(runtimeStatus({ platform: 'win32', arch: 'x64', env: { ...env, JARVIS_RUNTIME_DIR: endToEndDir } }).present, true, 'even then, the unpacked runtime is kept for the next press')
+assert.ok(existsSync(join(endToEndDir, 'ollama.exe')), 'and it is in the project folder, not scattered anywhere else')
 
-const found = findRuntimeBinary({ ...plan, path: join(endToEndDir, 'bin', 'ollama') }, env)
-assert.equal(found, join(endToEndDir, 'bin', 'ollama'), 'the project runtime is found without being on PATH')
+const projectBin = join(endToEndDir, 'ollama.exe')
+const found = findRuntimeBinary({ ...plan, path: projectBin }, env)
+assert.equal(found, projectBin, 'the project runtime is found without being on PATH')
 const elsewhere = join(root, 'elsewhere')
 mkdirSync(elsewhere, { recursive: true })
-const systemBin = join(elsewhere, 'ollama')
-writeFileSync(systemBin, '#!/bin/sh\n', { mode: 0o755 })
+const systemBin = join(elsewhere, 'ollama.exe')
+writeFileSync(systemBin, 'MZ an ollama the user installed themselves\n')
 chmodSync(systemBin, 0o755)
 assert.equal(
-  findRuntimeBinary({ ...plan, path: join(root, 'absent', 'bin', 'ollama') }, { ...env, PATH: elsewhere }),
+  findRuntimeBinary({ ...plan, path: join(root, 'absent', 'ollama.exe') }, { ...env, PATH: elsewhere }),
   systemBin,
-  'a system Ollama on PATH is used when this project has not downloaded one',
+  'an Ollama the user installed themselves is used when this project has not downloaded one',
 )
-assert.equal(findRuntimeBinary({ ...plan, path: join(root, 'absent', 'bin', 'ollama') }, { ...env, PATH: join(root, 'nothing') }), null, 'and with neither, the answer is null rather than a broken path')
+assert.equal(
+  findRuntimeBinary({ ...plan, path: projectBin }, { ...env, PATH: elsewhere }),
+  projectBin,
+  'and the project copy wins over a PATH entry, so a one-click install is not shadowed',
+)
+assert.equal(findRuntimeBinary({ ...plan, path: join(root, 'absent', 'ollama.exe') }, { ...env, PATH: join(root, 'nothing') }), null, 'and with neither, the answer is null rather than a broken path')
 
-const started = spawnSync('true', [])
+const nonWindows = await ensureRuntime({ platform: 'linux', arch: 'x64', env, url: modelUrl, onStep: () => {} })
+assert.equal(nonWindows.ok, false, 'on a machine that is not Windows the installer refuses rather than pretending')
+assert.match(nonWindows.error, /Windows only/, 'and says exactly that, with the download link a person would need')
+
+const started = spawnSync(process.execPath, ['-e', 'process.exit(0)'])
 assert.equal(started.status, 0, 'sanity')
 assert.equal(typeof startRuntime, 'function', 'startRuntime is exported for hosts that manage the process themselves')
 assert.equal(stopRuntime(), false, 'stopping a runtime that was never started is a no-op, not a crash')
@@ -459,6 +437,7 @@ apiServer.close()
 modelApi.close()
 rmSync(root, { recursive: true, force: true })
 
-console.log('PASS  the right archive is resolved per platform, architecture and GPU, from the release itself')
+console.log('PASS  the Windows zip is resolved from the release itself — x64, arm64 and the ROCm build')
 console.log('PASS  downloads resume from a dropped connection and are refused when the checksum fails')
-console.log('PASS  tar.gz, tar.zst and zip all unpack in Node, so one click needs nothing installed first')
+console.log('PASS  the zip unpacks in Node and a bad CRC or a hostile entry is caught before it is kept')
+console.log('PASS  a machine with nothing installed ends one click later with ollama.exe inside the project')

@@ -70,9 +70,9 @@ saves it; RESCAN re-samples free memory and rebuilds the plan), or with the two
 environment variables above. The panel persists your choice to
 `models/ram-allocation.json` (`JARVIS_RAM_CONFIG` relocates that file), and the
 bridge re-plans immediately, without a restart, so the next turn already routes
-to whatever the new ceiling selects. On Linux, free RAM means the kernel's
-`MemAvailable` — reclaimable page cache counts as free, so the number matches
-what a system monitor shows — and `os.freemem()` elsewhere.
+to whatever the new ceiling selects. Free RAM is the figure Windows reports as
+available, which is the conservative one: memory a program could still fault
+back in is not counted as yours.
 
 The planner compares each selected model's estimated active-memory requirement
 (weights plus runtime/context headroom) with that ceiling. Routes that use the
@@ -180,7 +180,7 @@ Kokoro is fetched and cached by the browser on first use when the RAM plan
 selects it. No desktop bundle or EXE is created.
 
 **Nothing in this repository installs a program for you.** Every entry point —
-`npm run setup`, `build.sh`, `build.ps1` — either hosts the setup page or points
+`npm run setup`, `build.ps1`, `START.cmd` — either hosts the setup page or points
 at it. The one thing that is downloaded on your behalf is the Ollama *standalone
 binary archive*, into this project's own `models/runtime/`, when you press the
 page's button; nothing is installed system-wide and no `sudo` is ever used. A
@@ -188,13 +188,11 @@ system Ollama remains your call, through the link the page still offers.
 
 ## Setup: one click in the folder
 
-Download or clone the repo, open the folder, and double-click the launcher for
-your platform:
+JARVIS is a Windows program. Download or clone the repo, open the folder, and
+double-click `START.cmd`:
 
 ```
 Windows        START.cmd
-macOS          START.command
-Linux          START.sh
 ```
 
 That single action finds Node.js 20+ (and offers to install it if it is
@@ -203,11 +201,16 @@ interface, starts the bridge and the HUD, and opens the setup page described
 below. On that page one button installs everything else: the model runtime and
 the model stack this machine can actually run.
 
+There is no macOS or Linux launcher, because there is no macOS or Linux
+product. Linux survives in this repository for exactly one reason — it is the
+host the automated test suites run on — and nothing in the app claims it as a
+target.
+
 For a completely unattended first run — no page, no second press, progress
 printed in the window — double-click `START.cmd` with `auto`, or run:
 
-```bash
-./START.sh auto        # or bash ./build.sh --auto
+```powershell
+.\START.cmd auto       # or powershell -ExecutionPolicy Bypass -File .\build.ps1 -Auto
 ```
 
 It picks the same stack the page preselects (the largest rung this machine's RAM
@@ -243,15 +246,16 @@ when the routes share it), the Whisper file, and the speech runtime. Progress
 streams step by step; if a step is skipped the page says why rather than
 pretending it succeeded.
 
-**The runtime is part of that one click.** Ollama publishes standalone builds
-next to its installers, and a page can download and unpack an archive — so the
+**The runtime is part of that one click.** Ollama publishes a standalone Windows
+zip next to its installer, and a page can download and unpack a zip — so the
 bridge does exactly that. It reads the release's own asset list (so a rename
-upstream, like Linux's move from `.tgz` to `.tar.zst`, cannot break an install),
-downloads the one that matches this machine's platform, architecture and GPU,
-**resumes** an interrupted download from where it stopped, verifies the
-SHA-256 the release publishes, unpacks it into `models/runtime/` — in Node
-itself, so Windows needs no `unzip` and Linux no `zstd` binary — starts
-`ollama serve` out of it, and only then pulls the models. No installer runs, no
+upstream cannot 404 an install), downloads the one that matches this machine's
+architecture and GPU — `ollama-windows-amd64.zip`,
+`ollama-windows-amd64-rocm.zip` for AMD cards, `ollama-windows-arm64.zip` on
+ARM — **resumes** an interrupted download from where it stopped, verifies the
+SHA-256 the release publishes, unpacks it into `models/runtime/` in Node itself
+with a CRC check on every entry (Windows has no `unzip`), starts `ollama serve`
+out of it, and only then pulls the models. No installer runs, no
 administrator prompt appears, nothing is added to your PATH, and deleting
 `models/runtime/` removes the runtime completely.
 
@@ -271,21 +275,16 @@ the download at a mirror, `JARVIS_RUNTIME_API` overrides the release lookup, and
 model slot that is not `ready`; pass `--no-open` to keep it shut. In the HUD the
 same work is the **INSTALL SELECTED STACK** button in MODEL STACK.
 
-The platform scripts build and launch; they no longer install anything
-themselves:
+The build script builds and launches; it no longer installs anything itself:
 
 ```powershell
 .\build.ps1
 ```
 
-```bash
-bash ./build.sh
-```
-
-The scripts check for Node.js 20+ and npm. If Node is missing, `build.ps1`
-tries WinGet; `build.sh` uses a version manager/Homebrew or downloads and
-SHA-256-verifies a user-local Node 24 LTS binary. If Windows blocks the `.ps1`
-by execution policy, use `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
+The script checks for Node.js 20+ and npm. If Node is missing, `build.ps1` tries
+WinGet, and falls back to downloading and SHA-256-verifying a user-local Node 24
+LTS build. If Windows blocks the `.ps1` by execution policy, use
+`powershell -ExecutionPolicy Bypass -File .\build.ps1`.
 The setup skips ONNX Runtime's optional Node-only CUDA provider by default; the
 browser TTS path uses the web runtime, and Ollama manages chat-model GPU use.
 Set `ONNXRUNTIME_NODE_INSTALL_CUDA=v12` before running the setup script only if
@@ -297,10 +296,10 @@ read-only `npm run doctor` preflight, and launches the bridge and Vite app (and
 terminal open and press **Ctrl-C** to stop the processes. No desktop bundle or
 EXE is created.
 
-Use `bash ./build.sh --skip-ai-models` or `./build.ps1 -SkipAiModels` to build
-and launch without checking for Ollama or model weights; those flags now only
-print the setup-page pointer. Use `--no-launch` or `-NoLaunch` to finish
-build/model checks without starting the local web servers.
+Use `.\build.ps1 -SkipAiModels` to build and launch without checking for Ollama
+or model weights; the flag now only prints the setup-page pointer. Use
+`-NoLaunch` to finish the build and model checks without starting the local web
+servers.
 
 For manual workflows, `npm ci`, `npm run build`, `npm run doctor`,
 `npm run setup`, and `npm start` are separate commands. `npm run models:plan` and
@@ -338,18 +337,17 @@ incomplete-file rejection, and the browser-cached Kokoro path.
 overrides, and read-only preflight behavior against a mock model server.
 `npm run test:control` covers the command-line policy (parsing, the allowlist
 and deny rules in both modes, working-directory roots), the desktop control
-surface (key-combo parsing, per-platform arguments for Windows, macOS and
-Linux, quoting of typed text, capability gaps, app discovery and launch
-matching) and the capability block (what a headless, read-only Linux host says
-about itself, and what a write-enabled one says instead) without running a
-command or moving a pointer.
+surface (key-combo parsing, the Windows argv every operation turns into,
+SendKeys escaping, hostile text kept as data, honest refusals on any host that
+is not Windows, Start-menu app discovery and launch matching) and the capability
+block without running a command or moving a pointer.
 `npm run test:runtime` covers the one-click runtime against a local mock release
-and asset server: asset resolution per platform, architecture and GPU, a
+and asset server: resolution of the Windows zip per architecture and GPU, a
 download that drops mid-transfer resuming with a `Range` request, a checksum
 that fails being deleted rather than unpacked, a release with no checksum being
-reported honestly, unpacking of `tar.gz`, `tar.zst` and `zip` (both a stored and
-a deflated entry) with no external tools, path-traversal entries being contained
-or refused, and the already-answering case.
+reported honestly, unpacking of a zip (stored and deflated entries alike) with
+no external tools, an entry that fails its CRC being refused, a path-traversal
+entry being reported and skipped, and the already-answering case.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
 33-tier catalogue/statuses, the served `/install` setup page and its `runtime`
 contract, the terminal client answering through the same bridge in one-shot
@@ -360,9 +358,9 @@ the acting shell/desktop tools are absent from the model's tool list while
 writes are off, and that an unchecked refusal is challenged and replaced before
 the browser hears it, against a local stub model server. These are deterministic/mock
 checks, not model inference. No full Ollama-backed conversation, real Whisper
-transcription/model download, or Windows/macOS desktop action has been verified
-in this workspace — that control code is exercised only through the arguments
-it builds, since the sandbox has no display server, `xdotool` or `wmctrl`.
+transcription/model download, or real Windows desktop action has been verified
+in this workspace — the control code is exercised only through the arguments it
+builds, since the sandbox the tests run in is not Windows and has no desktop.
 GitHub Pages hosts the UI only.
 
 ## Model manager and local speech
@@ -402,8 +400,8 @@ One browser HUD backed by a Node bridge and your own local models:
 src/ + index.html        browser HUD — voice, reactor, panels
 bridge/                  local Node bridge — model pipeline, tools, autopilot
 scripts/                 setup page host, doctor preflight, terminal client, build assets, start helpers
-START.cmd / START.command / START.sh   one-click launchers for a downloaded folder
-build.ps1 / build.sh     Node/npm check, web build, preflight, and launch (no silent installs)
+START.cmd                the one-click launcher for a downloaded folder
+build.ps1                Node/npm check, web build, preflight, and launch (no silent installs)
 smoke.mjs                bridge checks
 ```
 
@@ -421,8 +419,9 @@ AI session.
 
 ## Requirements
 
-**In one line:** the root setup script, a supported local model runtime when
-models fit, and a real browser for microphone/WebGL. Ollama is recommended.
+**In one line:** Windows 10 22H2 or newer, the root setup script, a supported
+local model runtime when models fit, and a real browser for microphone/WebGL.
+Ollama is recommended.
 
 - **A model server.** [Ollama](https://ollama.com) is the default. The setup
   page's one button downloads Ollama's standalone build into `models/runtime/`
@@ -430,9 +429,9 @@ models fit, and a real browser for microphone/WebGL. Ollama is recommended.
   if you prefer a managed one. llama.cpp, LM Studio and vLLM remain available
   through their OpenAI-compatible endpoints; custom endpoints are never
   overwritten.
-- **Node.js 20 or newer** and the project npm packages. The root scripts check
-  and bootstrap Node where supported, then install missing/stale packages from
-  the lockfile.
+- **Node.js 20 or newer** and the project npm packages. `build.ps1` checks for
+  Node, offers to install it with WinGet if it is missing, then installs
+  missing/stale packages from the lockfile.
 - **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
   embedded preview pane. Preview panes (including the one inside editors) block
   microphone access, so the page loads and looks right but never hears you.
@@ -467,7 +466,7 @@ Ollama from the link it gives you if you have none. Then:
 npm start           # local bridge + Vite browser HUD
 ```
 
-`build.ps1` / `build.sh` wrap the same sequence on Windows and macOS/Linux:
+`build.ps1` wraps the same sequence on Windows:
 dependency check, web build, read-only preflight, launch. Open the local Vite
 URL (normally <http://localhost:5173>) in Chrome or Edge, click **INITIALISE**,
 allow the microphone, and say **“Hey Jarvis”**. Local inference requires a
@@ -644,8 +643,8 @@ command.
 
 ### JARVIS controls the machine
 
-Two more built-in servers reach past the interface, on Windows, macOS and Linux
-alike. Both start read-only; their acting tools are not registered at all unless
+Two more built-in servers reach past the interface, on the Windows desktop.
+Both start read-only; their acting tools are not registered at all unless
 the bridge runs in write mode.
 
 - **`jarvis_shell`** — the command line. `run_command` runs one command in a
@@ -675,10 +674,11 @@ described below. `run_command` never opens a shell, so a command line like
 `rm -rf node_modules` is parsed and judged as written; text typed into another
 application is passed as a single argument, never interpolated into a script.
 
-On Linux, pointer and keyboard control need `xdotool`; window management needs
-`wmctrl`. On macOS, `osascript` is used for everything except the pointer, which
-needs `cliclick` (`brew install cliclick`). Windows needs nothing beyond
-PowerShell, which is already there.
+Pointer, keyboard, window and app control all go through PowerShell and
+`user32`, which are already on the machine: there is no third-party program to
+install, and no `sudo`, `brew` or `apt` line anywhere in this project. On a host
+that is not Windows the tools say so instead of half-working, and
+`desktop_capabilities` says it before anything is promised.
 
 ### The heads-up display
 

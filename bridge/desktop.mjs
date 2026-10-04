@@ -6,15 +6,14 @@
  * screen — focusing the window that is already open, typing into it, clicking
  * where the user is pointing, and launching anything installed.
  *
- * Platform coverage is honest rather than uniform:
+ * Windows only, and it uses what Windows already has: PowerShell driving
+ * user32 for windows, the pointer and the keyboard, plus SendKeys for typing.
+ * There is nothing to install first. On another platform every acting tool
+ * reports that plainly instead of half-working, and `desktop_capabilities` says
+ * so before anything is promised.
  *
- *   Windows  PowerShell + user32 (the same technique as windows.mjs)
- *   macOS    osascript for apps, windows and keys; cliclick for the pointer
- *   Linux    wmctrl for windows, xdotool for input (X11; XWayland only)
- *
- * Every op reports what actually happened. Where the backing program is not
- * installed, `desktop_capabilities` says so up front and the op fails with the
- * one command that would fix it, rather than a stack trace or a silent no-op.
+ * Every op reports what actually happened, rather than a stack trace or a
+ * silent no-op.
  *
  * Acting tools are built only when the bridge runs with JARVIS_ALLOW_WRITES=1,
  * the same gate as the browser, the command line and the window manager. Read
@@ -23,34 +22,12 @@
  */
 
 import { execFile } from 'node:child_process'
-import { readdir, readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import { createSdkMcpServer, tool } from './mcp.mjs'
-import { programPath } from './shell.mjs'
 
 const execFileAsync = promisify(execFile)
 const COMMAND_TIMEOUT_MS = 20_000
-
-/** Linux app entries live in these directories, in priority order. */
-const DESKTOP_DIRS = [
-  join(homedir(), '.local/share/applications'),
-  '/usr/local/share/applications',
-  '/usr/share/applications',
-  '/var/lib/flatpak/exports/share/applications',
-  join(homedir(), '.local/share/flatpak/exports/share/applications'),
-  '/var/lib/snapd/desktop/applications',
-]
-
-/** macOS app directories. /System/CoreServices holds the built-ins people mean by name. */
-const MAC_APP_DIRS = [
-  '/Applications',
-  '/System/Applications',
-  '/System/Applications/Utilities',
-  join(homedir(), 'Applications'),
-]
 
 // ---------------------------------------------------------------------------
 // Pure helpers — no process is spawned in any of them, so every rule below is
@@ -94,23 +71,6 @@ export function parseKeyCombo(combo) {
   return { ok: true, key, modifiers }
 }
 
-/** AppleScript needs the key as a character or a hardware key code. */
-export function appleScriptKey(key) {
-  const codes = {
-    return: 36, enter: 36, tab: 48, space: 49, escape: 53, esc: 53, backspace: 51,
-    delete: 117, up: 126, down: 125, left: 123, right: 124, home: 115, end: 119,
-    pageup: 116, pagedown: 121,
-    f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
-    f9: 101, f10: 109, f11: 103, f12: 111,
-  }
-  return codes[key] ?? null
-}
-
-/** Escape a string for AppleScript's double-quoted literal. */
-export function appleScriptString(text) {
-  return String(text ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-}
-
 /**
  * Escape a string for .NET SendKeys.
  *
@@ -129,52 +89,6 @@ export function sendKeysCombo({ key, modifiers }) {
   return prefix + (named ?? (NAMED_KEYS.has(key) ? `{${key.toUpperCase()}}` : key))
 }
 
-/** xdotool wants the combo back as its own syntax, which is close to ours. */
-export function xdotoolCombo({ key, modifiers }) {
-  return [...modifiers, key].join('+')
-}
-
-/** AppleScript "using {…}" clause for the modifiers in a combo. */
-export function appleScriptModifiers({ modifiers }) {
-  const names = { ctrl: 'control down', shift: 'shift down', alt: 'option down', cmd: 'command down', super: 'command down' }
-  const list = modifiers.map((modifier) => names[modifier]).filter(Boolean)
-  return list.length ? ` using {${list.join(', ')}}` : ''
-}
-
-/**
- * Parse Linux .desktop entries into launchable apps.
- *
- * Reads only the fields a launcher needs, skips hidden entries and anything
- * marked NoDisplay or Terminal — a voice loop should not open a TUI it cannot
- * see — and prefers the localized Name when one is present.
- */
-export function parseDesktopEntries(text, { locale = 'en', file = null } = {}) {
-  const apps = []
-  for (const block of String(text ?? '').split(/\n(?=\[Desktop Entry\])/)) {
-    if (!/\[Desktop Entry\]/.test(block)) continue
-    const field = (name) => {
-      const match = block.match(new RegExp(`^${name}=(.+)$`, 'm'))
-      return match ? match[1].trim() : null
-    }
-    if ((field('Type') ?? 'Application') !== 'Application') continue
-    if (field('NoDisplay') === 'true' || field('Hidden') === 'true') continue
-    if (field('Terminal') === 'true') continue
-    const localized = block.match(new RegExp(`^Name\\[${locale}(_[A-Z]{2})?\\]=(.+)$`, 'm'))
-    const name = localized?.[2]?.trim() ?? field('Name')
-    const exec = field('Exec')
-    if (!name || !exec) continue
-    // gtk-launch wants the desktop file's own id (its filename minus .desktop),
-    // which is not the same thing as the program it runs.
-    apps.push({
-      id: file ? basename(file).replace(/\.desktop$/i, '') : basename(exec.split(/\s+/)[0] ?? name),
-      name,
-      exec: exec.replace(/\s%[fFuUdDnNickvm]/g, '').trim(),
-      source: 'desktop',
-    })
-  }
-  return apps
-}
-
 /** Normalize `Get-StartApps | ConvertTo-Json` output into the same shape. */
 export function parseWindowsApps(json) {
   let parsed
@@ -189,14 +103,7 @@ export function parseWindowsApps(json) {
     .filter((row) => row.id && row.name)
 }
 
-/** macOS: a directory listing of *.app bundles is already the app list. */
-export function parseMacApps(names) {
-  return (Array.isArray(names) ? names : [])
-    .filter((name) => /\.app$/i.test(name))
-    .map((name) => ({ id: name.replace(/\.app$/i, ''), name: name.replace(/\.app$/i, ''), source: 'applications' }))
-}
-
-/** People type "visual studio code"; the bundle is "Visual Studio Code.app". */
+/** People type "visual studio code"; the Start menu entry is "Visual Studio Code". */
 export function matchApp(query, apps) {
   const needle = String(query ?? '').trim().toLowerCase()
   if (!needle) return null
@@ -210,36 +117,24 @@ export function matchApp(query, apps) {
 }
 
 /**
- * Which platform's control surface is in force, and what it can actually do.
- * `has` is injected so tests can describe a machine without owning one.
+ * What the desktop control surface can actually do here.
+ *
+ * On Windows there is nothing to check: PowerShell ships with the system and
+ * user32 is always there, so the surface is complete or the host is not Windows
+ * at all. That second case is stated rather than worked around — every acting
+ * tool then reports it, and `desktop_capabilities` says it before anything is
+ * promised.
  */
-export function desktopCapabilities({ platform = process.platform, env = process.env, has = (name) => Boolean(programPath(name)) } = {}) {
-  const session = platform === 'win32'
-    ? 'windows'
-    : platform === 'darwin'
-      ? 'aqua'
-      : env.WAYLAND_DISPLAY
-        ? 'wayland'
-        : env.DISPLAY
-          ? 'x11'
-          : 'headless'
-  const gaps = []
-  if (platform === 'linux') {
-    if (session === 'headless') gaps.push('no DISPLAY or WAYLAND_DISPLAY: there is no desktop session to control')
-    if (!has('xdotool')) gaps.push('xdotool is missing: pointer, typing and key combos are unavailable (install it with "sudo apt install xdotool")')
-    if (!has('wmctrl')) gaps.push('wmctrl is missing: window listing and window actions are unavailable (install it with "sudo apt install wmctrl")')
-    if (session === 'wayland') gaps.push('Wayland session: xdotool/wmctrl only see XWayland windows, so native Wayland apps will not respond')
+export function desktopCapabilities({ platform = process.platform } = {}) {
+  if (platform !== 'win32') {
+    return {
+      platform,
+      session: 'unsupported',
+      gaps: [`desktop control is Windows-only; this host is ${platform}`],
+      pointer: null,
+    }
   }
-  if (platform === 'darwin' && !has('cliclick')) {
-    gaps.push('cliclick is missing: pointer movement and clicking are unavailable (install it with "brew install cliclick"); typing and app control still work')
-  }
-  return { platform, session, gaps, pointer: pointerProgram({ platform, has }) }
-}
-
-function pointerProgram({ platform, has }) {
-  if (platform === 'win32') return 'user32'
-  if (platform === 'darwin') return has('cliclick') ? 'cliclick' : null
-  return has('xdotool') ? 'xdotool' : null
+  return { platform, session: 'windows', gaps: [], pointer: 'user32' }
 }
 
 /**
@@ -249,116 +144,65 @@ function pointerProgram({ platform, has }) {
  * here; this is the single place where platform differences are expressed,
  * which is what makes the differences testable.
  */
-export function buildDesktopCommand(op, args = {}, { platform = process.platform, has = (name) => Boolean(programPath(name)) } = {}) {
-  const require = (program, hint) => {
-    if (!has(program)) return { unsupported: `${program} is not installed. ${hint}` }
-    return null
+export function buildDesktopCommand(op, args = {}, { platform = process.platform } = {}) {
+  if (platform !== 'win32') {
+    return { unsupported: `Desktop control is Windows-only; this host is ${platform}.` }
   }
+  const shell = { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT] }
 
-  if (op === 'list_windows') {
-    if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: 'list' } }
-    if (platform === 'darwin') return { file: 'osascript', args: ['-e', APPLE_LIST_WINDOWS] }
-    const missing = require('wmctrl', 'Install it with "sudo apt install wmctrl".')
-    return missing ?? { file: 'wmctrl', args: ['-lpG'] }
-  }
+  if (op === 'list_windows') return { ...shell, env: { JARVIS_DESKTOP_OP: 'list' } }
 
   if (op === 'list_apps') {
-    if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', 'Get-StartApps | ConvertTo-Json -Compress'], env: {} }
-    if (platform === 'darwin') return { file: 'ls', args: ['-1', ...MAC_APP_DIRS] }
-    // Callers pass a rendered list of files; the reading happens in the server.
-    return { file: null, args: [], env: {} }
+    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', 'Get-StartApps | ConvertTo-Json -Compress'], env: {} }
   }
 
   if (op === 'launch') {
-    if (platform === 'win32') {
-      // A packaged (UWP/MSIX) app is launched through its AppUserModelID;
-      // anything else is an ordinary executable or document path.
-      const id = String(args.app ?? '')
-      const target = id.includes('!') ? `shell:AppsFolder\\${id}` : id
-      return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: 'launch', JARVIS_DESKTOP_TARGET: target } }
-    }
-    if (platform === 'darwin') return { file: 'open', args: ['-a', String(args.app ?? '')] }
-    if (has('gtk-launch')) return { file: 'gtk-launch', args: [String(args.app ?? '')] }
-    if (has('gio')) return { file: 'gio', args: ['launch', String(args.desktopPath ?? args.app ?? '')] }
-    return { unsupported: 'Neither gtk-launch nor gio is installed, so no .desktop entry can be started.' }
+    // A packaged (UWP/MSIX) app is launched through its AppUserModelID;
+    // anything else is an ordinary executable or document path.
+    const id = String(args.app ?? '')
+    const target = id.includes('!') ? `shell:AppsFolder\\${id}` : id
+    return { ...shell, env: { JARVIS_DESKTOP_OP: 'launch', JARVIS_DESKTOP_TARGET: target } }
   }
 
   if (op === 'quit') {
-    if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: 'quit', JARVIS_DESKTOP_TARGET: String(args.app ?? '') } }
-    if (platform === 'darwin') return { file: 'osascript', args: ['-e', `tell application "${appleScriptString(args.app)}" to quit`] }
-    const missing = require('pkill', 'Install procps, or close the window instead.')
-    return missing ?? { file: 'pkill', args: ['-x', String(args.app ?? '')] }
+    return { ...shell, env: { JARVIS_DESKTOP_OP: 'quit', JARVIS_DESKTOP_TARGET: String(args.app ?? '') } }
   }
 
   if (op === 'focus' || op === 'window_action') {
-    const target = String(args.title ?? '')
-    if (platform === 'win32') {
-      return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: op === 'focus' ? 'focus' : (args.action ?? 'focus'), JARVIS_DESKTOP_TARGET: target, JARVIS_DESKTOP_GEOMETRY: geometryString(args) } }
+    return {
+      ...shell,
+      env: {
+        JARVIS_DESKTOP_OP: op === 'focus' ? 'focus' : (args.action ?? 'focus'),
+        JARVIS_DESKTOP_TARGET: String(args.title ?? ''),
+        JARVIS_DESKTOP_GEOMETRY: geometryString(args),
+      },
     }
-    if (platform === 'darwin') return { file: 'osascript', args: ['-e', appleScriptWindow(op, args)] }
-    const missing = require('wmctrl', 'Install it with "sudo apt install wmctrl".')
-    if (missing) return missing
-    if (op === 'focus') return { file: 'wmctrl', args: ['-a', target] }
-    if (args.action === 'close') return { file: 'wmctrl', args: ['-c', target] }
-    if (args.action === 'move' || args.action === 'resize') return { file: 'wmctrl', args: ['-r', target, '-e', `0,${Math.round(args.x ?? 0)},${Math.round(args.y ?? 0)},${Math.round(args.width ?? 0)},${Math.round(args.height ?? 0)}`] }
-    if (args.action === 'minimize') return { file: 'wmctrl', args: ['-r', target, '-b', 'add,hidden'] }
-    if (args.action === 'maximize') return { file: 'wmctrl', args: ['-r', target, '-b', 'add,maximized_vert,maximized_horz'] }
-    if (args.action === 'restore') return { file: 'wmctrl', args: ['-r', target, '-b', 'remove,maximized_vert,maximized_horz,hidden'] }
-    return { unsupported: `Unsupported window action "${args.action}".` }
   }
 
   if (op === 'type_text') {
-    const text = String(args.text ?? '')
-    if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: 'type', JARVIS_DESKTOP_TEXT: sendKeysEscape(text) } }
-    if (platform === 'darwin') return { file: 'osascript', args: ['-e', `tell application "System Events" to keystroke "${appleScriptString(text)}"`] }
-    const missing = require('xdotool', 'Install it with "sudo apt install xdotool".')
-    return missing ?? { file: 'xdotool', args: ['type', '--clearmodifiers', '--delay', '12', text] }
+    return { ...shell, env: { JARVIS_DESKTOP_OP: 'type', JARVIS_DESKTOP_TEXT: sendKeysEscape(String(args.text ?? '')) } }
   }
 
   if (op === 'press_keys') {
     const combo = parseKeyCombo(args.keys)
     if (!combo.ok) return { unsupported: combo.reason }
-    if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: 'keys', JARVIS_DESKTOP_TEXT: sendKeysCombo(combo) } }
-    if (platform === 'darwin') {
-      const code = appleScriptKey(combo.key)
-      const action = code === null ? `keystroke "${appleScriptString(combo.key)}"` : `key code ${code}`
-      return { file: 'osascript', args: ['-e', `tell application "System Events" to ${action}${appleScriptModifiers(combo)}`] }
-    }
-    const missing = require('xdotool', 'Install it with "sudo apt install xdotool".')
-    return missing ?? { file: 'xdotool', args: ['key', '--clearmodifiers', xdotoolCombo(combo)] }
+    return { ...shell, env: { JARVIS_DESKTOP_OP: 'keys', JARVIS_DESKTOP_TEXT: sendKeysCombo(combo) } }
   }
 
   if (op === 'move_mouse' || op === 'click' || op === 'scroll') {
-    if (platform === 'win32') {
-      return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCRIPT], env: { JARVIS_DESKTOP_OP: op, JARVIS_DESKTOP_TARGET: `${Math.round(args.x ?? -1)},${Math.round(args.y ?? -1)}`, JARVIS_DESKTOP_GEOMETRY: `${args.button ?? 'left'},${Math.max(1, Math.round(args.count ?? 1))},${args.direction ?? 'down'},${Math.round(args.amount ?? 3)}` } }
+    return {
+      ...shell,
+      env: {
+        JARVIS_DESKTOP_OP: op,
+        JARVIS_DESKTOP_TARGET: `${Math.round(args.x ?? -1)},${Math.round(args.y ?? -1)}`,
+        JARVIS_DESKTOP_GEOMETRY: `${args.button ?? 'left'},${Math.max(1, Math.round(args.count ?? 1))},${args.direction ?? 'down'},${Math.round(args.amount ?? 3)}`,
+      },
     }
-    if (platform === 'darwin') {
-      const missing = require('cliclick', 'Install it with "brew install cliclick".')
-      if (missing) return missing
-      if (op === 'move_mouse') return { file: 'cliclick', args: [`m:${Math.round(args.x)},${Math.round(args.y)}`] }
-      if (op === 'click') {
-        const move = Number.isFinite(args.x) && Number.isFinite(args.y) ? `m:${Math.round(args.x)},${Math.round(args.y)} ` : ''
-        const verb = (args.button ?? 'left') === 'right' ? 'rc' : 'c'
-        const repeat = Math.max(1, Math.round(args.count ?? 1))
-        return { file: 'cliclick', args: [`${move}${Array.from({ length: repeat }, () => verb).join(' ')}`] }
-      }
-      const lines = Math.max(1, Math.round(args.amount ?? 3))
-      return { file: 'cliclick', args: [`${(args.direction ?? 'down') === 'up' ? 'su' : 'sd'}:${lines}`] }
-    }
-    const missing = require('xdotool', 'Install it with "sudo apt install xdotool".')
-    if (missing) return missing
-    if (op === 'move_mouse') return { file: 'xdotool', args: ['mousemove', String(Math.round(args.x)), String(Math.round(args.y))] }
-    if (op === 'click') {
-      const button = { left: 1, middle: 2, right: 3 }[args.button ?? 'left'] ?? 1
-      const repeat = Math.max(1, Math.round(args.count ?? 1))
-      return { file: 'xdotool', args: ['click', '--repeat', String(repeat), String(button)] }
-    }
-    const button = (args.direction ?? 'down') === 'up' ? 4 : 5
-    return { file: 'xdotool', args: ['click', '--repeat', String(Math.max(1, Math.round(args.amount ?? 3))), String(button)] }
   }
 
   return { unsupported: `Unknown desktop operation "${op}".` }
 }
+
 
 /** Geometry as "x,y,w,h", empty when a move is not part of the action. */
 export function geometryString(args = {}) {
@@ -366,30 +210,6 @@ export function geometryString(args = {}) {
   return parts.some(Boolean) ? parts.join(',') : ''
 }
 
-/** AppleScript for window focus and the subset of actions System Events exposes. */
-export function appleScriptWindow(op, args = {}) {
-  const title = appleScriptString(args.title)
-  const find = `set targetWindow to first window of (first process whose name contains "${title}")`
-  if (op === 'focus') return `tell application "System Events" to set frontmost of (first process whose name contains "${title}") to true`
-  const action = {
-    close: 'perform action "AXPress" of (first button whose subrole is "AXCloseButton") of targetWindow',
-    minimize: 'set value of attribute "AXMinimized" of targetWindow to true',
-    maximize: 'set value of attribute "AXFullScreen" of targetWindow to true',
-    restore: 'set value of attribute "AXFullScreen" of targetWindow to false',
-    move: `set position of targetWindow to {${Math.round(args.x ?? 0)}, ${Math.round(args.y ?? 0)}}`,
-    resize: `set size of targetWindow to {${Math.round(args.width ?? 800)}, ${Math.round(args.height ?? 600)}}`,
-  }[args.action]
-  if (!action) return 'error "unsupported action"'
-  return `tell application "System Events"\n  ${find}\n  ${action}\nend tell`
-}
-
-/**
- * The Windows helper, in one PowerShell script driven by environment variables.
- *
- * Environment rather than command-line arguments on purpose: window titles and
- * typed text are user data, and an argv string is one quoting mistake away from
- * becoming script. The script only ever reads its parameters.
- */
 export const WINDOWS_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -471,16 +291,6 @@ switch ($op) {
 }
 `.trim()
 
-const APPLE_LIST_WINDOWS = `tell application "System Events"
-  set rows to {}
-  repeat with p in (every process whose background only is false)
-    repeat with w in (every window of p)
-      set end of rows to ((name of p) & " | " & (name of w))
-    end repeat
-  end repeat
-  return rows
-end tell`
-
 // ---------------------------------------------------------------------------
 // Runner and tools
 // ---------------------------------------------------------------------------
@@ -500,62 +310,22 @@ async function runBuilt(built) {
   }
 }
 
-/** Read the installed apps for this platform, normalized. */
-export async function listInstalledApps({ platform = process.platform, has = (name) => Boolean(programPath(name)) } = {}) {
-  if (platform === 'win32') {
-    const built = buildDesktopCommand('list_apps', {}, { platform, has })
-    const result = await runBuilt(built)
-    return result.ok ? { ok: true, apps: parseWindowsApps(result.stdout) } : result
+/** Read the installed apps, from the Start menu. */
+export async function listInstalledApps({ platform = process.platform } = {}) {
+  if (platform !== 'win32') {
+    return { ok: false, error: `Listing installed applications is Windows-only; this host is ${platform}.` }
   }
-  if (platform === 'darwin') {
-    const found = []
-    for (const dir of MAC_APP_DIRS) {
-      try {
-        found.push(...parseMacApps(await readdir(dir)))
-      } catch { /* directory may not exist */ }
-    }
-    const unique = new Map(found.map((app) => [app.id.toLowerCase(), app]))
-    return { ok: true, apps: [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)) }
-  }
-  const apps = []
-  for (const dir of DESKTOP_DIRS) {
-    let names = []
-    try {
-      names = await readdir(dir)
-    } catch { continue }
-    for (const name of names) {
-      if (!name.endsWith('.desktop')) continue
-      try {
-        apps.push(...parseDesktopEntries(await readFile(join(dir, name), 'utf8'), { file: name }))
-      } catch { /* unreadable entry */ }
-    }
-  }
-  const unique = new Map(apps.map((app) => [app.name.toLowerCase(), app]))
-  return { ok: true, apps: [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)) }
+  const result = await runBuilt(buildDesktopCommand('list_apps', {}, { platform }))
+  return result.ok ? { ok: true, apps: parseWindowsApps(result.stdout) } : result
 }
 
-/** A window list, normalized across platforms. */
-export async function listDesktopWindows({ platform = process.platform, has = (name) => Boolean(programPath(name)) } = {}) {
-  const built = buildDesktopCommand('list_windows', {}, { platform, has })
-  const result = await runBuilt(built)
+/** The visible window list, as handle/pid/title rows. */
+export async function listDesktopWindows({ platform = process.platform } = {}) {
+  const result = await runBuilt(buildDesktopCommand('list_windows', {}, { platform }))
   if (!result.ok) return result
-  if (platform === 'win32') {
-    const rows = JSON.parse(result.stdout || '[]')
-    const list = Array.isArray(rows) ? rows : [rows]
-    return { ok: true, windows: list.map((row) => ({ handle: row.handle, pid: row.pid, title: row.title })) }
-  }
-  if (platform === 'darwin') {
-    const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    return { ok: true, windows: lines.map((line) => { const [process = '', ...rest] = line.split(' | '); return { process, title: rest.join(' | ') } }) }
-  }
-  const lines = result.stdout.split(/\r?\n/).filter(Boolean)
-  return {
-    ok: true,
-    windows: lines.map((line) => {
-      const [id, desktop, pid, x, y, w, h, ...title] = line.split(/\s+/)
-      return { id, desktop, pid, x: Number(x), y: Number(y), width: Number(w), height: Number(h), title: title.join(' ') }
-    }),
-  }
+  const rows = JSON.parse(result.stdout || '[]')
+  const list = Array.isArray(rows) ? rows : [rows]
+  return { ok: true, windows: list.map((row) => ({ handle: row.handle, pid: row.pid, title: row.title })) }
 }
 
 function textResult(value) {
@@ -577,7 +347,7 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
   const tools = [
     tool(
       'desktop_capabilities',
-      'Read-only. Report which desktop session this host has and which control surface is actually available (xdotool/wmctrl on Linux, cliclick on macOS, user32 on Windows). Check this before promising a GUI action.',
+      'Read-only. Report whether this host can be driven at all: JARVIS controls the desktop on Windows (PowerShell + user32) and says so plainly everywhere else. Check this before promising a GUI action.',
       { why: z.string().max(200).optional().describe('One short sentence for the log.') },
       async () => textResult({ ok: true, writesEnabled: allowWrites, ...desktopCapabilities({ platform, env }) }),
     ),
@@ -589,7 +359,7 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
     ),
     tool(
       'list_apps',
-      'Read-only. List the applications installed on this machine (Windows Start menu, macOS /Applications, Linux .desktop entries). Launch names come from here.',
+      'Read-only. List the applications installed on this machine, from the Windows Start menu. Launch names come from here.',
       {
         match: z.string().max(120).optional().describe('Optional fragment to filter by, for example "studio".'),
         limit: z.number().int().min(1).max(300).optional().describe('Maximum apps to return. Defaults to 60.'),
@@ -615,7 +385,7 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
       ),
       tool(
         'window_action',
-        'Move, resize, minimize, maximize, restore or close one window by title fragment. Close asks the application to close (WM_CLOSE / AXPress / wmctrl -c) rather than killing it, so unsaved work can still prompt.',
+        'Move, resize, minimize, maximize, restore or close one window by title fragment. Close asks the application to close (WM_CLOSE) rather than killing it, so unsaved work can still prompt.',
         {
           title_contains: titleSchema,
           action: z.enum(['focus', 'minimize', 'maximize', 'restore', 'close', 'move', 'resize']).describe('What to do with the matched window.'),
@@ -628,7 +398,7 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
       ),
       tool(
         'launch_app',
-        'Launch an installed application by name, as listed by list_apps. On Windows and macOS the name goes to the OS launcher; on Linux the matching .desktop entry is started. No command lines or arguments are accepted — use run_command for those.',
+        'Launch an installed application by name, as listed by list_apps. The name goes to the Windows shell, so packaged apps and installed programs both work. No command lines or arguments are accepted — use run_command for those.',
         { app: z.string().min(1).max(160).describe('Application name, for example "Visual Studio Code" or "Calculator".') },
         async ({ app }) => {
           const found = await listInstalledApps({ platform })
@@ -657,8 +427,8 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
       ),
       tool(
         'press_keys',
-        'Send one key combination to whatever has focus, such as "ctrl+shift+t", "cmd+s" or "alt+tab". Use type_text for ordinary prose.',
-        { keys: z.string().min(1).max(60).describe('A combo like ctrl+shift+t, cmd+s, alt+tab or return.') },
+        'Send one key combination to whatever has focus, such as "ctrl+shift+t" or "alt+tab". Use type_text for ordinary prose.',
+        { keys: z.string().min(1).max(60).describe('A combo like ctrl+shift+t, alt+tab or return.') },
         async ({ keys }) => textResult(await runBuilt(buildDesktopCommand('press_keys', { keys }, { platform, env }))),
       ),
       tool(
@@ -693,8 +463,8 @@ export function desktopServer({ allowWrites = false, env = process.env } = {}) {
   const caps = desktopCapabilities({ platform, env })
   const instruction = [
     'Control the desktop through these tools: applications, windows, pointer and keyboard.',
-    `Host session: ${caps.platform}/${caps.session}.`,
-    caps.gaps.length ? `Known limits: ${caps.gaps.join('; ')}.` : 'All control surfaces are installed.',
+    `Host: ${caps.platform}/${caps.session}.`,
+    caps.gaps.length ? `Known limits: ${caps.gaps.join('; ')}.` : 'Windows control is built in — PowerShell, user32 and SendKeys need nothing installed.',
     allowWrites
       ? 'Focus or launch the window before typing, and prefer the app\'s own window over the pointer wherever possible. Say in one sentence what you are about to do when it changes something, and never claim an action succeeded unless the tool said so.'
       : 'Acting tools are withheld until the bridge is restarted with JARVIS_ALLOW_WRITES=1; only listing and capability checks are available, so do not claim to have clicked, typed or launched anything.',

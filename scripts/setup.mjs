@@ -104,7 +104,7 @@ if (!configuredModelSlots.length) {
 
   if (configuredEndpoints.some((endpoint) => !endpointStates.get(endpoint)?.reachable)) {
     line(info, 'The browser HUD and local bridge can still start, but an unavailable model route will not answer until its server is running.')
-    line(info, 'This standalone preflight never installs software or models. The root build.ps1/build.sh scripts can install Ollama when the selected fitted plan uses a directly startable local Ollama endpoint.')
+    line(info, 'This standalone preflight never installs software or models. The root build.ps1 script can install Ollama when the selected fitted plan uses a directly startable local Ollama endpoint.')
     line(info, 'The build scripts leave manual model overrides and remote/custom endpoints unchanged; use MODEL STACK to review or retry an explicit install.')
   }
 }
@@ -153,6 +153,6 @@ line(info, `Detected host memory: ${(totalmem() / GB).toFixed(1)} GB. Planner fi
 console.log('')
 console.log('This preflight installs nothing and downloads no models.')
 console.log('To start both local processes:  npm start')
-console.log('Or run the root build.ps1 / build.sh to check dependencies, build, and launch JARVIS.')
+console.log('Or run the root build.ps1 to check dependencies, build, and launch JARVIS.')
 console.log('')
 process.exit(0)

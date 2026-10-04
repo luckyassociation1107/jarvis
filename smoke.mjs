@@ -263,18 +263,29 @@ const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
   ['/autopilot reports the host facts the setup page installs against', (() => {
     const runtime = autopilotData.runtime ?? {}
+    const portable = runtime.portable ?? {}
     return ['platform', 'arch', 'ollamaInstalled', 'downloadUrl'].every((key) => runtime[key] !== undefined)
       && (runtime.diskFreeGb === null || Number.isFinite(runtime.diskFreeGb))
       && Number.isFinite(runtime.totalRamGb)
-      && Boolean(runtime.portable?.asset) && typeof runtime.portable.present === 'boolean'
+      && typeof portable.supported === 'boolean' && typeof portable.present === 'boolean'
+      // On Windows there is an archive to offer; anywhere else the field is
+      // empty on purpose, because offering a Windows zip to a host that cannot
+      // unpack it would be the lie this project keeps refusing to tell.
+      && (portable.supported ? Boolean(portable.asset) : portable.asset === null)
   })()],
   ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('autopilot/install')],
-  ['/autopilot/runtime offers the real archive the one-click install would fetch', (() => {
-    const first = (runtimeData?.variants ?? []).find((variant) => variant.id === 'default')
+  ['/autopilot/runtime offers the real Windows archive the one-click install would fetch', (() => {
+    const variants = runtimeData?.variants ?? []
+    if (process.platform !== 'win32') {
+      // This runner is the Linux test host, not the product's target. It must
+      // claim no archive at all rather than a name it cannot use.
+      return variants.length === 0 && runtimeData?.plan?.supported === false && runtimeData.plan.path === null
+    }
+    const first = variants.find((variant) => variant.id === 'default')
     return Boolean(first)
       && typeof first.name === 'string' && first.name.length > 0
       && first.url.startsWith('http')
-      && ['zip', 'tar.zst', 'tar.gz', 'tar'].includes(first.kind)
+      && first.kind === 'zip'
       && typeof first.sizeBytes === 'number'
       && typeof runtimeData.plan?.path === 'string'
   })()],

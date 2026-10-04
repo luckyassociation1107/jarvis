@@ -4,12 +4,12 @@
  * The model used to be told about the machine only through the tools it was
  * handed, so "can you do X" was answered from imagination: either a reflexive
  * no, or a confident yes that quietly produced nothing. This module reverses
- * that. It probes the host — the session, the programs that are installed, the
- * disk and RAM headroom, whether writes are enabled, which local model slots
- * are filled, which servers are connected — and renders one compact block that
- * is placed at the top of the system prompt. The model plans against facts
- * instead of assumptions, and when it has to say no it can name the missing
- * piece rather than shrugging.
+ * that. It probes the host — the programs that are installed, the disk and RAM
+ * headroom, whether writes are enabled, which local model slots are filled,
+ * which servers are connected — and renders one compact block that is placed at
+ * the top of the system prompt. The model plans against facts instead of
+ * assumptions, and when it has to say no it can name the missing piece rather
+ * than shrugging.
  *
  * The block is a snapshot, so it says so: the live tools win whenever they
  * disagree with it.
@@ -25,29 +25,27 @@ const GB = 1024 ** 3
 /**
  * The programs worth knowing about, chosen so that a missing one changes a
  * plan rather than merely being absent. Not the allowlist — this is a probe
- * list, and an entry here means "the machine has this capability".
+ * list, and an entry here means "the machine has this capability". Names are
+ * what Windows' own resolver accepts: `python`, not `python3`; `soffice`, not
+ * `libreoffice`. PowerShell and cmd are probed too, because on Windows they are
+ * the difference between a script and no script.
  */
 export const PROBE_PROGRAMS = [
   // media
-  'ffmpeg', 'magick', 'convert', 'sox', 'yt-dlp', 'tesseract', 'gimp',
+  'ffmpeg', 'ffprobe', 'magick', 'sox', 'yt-dlp', 'tesseract',
   // documents
-  'pandoc', 'pdftotext', 'libreoffice', 'qpdf',
+  'pandoc', 'pdftotext', 'soffice', 'qpdf',
   // development
-  'git', 'node', 'npm', 'python3', 'pip3', 'docker', 'make', 'gcc', 'cargo', 'go',
+  'git', 'node', 'npm', 'npx', 'python', 'pip', 'docker', 'dotnet', 'cargo', 'go', 'code',
   // data and files
-  'jq', 'sqlite3', 'curl', 'wget', 'zip', 'unzip', '7z', 'tar', 'rsync', 'ssh', 'scp',
+  'jq', 'sqlite3', 'curl', 'wget', 'tar', '7z', 'ssh', 'scp', 'robocopy', 'winget',
+  // the shell itself
+  'powershell', 'pwsh', 'cmd', 'where', 'findstr', 'tasklist',
 ]
 
-/** The desktop-control programs, by the platform that actually uses them. */
-const PLATFORM_PROGRAMS = {
-  linux: ['xdotool', 'wmctrl'],
-  darwin: ['cliclick', 'osascript'],
-  win32: ['powershell.exe'],
-}
-
-/** Everything worth probing on one platform: the common list plus its own. */
-export function probePrograms(platform = process.platform) {
-  return [...PROBE_PROGRAMS, ...(PLATFORM_PROGRAMS[platform] ?? [])]
+/** Everything worth probing here — the list is already Windows-shaped. */
+export function probePrograms() {
+  return [...PROBE_PROGRAMS]
 }
 
 /**
@@ -100,7 +98,7 @@ export function gatherCapabilities({
   diskBytes = null,
   quota = null,
 } = {}) {
-  const caps = desktopCapabilities({ platform, env, has })
+  const caps = desktopCapabilities({ platform })
   const probed = probePrograms(platform)
   const installed = probed.filter((name) => has(name))
   const missing = probed.filter((name) => !has(name))
@@ -153,26 +151,17 @@ export function summariseCapabilities(facts) {
     slots, servers, quota,
   } = facts
 
-  const lines = [`WHAT THIS MACHINE CAN DO — probed now, and again before every question:`]
+  const lines = ['WHAT THIS MACHINE CAN DO — probed now, and again before every question:']
   lines.push(
     `- Host: ${platform} ${cpuArch}, ${cores} cores, ${totalRamGb} GB RAM with ${freeRamGb} GB free right now` +
       (diskFreeGb === null ? '.' : `, ${diskFreeGb} GB free on the volume holding ${diskPath}, load ${load1.toFixed(2)}.`),
   )
-  if (session === 'headless') {
-    lines.push('- No display session: the screen cannot be seen or driven until a desktop session exists.')
+  if (session === 'windows') {
+    lines.push('- Desktop: Windows, driven through PowerShell and user32 — pointer, typing and window control are available with nothing to install.')
+    if (gaps.length > 0) lines.push(`- Control gaps: ${gaps.join('; ')}.`)
   } else {
-    const missingPointer = session === 'wayland'
-      ? 'pointer control only reaches XWayland windows'
-      : facts.pointer === null
-        ? 'pointer control is unavailable'
-        : 'pointer, typing and window control are available'
-    lines.push(`- Desktop session: ${session}; ${missingPointer}.`)
+    lines.push('- Desktop: this host is not Windows, so screen and window control are off. JARVIS drives the desktop on Windows only.')
   }
-  // The headless line above already says there is no session; repeating it as a
-  // control gap makes the block read as boilerplate, which is what makes people
-  // stop reading it.
-  const controlGaps = session === 'headless' ? gaps.filter((gap) => !gap.startsWith('no DISPLAY')) : gaps
-  if (controlGaps.length > 0) lines.push(`- Control gaps: ${controlGaps.join('; ')}.`)
   lines.push(`- Programs installed here: ${installed.length > 0 ? list(installed) : 'none of the ones worth checking'}.`)
   if (missing.length > 0) {
     lines.push(`- Programs not installed: ${list(missing)}. For anything that needs one, plan the nearest route with what is here, or name the install that would unlock it.`)

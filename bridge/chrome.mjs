@@ -2,7 +2,7 @@ import { createSdkMcpServer, tool } from './mcp.mjs'
 import { z } from 'zod'
 import { createConnection } from 'node:net'
 import { readdir, stat } from 'node:fs/promises'
-import { userInfo } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 
 /**
@@ -24,7 +24,7 @@ import { join } from 'node:path'
  *   Chrome extension  (fcoeoabgfenejglbffodgkkbkcdhcgfn)
  *        ↕  Chrome Native Messaging: 4-byte little-endian length + JSON
  *   chrome-native-host
- *        ↕  Unix socket: /tmp/claude-mcp-browser-bridge-<user>/<pid>.sock
+ *        ↕  local socket: <temp>/claude-mcp-browser-bridge-<user>/<pid>.sock
  *   whoever connects  ← this file
  *
  * What the extension's own client normally does at that last step is detour
@@ -49,11 +49,18 @@ import { join } from 'node:path'
 /**
  * Where the native host puts its socket.
  *
- * `userInfo().username` rather than $USER, which is unset under launchd — and a
- * bridge started from a login item is exactly the case where a wrong guess
- * would look like the extension being uninstalled.
+ * On Windows that is under the per-user `%TEMP%`, so the temp directory is
+ * asked rather than a literal path. `/tmp` is kept second for the Linux host
+ * the tests run on and for older builds that wrote there directly.
+ *
+ * `userInfo().username` rather than an environment variable, because a bridge
+ * started from a login item is exactly the case where a wrong guess would look
+ * like the extension being uninstalled.
  */
-const SOCKET_DIR = `/tmp/claude-mcp-browser-bridge-${userInfo().username}`
+const SOCKET_DIRS = [
+  join(tmpdir(), `claude-mcp-browser-bridge-${userInfo().username}`),
+  `/tmp/claude-mcp-browser-bridge-${userInfo().username}`,
+]
 
 /**
  * How long a single browser action may take.
@@ -82,21 +89,23 @@ const CONNECT_TIMEOUT_MS = 3_000
  * accepted as a last resort, because on some setups it is all there is.
  */
 async function findSocket() {
-  let names
-  try {
-    names = await readdir(SOCKET_DIR)
-  } catch {
-    return null
-  }
   const candidates = []
-  for (const name of names) {
-    if (!name.endsWith('.sock')) continue
-    const path = join(SOCKET_DIR, name)
+  for (const dir of SOCKET_DIRS) {
+    let names
     try {
-      const info = await stat(path)
-      candidates.push({ path, at: info.mtimeMs, fallback: name === '0.sock' })
+      names = await readdir(dir)
     } catch {
-      /* vanished between readdir and stat — a restart mid-scan */
+      continue
+    }
+    for (const name of names) {
+      if (!name.endsWith('.sock')) continue
+      const path = join(dir, name)
+      try {
+        const info = await stat(path)
+        candidates.push({ path, at: info.mtimeMs, fallback: name === '0.sock' })
+      } catch {
+        /* vanished between readdir and stat — a restart mid-scan */
+      }
     }
   }
   if (!candidates.length) return null
@@ -170,8 +179,8 @@ class ChromeLink {
     const path = await findSocket()
     if (!path) {
       throw new Error(
-        'The browser extension is not running on this machine. ' +
-          'Open Chrome with the extension enabled, then try again.',
+        'The browser extension is not running on this machine: nothing answered in ' +
+          `${SOCKET_DIRS.join(' or ')}. Open Chrome with the extension enabled, then try again.`,
       )
     }
     await new Promise((resolve, reject) => {

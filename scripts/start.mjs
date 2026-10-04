@@ -133,7 +133,7 @@ async function startOllamaIfNeeded() {
   // the same binary, and a machine that used the setup page's one click should
   // not be told it has nothing until the user adds Ollama to PATH.
   const portables = portableRuntimePlan()
-  const binary = findRuntimeBinary(portables, process.env) ?? (process.platform === 'win32' ? 'ollama.exe' : 'ollama')
+  const binary = findRuntimeBinary(portables, process.env) ?? 'ollama.exe'
   const check = spawnSync(binary, ['--version'], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
   if (check.error || check.status !== 0) {
     console.warn('Ollama is not reachable and no runtime was found. The web UI will still start; local model replies need a model server — `npm run setup` can download one into this project.')

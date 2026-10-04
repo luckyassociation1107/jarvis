@@ -5,11 +5,12 @@
  */
 import { spawnSync } from 'node:child_process'
 
-const windows = process.platform === 'win32'
-const result = spawnSync(windows ? 'npm.cmd' : 'npm', ['ls', '--depth=0', '--json', '--no-color'], {
+// `shell: true` resolves npm.cmd through PATHEXT on Windows and plain npm
+// everywhere else, so this one line serves the whole project.
+const result = spawnSync('npm', ['ls', '--depth=0', '--json', '--no-color'], {
   cwd: process.cwd(),
   encoding: 'utf8',
-  shell: windows,
+  shell: true,
   windowsHide: true,
   timeout: 30_000,
   maxBuffer: 8 * 1024 * 1024,

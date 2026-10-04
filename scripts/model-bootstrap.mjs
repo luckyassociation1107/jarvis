@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * First-run local model setup for build.ps1 / build.sh.
+ * First-run local model setup for build.ps1.
  *
  * Checks the live RAM plan, starts Ollama temporarily if needed, and installs
  * only selected models whose estimated resident use fits the user's share of
@@ -59,7 +59,7 @@ const automaticDownloadBytes = [...new Map(installableDownloadSlots.map(([, choi
 
 function hasOllamaCli() {
   // The project's own downloaded runtime is an Ollama CLI too.
-  const binary = findRuntimeBinary(runtimePlan(), process.env) ?? (process.platform === 'win32' ? 'ollama.exe' : 'ollama')
+  const binary = findRuntimeBinary(runtimePlan(), process.env) ?? 'ollama.exe'
   const result = spawnSync(binary, ['--version'], {
     encoding: 'utf8',
     windowsHide: true,
@@ -164,7 +164,7 @@ async function startTemporaryOllama() {
     return false
   }
 
-  const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
+  const binary = 'ollama.exe'
   const env = { ...process.env, OLLAMA_HOST: ollamaListenAddress(OLLAMA_URL) }
   daemon = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   daemon.stdout.on('data', (chunk) => process.stdout.write(`[ollama] ${chunk}`))

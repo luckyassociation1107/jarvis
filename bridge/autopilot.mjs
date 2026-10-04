@@ -156,18 +156,21 @@ export function totalRam() {
 /**
  * How much RAM is actually free to hand out, in bytes.
  *
- * `os.freemem()` reports truly idle memory, which on Linux excludes the page
- * cache the kernel would happily reclaim — so a machine with 12 GB "free" in
- * every system monitor can look like it only has 2 GB. `MemAvailable` is the
- * kernel's own answer to "how much can a new workload take without swapping",
- * so prefer it when /proc/meminfo exists and fall back to freemem() elsewhere.
+ * On Windows this is `os.freemem()`: the memory the OS reports as available,
+ * which is the conservative number. A machine whose monitor shows 12 GB free
+ * because ten of it is file cache will not hand all twelve to a model, and
+ * planning against the larger figure is how a small machine starts swapping.
+ *
+ * The `/proc/meminfo` branch exists for the Linux host the test suites run on,
+ * where `freemem()` inside a container answers for the host rather than the
+ * container and would make every RAM test meaningless.
  */
 export function availableRam() {
   try {
     const meminfo = readFileSync('/proc/meminfo', 'utf8')
     const match = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m)
     if (match) return Number(match[1]) * 1024
-  } catch { /* not Linux, or /proc is unavailable */ }
+  } catch { /* Windows has no /proc: os.freemem() is the answer */ }
   return freemem()
 }
 
@@ -279,20 +282,6 @@ export async function saveAllocation(patch = {}) {
 
 /** GPU telemetry is advisory only. System RAM remains the hard budget. */
 export function gpu() {
-  if (process.platform === 'darwin') {
-    const total = totalRam()
-    return { vendor: 'apple', name: 'Apple unified memory', vram: total, usable: Math.floor(total * 0.55), note: 'shared memory; CPU RAM budget still applies' }
-  }
-  if (process.platform === 'win32') {
-    try {
-      const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-      const [first] = stdout.trim().split(/\r?\n/)
-      const [mb, ...name] = first.split(',').map((s) => s.trim())
-      const vram = Number(mb) * MB
-      if (vram > 0) return { vendor: 'nvidia', name: name.join(','), vram, usable: Math.floor(vram * 0.75), note: 'NVIDIA VRAM is advisory; CPU RAM cap is unchanged' }
-    } catch { /* no NVIDIA telemetry */ }
-    return null
-  }
   try {
     const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     const [first] = stdout.trim().split(/\r?\n/)
@@ -667,11 +656,11 @@ async function ensureWhisperPackage() {
     return { id, ok: true, skipped: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'already installed' }
   } catch { /* install it below */ }
   try {
-    await execFileAsync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-save', '--prefix', process.cwd(), pkg], {
+    await execFileAsync('npm.cmd', ['install', '--no-save', '--prefix', process.cwd(), pkg], {
       timeout: 10 * 60 * 1000,
       maxBuffer: 8 * MB,
       windowsHide: true,
-      shell: process.platform === 'win32',
+      shell: true,
     })
     return { id, ok: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'local Whisper runtime installed by explicit model-manager action' }
   } catch (error) {
