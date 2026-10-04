@@ -19,6 +19,7 @@
     "setup": "node scripts/install-web.mjs",
     "doctor": "node scripts/setup.mjs",
     "cli": "node scripts/cli.mjs",
+    "install:ollama": "node scripts/install-ollama.mjs",
     "models:plan": "node scripts/model-bootstrap.mjs --plan-json",
     "models:install": "node scripts/model-bootstrap.mjs --install",
     "prebuild": "node scripts/vendor-mediapipe.mjs",

@@ -15,12 +15,14 @@
  * fails.
  */
 
-/** The official Windows installer, for people who would rather manage it themselves. */
+/** The official installers, for people who would rather manage it themselves. */
 export const OLLAMA_DOWNLOAD = Object.freeze({
   win32: 'https://ollama.com/download/OllamaSetup.exe',
+  linux: 'https://ollama.com/download',
+  darwin: 'https://ollama.com/download',
 })
 
-const PLATFORM_NAME = { win32: 'Windows' }
+const PLATFORM_NAME = { win32: 'Windows', linux: 'Linux', darwin: 'macOS' }
 
 /**
  * The whole page, as a string.
@@ -28,11 +30,13 @@ const PLATFORM_NAME = { win32: 'Windows' }
  * @param {{ platform?: string, port?: number, hudUrl?: string }} options
  */
 export function installerPage({ platform = process.platform, port = 8787, hudUrl = null } = {}) {
-  const download = OLLAMA_DOWNLOAD.win32
-  const osName = PLATFORM_NAME[platform] ?? 'Windows'
+  const download = OLLAMA_DOWNLOAD[platform] ?? OLLAMA_DOWNLOAD.linux
+  const osName = PLATFORM_NAME[platform] ?? platform
   const runtimeLine = platform === 'win32'
     ? 'Download the installer and run it, then come back and press re-check.'
-    : `This page sets up Windows; this host is ${platform}, so the project runtime cannot be unpacked here. Every other part still runs.`
+    : platform === 'linux' || platform === 'darwin'
+      ? `Run <code>npm run install:ollama</code> in your terminal, or download from the link below, then press re-check.`
+      : `This page sets up ${osName}; this host is ${platform}, so the project runtime cannot be unpacked here. Every other part still runs.`
 
   return `<!doctype html>
 <html lang="en">

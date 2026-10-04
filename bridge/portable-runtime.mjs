@@ -1,5 +1,5 @@
 /**
- * The model runtime JARVIS fetches for itself — on Windows.
+ * The model runtime JARVIS fetches for itself.
  *
  * Ollama publishes a standalone zip next to its installer, and a page can
  * download and unpack a zip where it cannot run a setup program. That is the
@@ -8,10 +8,8 @@
  * if the connection dropped, verifying the published SHA-256), unpack it inside
  * the project, start it, and die with the parent process.
  *
- * Windows only, deliberately. `ollama-windows-amd64.zip` and
- * `ollama-windows-arm64.zip` carry the binary and its libraries; there is no
- * installer, nothing is registered, nothing is added to PATH, no administrator
- * prompt is raised, and deleting `models/runtime` removes it completely.
+ * Windows: standalone zip, no installer, no PATH, no admin prompt.
+ * Linux/macOS: official install script or direct tarball binary download.
  *
  * Two things this has to survive:
  *
@@ -27,6 +25,7 @@
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  copyFileSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -38,9 +37,11 @@ import {
   rmSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -71,7 +72,9 @@ export function runtimeModelsDir(env = process.env) {
 
 /** Windows only: x64 and arm64 both have a standalone zip. */
 export function platformSupported(platform = process.platform, arch = process.arch) {
-  return platform === 'win32' && (arch === 'x64' || arch === 'arm64')
+  return (platform === 'win32' && (arch === 'x64' || arch === 'arm64'))
+    || platform === 'linux'
+    || platform === 'darwin'
 }
 
 /**
@@ -81,17 +84,31 @@ export function platformSupported(platform = process.platform, arch = process.ar
  * API result is ranked by when it can.
  */
 export function candidateNames({ platform = process.platform, arch = process.arch, variant = 'default' } = {}) {
-  if (platform !== 'win32') return []
-  const bits = arch === 'arm64' ? 'arm64' : 'amd64'
-  if (bits === 'arm64') return ['ollama-windows-arm64.zip']
-  return variant === 'rocm'
-    ? ['ollama-windows-amd64-rocm.zip']
-    : ['ollama-windows-amd64.zip']
+  if (platform === 'win32') {
+    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
+    if (bits === 'arm64') return ['ollama-windows-arm64.zip']
+    return variant === 'rocm'
+      ? ['ollama-windows-amd64-rocm.zip']
+      : ['ollama-windows-amd64.zip']
+  }
+  if (platform === 'linux') {
+    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
+    if (variant === 'rocm' && bits === 'amd64') return ['ollama-linux-amd64-rocm.tar.zst']
+    return [`ollama-linux-${bits}.tar.zst`]
+  }
+  if (platform === 'darwin') {
+    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
+    return [`ollama-darwin-${bits}.tgz`]
+  }
+  return []
 }
 
 /** Which unpacker an archive name needs. Everything Windows ships as a zip. */
 export function archiveKind(name) {
-  return /\.zip$/i.test(String(name ?? '')) ? 'zip' : null
+  if (/\.zip$/i.test(String(name ?? ''))) return 'zip'
+  if (/\.tar\.zst$/i.test(String(name ?? ''))) return 'tar.zst'
+  if (/\.tgz$/i.test(String(name ?? '')) || /\.tar\.gz$/i.test(String(name ?? ''))) return 'tgz'
+  return null
 }
 
 /**
@@ -552,7 +569,7 @@ export async function ensureRuntime({
   fetchImpl = fetch,
 } = {}) {
   if (!platformSupported(platform, arch)) {
-    const error = `JARVIS installs the model runtime on Windows only (this is ${platform}/${arch}); install Ollama from https://ollama.com/download and press re-check`
+    const error = `JARVIS installs the model runtime on Windows, Linux, and macOS (this is ${platform}/${arch}); install Ollama from https://ollama.com/download and press re-check`
     onStep({ phase: 'runtime', status: error, ok: false })
     return { ok: false, error }
   }
@@ -561,6 +578,12 @@ export async function ensureRuntime({
     return { ok: true, skipped: true, url }
   }
 
+  // ── Linux / macOS: use the CLI installer script ──
+  if (platform === 'linux' || platform === 'darwin') {
+    return ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir, onStep, fetchImpl })
+  }
+
+  // ── Windows: existing portable runtime flow ──
   const plan = runtimePlan({ platform, arch, variant, env })
   let bin = findRuntimeBinary(plan, env)
   if (!bin) {
@@ -598,6 +621,180 @@ export async function ensureRuntime({
   const started = await startRuntime({ bin, url, modelsDir, onStep, env })
   if (!started.ok) onStep({ phase: 'runtime', status: started.error, ok: false })
   return { ...started, bin }
+}
+
+/**
+ * Linux / macOS runtime installation.
+ *
+ * Tries, in order:
+ *   1. The official Ollama install script (curl | sh equivalent)
+ *   2. Direct tarball download and extraction
+ *   3. Starting an already-installed ollama binary
+ */
+async function ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir, onStep, fetchImpl }) {
+  onStep({ phase: 'runtime', status: `installing Ollama on ${platform}/${arch}` })
+
+  // Check if ollama binary already exists on PATH
+  const existingBin = findUnixBinary()
+  if (existingBin) {
+    onStep({ phase: 'runtime', status: `Ollama binary found at ${existingBin}`, ok: true })
+    const started = await startRuntime({ bin: existingBin, url, modelsDir, onStep, env })
+    return { ...started, bin: existingBin }
+  }
+
+  // Method 1: Official install script
+  onStep({ phase: 'runtime-download', status: 'downloading the official Ollama install script' })
+  const scriptResult = await installUnixViaScript({ onStep, env })
+  if (scriptResult.ok) {
+    const bin = findUnixBinary()
+    if (bin) {
+      onStep({ phase: 'runtime-ready', status: `Ollama installed at ${bin}` })
+      const started = await startRuntime({ bin, url, modelsDir, onStep, env })
+      return { ...started, bin }
+    }
+  }
+
+  // Method 2: Direct binary tarball
+  onStep({ phase: 'runtime-download', status: 'install script failed; trying direct binary download' })
+  const binResult = await installUnixViaTarball({ platform, arch, variant, onStep, fetchImpl, env })
+  if (binResult.ok && binResult.bin) {
+    onStep({ phase: 'runtime-ready', status: `Ollama installed at ${binResult.bin}` })
+    const started = await startRuntime({ bin: binResult.bin, url, modelsDir, onStep, env })
+    return { ...started, bin: binResult.bin }
+  }
+
+  const error = 'Could not install Ollama automatically. Install it manually: curl -fsSL https://ollama.com/install.sh | sh'
+  onStep({ phase: 'runtime', status: error, ok: false })
+  return { ok: false, error }
+}
+
+function findUnixBinary() {
+  const candidates = ['/usr/local/bin/ollama', '/usr/bin/ollama']
+  const home = homedir()
+  if (home) candidates.push(join(home, '.local/bin/ollama'))
+
+  for (const p of candidates) {
+    if (existsSync(p)) return p
+  }
+
+  // Try `which`
+  try {
+    const which = execSync('which ollama', { encoding: 'utf8', timeout: 5000 }).trim()
+    if (which && existsSync(which)) return which
+  } catch { /* not found */ }
+
+  return null
+}
+
+async function installUnixViaScript({ onStep, env }) {
+  const scriptUrl = 'https://ollama.com/install.sh'
+
+  let script
+  try {
+    const response = await fetch(scriptUrl, { signal: AbortSignal.timeout(30_000) })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    script = await response.text()
+  } catch (err) {
+    return { ok: false, error: `could not download install script: ${err.message}` }
+  }
+
+  const tmpScript = '/tmp/jarvis-ollama-install.sh'
+  writeFileSync(tmpScript, script, { mode: 0o755 })
+
+  return new Promise((resolve) => {
+    const child = spawn('sh', [tmpScript], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...env },
+    })
+
+    child.stdout?.on('data', (d) => {
+      for (const l of d.toString().split('\n')) {
+        if (l.trim()) onStep({ phase: 'runtime', status: l.trim() })
+      }
+    })
+    child.stderr?.on('data', (d) => {
+      for (const l of d.toString().split('\n')) {
+        if (l.trim()) onStep({ phase: 'runtime', status: l.trim() })
+      }
+    })
+
+    child.once('close', (code) => {
+      try { unlinkSync(tmpScript) } catch { /* ok */ }
+      resolve({ ok: code === 0, error: code !== 0 ? `installer exited with code ${code}` : null })
+    })
+    child.once('error', (err) => {
+      try { unlinkSync(tmpScript) } catch { /* ok */ }
+      resolve({ ok: false, error: err.message })
+    })
+  })
+}
+
+async function installUnixViaTarball({ platform, arch, variant, onStep, fetchImpl, env }) {
+  const bits = arch === 'arm64' ? 'arm64' : 'amd64'
+  const url = platform === 'darwin'
+    ? `https://ollama.com/download/ollama-darwin-${bits}.tgz`
+    : `https://ollama.com/download/ollama-linux-${bits}.tgz`
+
+  const tmpTgz = '/tmp/ollama-runtime.tgz'
+  const tmpDir = '/tmp/ollama-runtime-extract'
+
+  try {
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(10 * 60 * 1000) })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+    const total = Number(response.headers?.get?.('content-length') ?? 0)
+    let completed = 0
+    let lastReport = 0
+
+    const counter = new Transform({
+      transform(chunk, _enc, cb) {
+        completed += chunk.length
+        const now = Date.now()
+        if (now - lastReport > 1500) {
+          lastReport = now
+          onStep({ phase: 'runtime-download', status: `downloading Ollama binary`, completed, total })
+        }
+        cb(null, chunk)
+      },
+    })
+
+    await pipeline(Readable.fromWeb(response.body), counter, createWriteStream(tmpTgz))
+  } catch (err) {
+    return { ok: false, error: `download failed: ${err.message}` }
+  }
+
+  // Extract
+  onStep({ phase: 'runtime-unpack', status: 'extracting the Ollama binary' })
+  try {
+    rmSync(tmpDir, { force: true, recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    execSync(`tar xzf ${tmpTgz} -C ${tmpDir}`, { timeout: 60_000 })
+  } catch (err) {
+    return { ok: false, error: `extraction failed: ${err.message}` }
+  }
+
+  const binCandidates = [join(tmpDir, 'bin/ollama'), join(tmpDir, 'ollama')]
+  const binPath = binCandidates.find((p) => existsSync(p))
+  if (!binPath) return { ok: false, error: 'ollama binary not found in the archive' }
+
+  // Install to /usr/local/bin
+  const target = '/usr/local/bin/ollama'
+  try {
+    execSync(`sudo mkdir -p /usr/local/bin && sudo cp ${binPath} ${target} && sudo chmod 755 ${target}`, { timeout: 15_000 })
+  } catch {
+    // Fallback: ~/.local/bin
+    const homeTarget = join(homedir(), '.local/bin/ollama')
+    mkdirSync(join(homedir(), '.local/bin'), { recursive: true })
+    copyFileSync(binPath, homeTarget)
+    chmodSync(homeTarget, 0o755)
+    rmSync(tmpTgz, { force: true })
+    rmSync(tmpDir, { force: true, recursive: true })
+    return { ok: true, bin: homeTarget }
+  }
+
+  rmSync(tmpTgz, { force: true })
+  rmSync(tmpDir, { force: true, recursive: true })
+  return { ok: true, bin: target }
 }
 
 /* ------------------------------------------------------------------- running */
