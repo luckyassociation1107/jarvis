@@ -28,6 +28,10 @@ import {
 
 const writes = process.argv.includes('--writes')
 const noOpen = process.argv.includes('--no-open')
+// --auto is what the double-click launchers use: no page, no second press.
+// The stack is chosen the same way the setup page chooses its default — the
+// largest rung this machine's RAM can hold — and installed here, in the open.
+const autoInstall = process.argv.includes('--auto')
 
 // A dim label per process, so the interleaved logs stay readable.
 const paint = (tag, colour) => (line) =>
@@ -204,7 +208,7 @@ run('bridge', 'node', ['bridge/server.mjs'], '36', bridgeEnv)
  * about. Silent when the stack is already there, and skippable with --no-open.
  */
 async function offerSetup() {
-  if (noOpen) return
+  if (noOpen && !autoInstall) return
   const bridgePort = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
   const hud = `http://localhost:${process.env.PORT ?? 5173}`
   const deadline = Date.now() + 15_000
@@ -216,6 +220,7 @@ async function offerSetup() {
         const wanted = (plan.modelSlots ?? []).filter((slot) => slot.model)
         const incomplete = wanted.some((slot) => slot.state !== 'ready')
         if (!plan.ollama || incomplete) {
+          if (autoInstall) return installEverything(plan, bridgePort, hud)
           const url = `http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`
           console.log(`\n  No complete model stack yet. Choose one in the setup page:\n    ${url}\n`)
           openBrowser(url)
@@ -226,6 +231,96 @@ async function offerSetup() {
     await new Promise((resolve) => setTimeout(resolve, 400))
   }
 }
+
+/**
+ * `--auto`: press the button for the user.
+ *
+ * This is the double-click path, so it has to be honest about everything it
+ * does: the chosen size and the model names are printed before anything is
+ * downloaded, each step is reported as it happens, and a failure names itself
+ * instead of leaving a half-installed stack and a cheerful message.
+ */
+async function installEverything(plan, bridgePort, hud) {
+  // The same rung the setup page preselects: the largest tier this machine's
+  // RAM can hold, which is what the planner's own catalogue would offer.
+  const totalRamGb = Number(plan.runtime?.totalRamGb ?? plan.ram?.totalGb ?? 0)
+  const tiers = (plan.tiers ?? []).filter((tier) => Number(tier.ramGb) > 0)
+  const fitting = tiers.filter((tier) => tier.ramGb <= totalRamGb).sort((a, b) => b.ramGb - a.ramGb)[0]
+  const ramGb = fitting?.ramGb ?? tiers[0]?.ramGb ?? 0.5
+  console.log(`\n  Installing the model stack this machine fits: ${ramGb < 1 ? '500 MB' : `${ramGb} GB`} · ${gb(fitting?.totalDownloadGb ?? 0)} of models`)
+  console.log('  Runtime first, then the chat/vision/coding weights. Ctrl-C stops it all.\n')
+
+  let job
+  try {
+    const response = await fetch(`http://localhost:${bridgePort}/autopilot/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ramGb, runtime: true, runtimeVariant: 'auto' }),
+    })
+    job = await response.json()
+  } catch (error) {
+    console.error(`  Could not start the installer: ${error.message}`)
+    console.error(`  Open the setup page instead: http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`)
+    return
+  }
+  if (job?.error) {
+    console.error(`  Installer refused: ${job.error}`)
+    return
+  }
+
+  const seen = new Set()
+  const deadline = Date.now() + 60 * 60 * 1000
+  while (Date.now() < deadline && !stopping) {
+    let status
+    try {
+      const response = await fetch(`http://localhost:${bridgePort}/autopilot/install/status?id=${encodeURIComponent(job.jobId)}`)
+      status = await response.json()
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      continue
+    }
+    for (const step of status.steps ?? []) {
+      const line = stepLine(step)
+      if (line && !seen.has(line)) {
+        seen.add(line)
+        console.log(`  ${line}`)
+      }
+    }
+    if (status.state !== 'running') {
+      if (status.state === 'failed') console.error(`\n  Installation failed: ${status.error ?? 'see the steps above'}`)
+      else if (status.state === 'partial') console.log('\n  Partly installed — the skipped steps are listed above.')
+      else console.log('\n  Everything is installed. Ask away.')
+      // The HUD URL is the one Vite printed a line or two above, which is not
+      // always 5173: a second copy of the app moves it along.
+      console.log(`  Open the Vite URL above in Chrome and say “Hey Jarvis”, or type at it with \`npm run cli\`.`)
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+  }
+}
+
+/** One terminal line per installer step, deduplicated by the caller. */
+function stepLine(step) {
+  const pct = step.total ? ` · ${Math.round((step.completed / step.total) * 100)}%` : ''
+  switch (step.phase) {
+    case 'runtime-download': return step.completed && step.total && step.completed < step.total
+      ? `↓ ${step.status ?? 'runtime'}${pct}`
+      : `↓ ${step.status ?? 'runtime'}`
+    case 'runtime-verify': return `· ${step.status ?? 'verifying'}`
+    case 'runtime-unpack': return `· ${step.status ?? 'unpacking'}`
+    case 'runtime-ready': return `✓ ${step.status ?? 'runtime ready'}`
+    case 'runtime': return step.ok === false ? `✗ ${step.status}` : `· ${step.status}`
+    case 'plan': return `· ${step.summary ?? 'planned'}`
+    case 'pull': return `↓ ${step.model}${pct}`
+    case 'whisper': return `↓ ${step.file}${pct}`
+    case 'browser-voice': return `· voice · ${step.status ?? ''}`
+    case 'skip': return `· skipped ${step.model ?? ''}${step.status ? ` · ${step.status}` : ''}`
+    case 'done': return `✓ installed ${step.installed ?? 0}, skipped ${step.skipped ?? 0}, failed ${step.failed ?? 0}`
+    default: return null
+  }
+}
+
+const gb = (value) => `${Number(value).toFixed(2)} GB`
 
 void offerSetup()
 // npm is a shell script on most systems; call the vite binary directly so we do

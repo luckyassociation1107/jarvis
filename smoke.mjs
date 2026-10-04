@@ -258,6 +258,7 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
       && /abliterat/i.test(slots.vision.model)
   })
 const setupPage = await fetch(`http://localhost:${PORT}/install`).then((r) => (r.ok ? r.text() : null)).catch(() => null)
+const runtimeData = await fetch(`http://localhost:${PORT}/autopilot/runtime`).then((r) => r.json()).catch(() => null)
 const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
   ['/autopilot reports the host facts the setup page installs against', (() => {
@@ -268,6 +269,15 @@ const autopilotChecks = [
       && Boolean(runtime.portable?.asset) && typeof runtime.portable.present === 'boolean'
   })()],
   ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('autopilot/install')],
+  ['/autopilot/runtime offers the real archive the one-click install would fetch', (() => {
+    const first = (runtimeData?.variants ?? []).find((variant) => variant.id === 'default')
+    return Boolean(first)
+      && typeof first.name === 'string' && first.name.length > 0
+      && first.url.startsWith('http')
+      && ['zip', 'tar.zst', 'tar.gz', 'tar'].includes(first.kind)
+      && typeof first.sizeBytes === 'number'
+      && typeof runtimeData.plan?.path === 'string'
+  })()],
   ['the one-click button asks the bridge for the runtime as well as the models', Boolean(setupPage) && setupPage.includes('runtime: true') && setupPage.includes('models/runtime')],
   ['the setup page offers the official runtime download for this platform', Boolean(setupPage) && setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],

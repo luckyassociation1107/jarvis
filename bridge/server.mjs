@@ -25,7 +25,7 @@ import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, with
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { availableRam, install as autopilotInstall, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
-import { ensureRuntime, runtimeStatus } from './portable-runtime.mjs'
+import { ensureRuntime, resolveVariants, rocmSuggested, runtimeStatus } from './portable-runtime.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -49,6 +49,8 @@ import { renderPage } from './page.mjs'
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 const AUTOPILOT_JOBS = new Map()
+// One release lookup shared by every page load, refreshed every ten minutes.
+const RUNTIME_VARIANTS = { at: 0, value: null }
 
 /**
  * A crash here takes the whole assistant down mid-sentence, and most of what
@@ -824,6 +826,25 @@ const handleRequest = async (req, res) => {
 
   // RAM-aware Model Stack. GET is always read-only; POST is the explicit
   // user-triggered download action and runs as a tracked background job.
+  // What the one-click installer would download: the real asset names and
+  // sizes for this machine, read from the release itself. Cached for ten
+  // minutes, because this page is opened and re-opened and GitHub's API has
+  // opinions about that.
+  if (req.method === 'GET' && requestUrl.pathname === '/autopilot/runtime') {
+    const now = Date.now()
+    if (!RUNTIME_VARIANTS.at || now - RUNTIME_VARIANTS.at > 10 * 60 * 1000) {
+      const resolved = await resolveVariants({ platform: process.platform, arch: process.arch })
+      RUNTIME_VARIANTS.value = {
+        ...resolved,
+        rocmSuggested: rocmSuggested(),
+        plan: runtimeStatus(),
+      }
+      RUNTIME_VARIANTS.at = now
+    }
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify(RUNTIME_VARIANTS.value))
+  }
+
   if (req.method === 'GET' && requestUrl.pathname === '/autopilot') {
     const p = AUTOPILOT_PLAN
     const runtime = await modelSlotStatus()
@@ -978,7 +999,7 @@ const handleRequest = async (req, res) => {
       return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
     }
     if (request === null || typeof request !== 'object' || Array.isArray(request)) request = {}
-    const unknown = Object.keys(request).filter((key) => key !== 'ramGb' && key !== 'runtime')
+    const unknown = Object.keys(request).filter((key) => key !== 'ramGb' && key !== 'runtime' && key !== 'runtimeVariant')
     if (unknown.length) {
       res.writeHead(400, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
@@ -1022,7 +1043,8 @@ const handleRequest = async (req, res) => {
       // and started before the first model pull — and a machine that already
       // answers on the model port skips this in one line.
       if (request.runtime === true) {
-        const ready = await ensureRuntime({ onStep })
+        const variant = request.runtimeVariant === 'rocm' ? 'rocm' : request.runtimeVariant === 'auto' ? (rocmSuggested() ? 'rocm' : 'default') : 'default'
+        const ready = await ensureRuntime({ variant, onStep })
         if (!ready.ok) {
           const error = ready.error ?? 'the model runtime could not be started'
           job.error = error

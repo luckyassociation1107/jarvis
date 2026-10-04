@@ -186,7 +186,35 @@ binary archive*, into this project's own `models/runtime/`, when you press the
 page's button; nothing is installed system-wide and no `sudo` is ever used. A
 system Ollama remains your call, through the link the page still offers.
 
-## Setup: the page does the installing
+## Setup: one click in the folder
+
+Download or clone the repo, open the folder, and double-click the launcher for
+your platform:
+
+```
+Windows        START.cmd
+macOS          START.command
+Linux          START.sh
+```
+
+That single action finds Node.js 20+ (and offers to install it if it is
+missing), installs the npm packages from the lockfile, builds the browser
+interface, starts the bridge and the HUD, and opens the setup page described
+below. On that page one button installs everything else: the model runtime and
+the model stack this machine can actually run.
+
+For a completely unattended first run — no page, no second press, progress
+printed in the window — double-click `START.cmd` with `auto`, or run:
+
+```bash
+./START.sh auto        # or bash ./build.sh --auto
+```
+
+It picks the same stack the page preselects (the largest rung this machine's RAM
+holds), installs the runtime and the models, and tells you when the assistant is
+ready.
+
+### The page, if you prefer running it yourself
 
 Installation is a page in your own browser, not a script in this repo. npm
 starts a small local host for that page and opens it:
@@ -217,18 +245,27 @@ pretending it succeeded.
 
 **The runtime is part of that one click.** Ollama publishes standalone builds
 next to its installers, and a page can download and unpack an archive — so the
-bridge does exactly that: it fetches `ollama-linux-amd64.tgz`,
-`ollama-darwin.tgz` or `ollama-windows-amd64.zip` from the official release,
-unpacks it into `models/runtime/`, starts `ollama serve` out of it, and only then
-pulls the models. No installer runs, no administrator prompt appears, nothing is
-added to your PATH, and deleting `models/runtime/` removes the runtime
-completely. If a model server already answers on the model port, that step is
-one line of text and nothing is downloaded. If you would rather have a managed
-Ollama — the desktop app, the Windows installer, the system package — the page
-keeps its download link and a **Re-check** button, and `scripts/start.mjs` starts
-whichever one exists. `JARVIS_RUNTIME_DIR` and `JARVIS_RUNTIME_BASE` relocate that
-folder and point it at a mirror; `JARVIS_RUNTIME_MODELS` is where the portable
-runtime keeps its weights (`models/ollama` by default).
+bridge does exactly that. It reads the release's own asset list (so a rename
+upstream, like Linux's move from `.tgz` to `.tar.zst`, cannot break an install),
+downloads the one that matches this machine's platform, architecture and GPU,
+**resumes** an interrupted download from where it stopped, verifies the
+SHA-256 the release publishes, unpacks it into `models/runtime/` — in Node
+itself, so Windows needs no `unzip` and Linux no `zstd` binary — starts
+`ollama serve` out of it, and only then pulls the models. No installer runs, no
+administrator prompt appears, nothing is added to your PATH, and deleting
+`models/runtime/` removes the runtime completely.
+
+There are two builds and the page offers both: the default one carries the
+NVIDIA CUDA libraries, and AMD cards need the `-rocm` archive. ROCm is
+preselected only when it is actually present on the machine. If a model server
+already answers on the model port, that whole step is one line of text and
+nothing is downloaded. If you would rather have a managed Ollama — the desktop
+app, the Windows installer, the system package — the page keeps its download
+link and a **Re-check** button, and `scripts/start.mjs` starts whichever one
+exists. `JARVIS_RUNTIME_DIR` relocates the folder, `JARVIS_RUNTIME_BASE` points
+the download at a mirror, `JARVIS_RUNTIME_API` overrides the release lookup, and
+`JARVIS_RUNTIME_MODELS` is where the portable runtime keeps its weights
+(`models/ollama` by default).
 
 `npm start` also opens that page automatically when the plan has no Ollama or a
 model slot that is not `ready`; pass `--no-open` to keep it shut. In the HUD the
@@ -307,9 +344,12 @@ matching) and the capability block (what a headless, read-only Linux host says
 about itself, and what a write-enabled one says instead) without running a
 command or moving a pointer.
 `npm run test:runtime` covers the one-click runtime against a local mock release
-server: per-platform asset choice, download, unpack of both the tarball and the
-Windows zip, a second press skipping the download, the already-answering case,
-and honest failures for a bad download and an archive that will not unpack.
+and asset server: asset resolution per platform, architecture and GPU, a
+download that drops mid-transfer resuming with a `Range` request, a checksum
+that fails being deleted rather than unpacked, a release with no checksum being
+reported honestly, unpacking of `tar.gz`, `tar.zst` and `zip` (both a stored and
+a deflated entry) with no external tools, path-traversal entries being contained
+or refused, and the already-answering case.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
 33-tier catalogue/statuses, the served `/install` setup page and its `runtime`
 contract, the terminal client answering through the same bridge in one-shot
@@ -362,6 +402,7 @@ One browser HUD backed by a Node bridge and your own local models:
 src/ + index.html        browser HUD — voice, reactor, panels
 bridge/                  local Node bridge — model pipeline, tools, autopilot
 scripts/                 setup page host, doctor preflight, terminal client, build assets, start helpers
+START.cmd / START.command / START.sh   one-click launchers for a downloaded folder
 build.ps1 / build.sh     Node/npm check, web build, preflight, and launch (no silent installs)
 smoke.mjs                bridge checks
 ```

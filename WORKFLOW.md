@@ -78,11 +78,15 @@ The **MODEL STACK** HUD panel (key `M`) shows the live plan and a 33-row
 informational; it never installs every tier. `GET /autopilot` is read-only,
 `POST /autopilot/config` only saves the share/cap and re-plans, and
 `POST /autopilot/install` is the single user-triggered download action — the
-same endpoint behind both the panel's INSTALL SELECTED STACK button and the
-setup page. With `{ runtime: true }` (what the page sends) it first makes sure a
-model server is up: an existing one is left alone, the project's own downloaded
-runtime is started, or the standalone archive is fetched and unpacked into
-`models/runtime/`. It then downloads only the selected fitting Ollama models,
+same endpoint behind the panel's INSTALL SELECTED STACK button, the setup page
+and `--auto`. With `{ runtime: true }` (what all three send) it first makes sure
+a model server is up: an existing one is left alone, the project's own
+downloaded runtime is started, or the standalone archive is fetched — resolved
+from the release's own asset list, resumed if a previous attempt was
+interrupted, verified against the published SHA-256, and unpacked in Node — into
+`models/runtime/`. `runtimeVariant` chooses between the default (NVIDIA CUDA +
+CPU) and AMD's `-rocm` build; `GET /autopilot/runtime` lists both with their real
+sizes and checksums, cached for ten minutes. It then downloads only the selected fitting Ollama models,
 the Whisper model and the speech runtime; existing assets are reused, and other
 tiers and over-budget best-effort models are skipped. No system installer is
 ever run and no `sudo` is ever used — the page keeps a link to the official
@@ -149,6 +153,17 @@ effectful MCP tools remain behind the same write gate.
 
 ## Local setup
 
+Download the folder, open it, and double-click the launcher: `START.cmd` on
+Windows, `START.command` on macOS, `START.sh` on Linux. One click does the whole
+first run — Node check, `npm ci`, web build, preflight, bridge and HUD — and
+opens the setup page, where one button installs the runtime and the stack this
+machine fits. Add `auto` (`START.cmd auto`, `./START.sh auto`) to skip even that
+press: the fitting stack is chosen and installed with its progress printed in
+the window. `bash ./build.sh --auto` and `./build.ps1 -Auto` are the same path
+from a terminal.
+
+### The manual route
+
 Installation happens in your browser, not in a script. After cloning/extracting:
 
 ```bash
@@ -197,6 +212,14 @@ The scripts remain web-only: no desktop/EXE bundle. Ollama defaults to port
 
 For a manual development workflow, run `npm ci`, `npm run build`, and
 `npm start`.
+
+## The launchers
+
+`START.cmd`, `START.command` and `START.sh` are small: they call the build script
+for the platform and keep the window open so a failure can be read. All the
+substance stays in `build.sh` / `build.ps1`, so there is one setup path and not
+two — the launchers exist because a user who downloaded a folder should not have
+to know that `npm ci` is a thing.
 
 ## The terminal client
 

@@ -3,7 +3,10 @@
 [CmdletBinding()]
 param(
   [switch]$NoLaunch,
-  [switch]$SkipAiModels
+  [switch]$SkipAiModels,
+  # The launcher (START.cmd) passes this: do not stop at the setup page,
+  # install the stack this machine fits and then answer.
+  [switch]$Auto
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,6 +141,8 @@ try {
     Write-Host 'Skipping the model setup page (-SkipAiModels).' -ForegroundColor Yellow
   }
 
+  $npmArgs = @('start')
+  if ($Auto) { $npmArgs += '--'; $npmArgs += '--auto' }
   if ($NoLaunch) {
     Write-Host ''
     Write-Host 'Setup and build complete. -NoLaunch left the bridge and browser server stopped.'
@@ -147,9 +152,15 @@ try {
   Write-Host ''
   Write-Host 'Starting the local bridge and browser HUD.' -ForegroundColor Green
   Write-Host 'Open the Vite URL printed below in Chrome or Edge. Keep this window open;'
-  Write-Host 'Ctrl-C stops the bridge and browser server together. If no model stack is'
-  Write-Host 'downloaded yet, the setup page opens automatically — pick one there.'
-  & $npmPath start
+  if ($Auto) {
+    Write-Host 'Ctrl-C stops the bridge and browser server together.'
+    Write-Host '-Auto: the model runtime and the stack this machine fits are installed'
+    Write-Host 'here, before the first answer, and the progress is printed below.'
+  } else {
+    Write-Host 'Ctrl-C stops the bridge and browser server together. If no model stack is'
+    Write-Host 'downloaded yet, the setup page opens automatically — pick one there.'
+  }
+  & $npmPath @npmArgs
   if ($LASTEXITCODE -ne 0) { throw "npm start exited with code $LASTEXITCODE." }
 }
 catch {

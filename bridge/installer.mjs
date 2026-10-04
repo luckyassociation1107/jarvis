@@ -135,7 +135,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
   var COMMAND = ${JSON.stringify(platform === 'linux' ? OLLAMA_COMMAND : null)}
   var HUD = ${JSON.stringify(hudUrl)}
   var OS = ${JSON.stringify(osName)}
-  var state = { plan: null, tiers: [], selected: null, job: null, poll: null, fitsOnly: false }
+  var state = { plan: null, tiers: [], selected: null, job: null, poll: null, fitsOnly: false, runtime: null, variant: 'default' }
 
   function el(id) { return document.getElementById(id) }
   function gb(n) { return (Math.round(n * 100) / 100) + ' GB' }
@@ -187,9 +187,22 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
       } else if (portable.present) {
         line = 'The model runtime is already unpacked in this project (<code>' + (portable.path || '') + '</code>). Press <b>Install everything</b> below: it starts here, and the models follow.'
       } else {
-        line = 'No model runtime yet. Press <b>Install everything</b> below and this page downloads the official standalone Ollama build (' + (portable.asset || 'the official archive') + ') into this project, starts it, then downloads the stack you picked. Nothing is installed system-wide and nothing is added to your PATH.'
+        var chosen = chosenVariant()
+        line = 'No model runtime yet. Press <b>Install everything</b> below and this page downloads the official standalone Ollama archive'
+          + (chosen ? ' (<code>' + chosen.name + '</code>' + (chosen.sizeBytes ? ' · ' + gb(chosen.sizeBytes / 1073741824) : '') + ')' : '')
+          + ' into this project, checks it against the release checksum, unpacks it, starts it, then downloads the stack you picked. Nothing is installed system-wide and nothing is added to your PATH.'
       }
       html += '<p class="note">' + line + '</p>'
+      var variants = state.runtime && state.runtime.variants ? state.runtime.variants : []
+      if (!rt.ollamaInstalled && !portable.present && variants.length > 1) {
+        html += '<p class="note muted" style="font-size:13px">Which build? The default covers NVIDIA and CPU; AMD cards need their own build.</p><div class="tiers">'
+        variants.forEach(function (v) {
+          html += '<label class="tier' + (state.variant === v.id ? ' active' : '') + '"><input type="radio" name="rtvariant" value="' + v.id + '"' + (state.variant === v.id ? ' checked' : '') + '>'
+            + '<span class="ram">' + (v.id === 'rocm' ? 'AMD · ROCm' : 'NVIDIA CUDA + CPU') + '</span>'
+            + '<span class="meta">' + v.name + (v.sizeBytes ? ' · ' + gb(v.sizeBytes / 1073741824) : '') + (v.verified ? ' · checksum published' : '') + (state.runtime.rocmSuggested && v.id === 'rocm' ? ' · detected on this machine' : '') + '</span></label>'
+        })
+        html += '</div>'
+      }
       html += '<p class="note muted" style="font-size:13px">Already have Ollama, or want it managed by the system? ' + ${JSON.stringify(runtimeLine)} + '</p>'
       html += '<div class="actions"><a href="' + DOWNLOAD + '" target="_blank" rel="noreferrer"><button>Download the ' + OS + ' installer instead</button></a>'
       if (COMMAND) html += '<code>' + COMMAND + '</code>'
@@ -198,6 +211,24 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     el('runtime').innerHTML = html
     var again = el('recheck')
     if (again) again.onclick = load
+    wireVariants()
+  }
+
+  function chosenVariant() {
+    var list = (state.runtime && state.runtime.variants) || []
+    for (var i = 0; i < list.length; i += 1) if (list[i].id === state.variant) return list[i]
+    return list[0] || null
+  }
+
+  function wireVariants() {
+    var radios = document.querySelectorAll('input[name=rtvariant]')
+    for (var i = 0; i < radios.length; i += 1) {
+      radios[i].onchange = function (event) {
+        state.variant = event.target.value
+        state.variantChosen = true
+        renderRuntime()
+      }
+    }
   }
 
   function tierRow(tier) {
@@ -250,12 +281,14 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     else if (step.phase === 'runtime-download') label = 'runtime · ' + (step.status || 'downloading') + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
     else if (step.phase === 'runtime-unpack') label = 'runtime · ' + (step.status || 'unpacking')
     else if (step.phase === 'runtime-ready') label = 'runtime · ' + (step.status || 'ready')
+    else if (step.phase === 'runtime-verify') label = 'runtime · ' + (step.status || 'verifying')
     else if (step.phase === 'skip') label = 'skipped ' + (step.model || step.cap || '') + (step.status ? ' · ' + step.status : '')
     else if (step.phase === 'browser-voice') label = 'voice · ' + (step.status || step.model || 'browser')
     else if (step.phase === 'done') label = 'finished · ' + step.installed + ' installed, ' + (step.skipped || 0) + ' skipped, ' + (step.failed || 0) + ' failed'
     else if (step.phase === 'error') label = 'error · ' + (step.message || '')
     else label = step.phase
     var runtimePhase = step.phase && step.phase.indexOf('runtime') === 0
+    if (step.phase === 'runtime-verify') cls = 'now'
     var cls = step.phase === 'done' ? 'done' : step.phase === 'error' ? 'fail' : (step.phase === 'pull' || step.phase === 'whisper' || step.phase === 'runtime-download') ? 'now' : runtimePhase && step.ok === false ? 'fail' : ''
     return '<div class="step ' + cls + '"><span class="mark">' + (step.phase === 'done' ? '✓' : step.phase === 'error' ? '✗' : '›') + '</span><span>' + label + '</span></div>'
   }
@@ -286,7 +319,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     fetch('autopilot/install', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ramGb: state.selected, runtime: true }),
+      body: JSON.stringify({ ramGb: state.selected, runtime: true, runtimeVariant: state.variant }),
     }).then(function (r) { return r.json() }).then(function (res) {
       if (res.error) { el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + res.error + '</span></div>'; return }
       state.job = res.jobId
@@ -307,7 +340,16 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
       .catch(function () {})
   }
 
+  function loadRuntime() {
+    fetch('autopilot/runtime').then(function (r) { return r.json() }).then(function (data) {
+      state.runtime = data
+      if (data.rocmSuggested && !state.variantChosen) state.variant = 'rocm'
+      renderRuntime()
+    }).catch(function () { /* the rest of the page still works without it */ })
+  }
+
   function load() {
+    loadRuntime()
     fetch('autopilot').then(function (r) { return r.json() }).then(function (plan) {
       state.plan = plan
       state.tiers = plan.tiers || []

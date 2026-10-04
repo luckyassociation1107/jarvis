@@ -18,11 +18,15 @@ fail() {
 
 NO_LAUNCH=0
 SKIP_AI_MODELS=0
+AUTO_INSTALL=0
 for argument in "$@"; do
   case "$argument" in
     --no-launch) NO_LAUNCH=1 ;;
     --skip-ai-models) SKIP_AI_MODELS=1 ;;
-    *) fail "Unknown option: $argument (supported: --no-launch, --skip-ai-models)." ;;
+    # The launchers (START.sh / START.command) pass this: do not stop at the
+    # setup page, install the stack this machine fits and then answer.
+    --auto) AUTO_INSTALL=1 ;;
+    *) fail "Unknown option: $argument (supported: --no-launch, --skip-ai-models, --auto)." ;;
   esac
 done
 
@@ -173,6 +177,18 @@ fi
 if (( NO_LAUNCH )); then
   printf '\nSetup and build complete. --no-launch left the bridge and browser server stopped.\n'
   exit 0
+fi
+
+if (( AUTO_INSTALL )); then
+  cat <<'EOF'
+
+Starting the local bridge and browser HUD.
+Open the Vite URL printed below in Chrome or Edge. Keep this window open;
+Ctrl-C stops the bridge and browser server together.
+--auto: the model runtime and the stack this machine fits are installed here,
+before the first answer, and the progress is printed below.
+EOF
+  exec npm start -- --auto
 fi
 
 cat <<'EOF'
