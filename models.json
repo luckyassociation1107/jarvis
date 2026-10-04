@@ -13,62 +13,81 @@
 
   "slots": {
     "chat": {
-      "_purpose": "Primary conversation — fast responses, good quality",
-      "primary": "qwen2.5:3b",
-      "fallback": "llama3.2:3b",
-      "quality": "qwen2.5:7b",
-      "contextLength": 4096,
-      "maxTokens": 1024,
+      "_purpose": "Uncensored multilingual chat — NO filters, NO refusals",
+      "primary": "dolphin3:8b",
+      "fallback": "huihui_ai/qwen3-abliterated:8b",
+      "quality": "dolphin3:8b",
+      "contextLength": 131072,
+      "maxTokens": 2048,
       "temperature": 0.7,
-      "numThreads": 8,
+      "numThreads": 10,
       "quantization": "Q4_K_M",
-      "expectedSpeed": "15-25 tok/s (3B) | 6-10 tok/s (7B)"
+      "expectedSpeed": "15-18 tok/s",
+      "uncensored": true,
+      "multilingual": true
     },
 
     "reason": {
-      "_purpose": "Complex reasoning — logic, math, code, planning",
-      "primary": "qwen2.5:7b",
-      "fallback": "deepseek-r1:7b",
-      "quality": "qwen2.5:14b",
-      "contextLength": 4096,
+      "_purpose": "Complex reasoning — uncensored chain-of-thought",
+      "primary": "dolphin3:8b",
+      "fallback": "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3",
+      "quality": "dolphin3:8b",
+      "contextLength": 131072,
       "maxTokens": 2048,
       "temperature": 0.3,
-      "numThreads": 8,
+      "numThreads": 10,
       "quantization": "Q4_K_M",
-      "expectedSpeed": "6-10 tok/s (7B) | 2-4 tok/s (14B)"
+      "expectedSpeed": "15-18 tok/s",
+      "uncensored": true
     },
 
     "vision": {
-      "_purpose": "Image understanding — screen analysis, object detection",
-      "primary": "llava:7b",
+      "_purpose": "Multilingual vision — 32 language OCR, screen analysis, image understanding",
+      "primary": "qwen3-vl:4b",
       "fallback": "minicpm-v:8b",
-      "contextLength": 2048,
-      "maxTokens": 512,
+      "contextLength": 262144,
+      "maxTokens": 1024,
       "temperature": 0.5,
-      "numThreads": 8,
+      "numThreads": 10,
       "quantization": "Q4_K_M",
-      "expectedSpeed": "4-6 tok/s"
+      "expectedSpeed": "15-20 tok/s",
+      "ocrLanguages": 32,
+      "multilingual": true
+    },
+
+    "coder": {
+      "_purpose": "Uncensored code generation — NO restrictions",
+      "primary": "huihui_ai/qwen2.5-coder-abliterate:7b",
+      "fallback": "qwen2.5-coder:7b",
+      "contextLength": 131072,
+      "maxTokens": 4096,
+      "temperature": 0.2,
+      "numThreads": 10,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "7-8 tok/s",
+      "uncensored": true
     }
   },
 
   "install": {
-    "_instructions": "Run these commands to install recommended models",
+    "_instructions": "Run these commands to install uncensored models",
     "quick": [
-      "ollama pull qwen2.5:3b",
-      "ollama pull llama3.2:3b"
+      "ollama pull dolphin3:8b"
     ],
     "recommended": [
-      "ollama pull qwen2.5:3b",
-      "ollama pull qwen2.5:7b",
-      "ollama pull llava:7b"
+      "ollama pull dolphin3:8b",
+      "ollama pull qwen3-vl:4b",
+      "ollama pull huihui_ai/qwen2.5-coder-abliterate:7b"
     ],
     "full": [
-      "ollama pull qwen2.5:3b",
-      "ollama pull qwen2.5:7b",
-      "ollama pull llava:7b",
-      "ollama pull deepseek-r1:7b",
-      "ollama pull phi3:mini"
-    ]
+      "ollama pull dolphin3:8b",
+      "ollama pull qwen3-vl:4b",
+      "ollama pull huihui_ai/qwen2.5-coder-abliterate:7b",
+      "ollama pull huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3",
+      "ollama pull huihui_ai/qwen3-abliterated:8b"
+    ],
+    "_disk": "~13GB for recommended set",
+    "_ram": "~5GB per model loaded, one at a time"
   },
 
   "performance": {
