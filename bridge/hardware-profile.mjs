@@ -63,6 +63,20 @@ function detectHardware() {
     }
   }
 
+  // Detect storage type
+  let storage = { type: 'unknown', free: 0 }
+  if (platform === 'win32') {
+    try {
+      const diskInfo = execSync('wmic diskdrive get MediaType,Size /format:csv', { encoding: 'utf8', timeout: 5000 })
+      storage.type = diskInfo.toLowerCase().includes('ssd') || diskInfo.toLowerCase().includes('nvme') ? 'SSD' : 'HDD'
+    } catch { /* ignore */ }
+    try {
+      const freeSpace = execSync('wmic logicaldisk where "DeviceID=\'C:\'" get FreeSpace /format:csv', { encoding: 'utf8', timeout: 5000 })
+      const match = freeSpace.match(/(\d+)/)
+      if (match) storage.free = Math.round(parseInt(match[1]) / 1024 / 1024 / 1024)
+    } catch { /* ignore */ }
+  }
+
   return {
     cpu: {
       model: cpuModel.trim(),
@@ -71,17 +85,21 @@ function detectHardware() {
       isAlderLake: cpuModel.includes('12') || cpuModel.includes('Alder'),
       isHyperthreaded: cpuCores > physicalCores,
       singleThreadScore: estimateSingleThread(cpuModel),
+      speed: cpus[0]?.speed || 2500,
     },
     ram: {
       total: Math.round(totalMem / 1024 / 1024 / 1024),
       free: Math.round(freeMem / 1024 / 1024 / 1024),
-      usable: Math.round((totalMem * 0.75) / 1024 / 1024 / 1024), // 75% usable for AI
+      usable: Math.round((totalMem * 0.55) / 1024 / 1024 / 1024), // 55% usable (OS + apps take ~45%)
     },
     gpu,
+    storage,
     platform,
     arch,
     isWindows: platform === 'win32',
     isLinux: platform === 'linux',
+    motherboard: 'Gigabyte H610M K DDR4',
+    systemType: 'Desktop',
   }
 }
 
@@ -129,8 +147,8 @@ function generateProfile(hw) {
       vision: { size: '7B', quant: 'Q4_K_M', contextLength: 2048 },
       reason: { size: '7B', quant: 'Q5_K_M', contextLength: 4096 },
     },
-    'medium-cpu': { // ← YOUR OPTIMAL PROFILE
-      chat: { size: '3B-7B', quant: 'Q4_K_M', contextLength: 4096 },
+    'medium-cpu': { // ← YOUR OPTIMAL PROFILE (i5-12400F 16GB No GPU ~8GB free)
+      chat: { size: '3B', quant: 'Q4_K_M', contextLength: 4096 },
       vision: { size: '3B', quant: 'Q4_K_M', contextLength: 2048 },
       reason: { size: '7B', quant: 'Q4_K_M', contextLength: 4096 },
     },
@@ -146,19 +164,19 @@ function generateProfile(hw) {
     },
   }
 
-  // Ollama settings optimized for CPU-only i5-12400F
+  // Ollama settings optimized for i5-12400F + 16GB DDR4 + H610M + No GPU
   const ollamaSettings = {
     'medium-cpu': {
-      numThreads: 8,           // Use 8 of 12 threads (leave headroom)
-      numBatch: 512,           // Batch size for prompt processing
+      numThreads: 10,          // Use 10 of 12 threads (i5-12400F strong P-cores)
+      numBatch: 256,           // Smaller batch = less RAM, still fast
       numCtx: 4096,            // Context window
-      numGpu: 0,               // No GPU
-      mmap: true,              // Memory-mapped files (saves RAM)
-      mlock: false,            // Don't lock memory (let OS swap if needed)
-      numa: false,             // No NUMA on desktop
-      ropeScaling: null,       // No rope scaling (keep it simple)
-      flashAttention: false,   // CPU doesn't benefit from flash attention
-      quantization: 'q4_k_m',  // Best quality/speed ratio for CPU
+      numGpu: 0,               // No GPU at all (i5-12400F = F SKU, NO iGPU)
+      mmap: true,              // Memory-mapped files (CRITICAL for 8GB free)
+      mlock: false,            // Don't lock memory (OS needs swap room)
+      numa: false,             // Single socket desktop
+      ropeScaling: null,       // No rope scaling
+      flashAttention: false,   // No benefit on CPU
+      quantization: 'q4_k_m',  // Best quality/speed for CPU-only
     },
   }
 
@@ -239,27 +257,31 @@ function generateProfile(hw) {
 /* ──────────────── Memory management ──────────────────────────── */
 
 function getMemoryBudget(ramGB) {
-  // How to allocate RAM
+  // How to allocate RAM — conservative for Windows 11 with ~8GB free
   const totalGB = ramGB
-  const osOverhead = 2.5 // Windows + background apps
+  const osOverhead = 4.5 // Windows 11 + background apps + VirtualBox adapter
   const available = totalGB - osOverhead
 
   return {
     totalGB,
     available: Math.round(available * 10) / 10,
     allocation: {
-      llmModels: Math.round(available * 0.55 * 10) / 10,    // 55% for LLM
-      nodeRuntime: Math.round(available * 0.10 * 10) / 10,   // 10% for Node.js
-      cache: Math.round(available * 0.15 * 10) / 10,          // 15% for cache
-      memory: Math.round(available * 0.10 * 10) / 10,         // 10% for memory store
-      headroom: Math.round(available * 0.10 * 10) / 10,       // 10% headroom
+      llmModels: Math.round(available * 0.50 * 10) / 10,    // 50% for LLM (~5.7GB)
+      nodeRuntime: Math.round(available * 0.10 * 10) / 10,   // 10% for Node.js (~1.1GB)
+      cache: Math.round(available * 0.15 * 10) / 10,          // 15% for cache (~1.7GB)
+      memory: Math.round(available * 0.10 * 10) / 10,         // 10% for memory store (~1.1GB)
+      headroom: Math.round(available * 0.15 * 10) / 10,       // 15% headroom (~1.7GB)
     },
     recommendations: [
-      'Use Q4_K_M quantization (best quality/speed for 16GB)',
+      'Use Q4_K_M quantization (best quality/speed for 16GB CPU-only)',
       'Keep context window at 4096 tokens max',
-      'Close other applications while running JARVIS',
+      'Close Chrome/Edge tabs while running JARVIS (browsers eat 2-4GB)',
+      'Close VirtualBox if not needed (saves 500MB-1GB)',
       'Use Ollama with mmap=true for memory efficiency',
-      'Set Node.js heap to 4GB: --max-old-space-size=4096',
+      'Set Node.js heap to 3GB: --max-old-space-size=3072',
+      'Use 3B models for chat (fast), 7B only for complex reasoning',
+      'NEVER run multiple models simultaneously (RAM limit)',
+      'Close antivirus real-time scan on Ollama model folder',
     ],
   }
 }

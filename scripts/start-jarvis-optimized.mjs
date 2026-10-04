@@ -27,10 +27,13 @@ async function startup() {
 
   // Step 1: Hardware profile
   console.log('  🔍 Hardware detected:')
-  console.log(`     CPU: ${HW.cpu.model}`)
-  console.log(`     Cores: ${HW.cpu.cores} threads (${HW.cpu.physicalCores} physical)`)
-  console.log(`     RAM: ${HW.ram.total}GB (${MEMORY_BUDGET.available}GB available for AI)`)
-  console.log(`     GPU: ${HW.gpu.available ? HW.gpu.name : 'None (CPU-only inference)'}`)
+  console.log(`     CPU: ${HW.cpu.model} @ ${HW.cpu.speed}MHz`)
+  console.log(`     Cores: ${HW.cpu.cores} threads (${HW.cpu.physicalCores} physical, Alder Lake P-cores)`)
+  console.log(`     Board: ${HW.motherboard || 'Unknown'}`)
+  console.log(`     RAM: ${HW.ram.total}GB DDR4 (~${HW.ram.free}GB free right now)`)
+  console.log(`     GPU: ${HW.gpu.available ? HW.gpu.name : 'NONE — CPU-only (i5-12400F = F-SKU, no iGPU)'}`)
+  console.log(`     Storage: ${HW.storage?.type || 'Unknown'} (${HW.storage?.free || '?'}GB free on C:)`)
+  console.log(`     OS: ${HW.isWindows ? 'Windows' : 'Linux'} ${HW.platform}`)
   console.log(`     Tier: ${PROFILE.tier.toUpperCase()}`)
   console.log('')
 
@@ -61,29 +64,36 @@ async function startup() {
   console.log(`     Disabled:       ${PROFILE.moduleStrategy.disabled.length} modules (too heavy)`)
   console.log('')
 
-  // Step 5: Warnings
+  // Step 5: Warnings specific to this hardware
   if (!HW.gpu.available) {
-    console.log('  ⚠️  CPU-ONLY MODE — no GPU detected')
-    console.log('     • LLM inference will be slower (~8-20 tok/s for 3-7B models)')
-    console.log('     • Use 3B models for best speed, 7B for best quality')
-    console.log('     • Avoid 13B+ models (too slow)')
-    console.log('     • Close other applications for best performance')
+    console.log('  ⚠️  CPU-ONLY MODE — i5-12400F has NO integrated GPU, no discrete GPU')
+    console.log('     • ALL LLM inference runs on CPU (12 threads)')
+    console.log('     • 3B Q4_K_M: ~20 tok/s (fast, use for chat)')
+    console.log('     • 7B Q4_K_M: ~8 tok/s (balanced, use for reasoning)')
+    console.log('     • 13B+: DO NOT USE (<3 tok/s, painfully slow)')
+    console.log('     • Close Chrome/Edge tabs (browsers eat 2-4GB RAM)')
+    console.log('     • Close VirtualBox if running (saves 500MB-1GB)')
     console.log('')
   }
 
-  if (HW.ram.total <= 8) {
-    console.log('  ⚠️  LOW RAM — some features will be limited')
-    console.log('     • Use Q4_0 quantization (smallest)')
-    console.log('     • Reduce context window to 2048')
+  if (HW.ram.free < 6) {
+    console.log(`  ⚠️  LOW FREE RAM — only ${HW.ram.free}GB available`)
+    console.log('     • Close unnecessary applications before starting')
+    console.log('     • Use 3B models only (7B needs 4.5GB)')
     console.log('     • Disable dream mode and background tasks')
     console.log('')
   }
 
-  // Step 6: Performance recommendations
-  console.log('  💡 Performance tips:')
-  MEMORY_BUDGET.recommendations.forEach((r) => {
-    console.log(`     • ${r}`)
-  })
+  // Step 6: Performance recommendations specific to this hardware
+  console.log('  💡 Performance tips for MDK-TECH-ASSOCIATION:')
+  console.log('     • Use qwen2.5:3b for daily chat (fast, 2GB RAM)')
+  console.log('     • Use qwen2.5:7b for complex reasoning (slower, 4.5GB RAM)')
+  console.log('     • NEVER load 7B + 3B simultaneously (9GB = OOM)')
+  console.log('     • Close Chrome tabs — each tab eats 100-500MB')
+  console.log('     • Close VirtualBox — saves 500MB-1GB')
+  console.log('     • Ollama uses mmap=true — models stream from SSD, not RAM')
+  console.log('     • Set OLLAMA_KEEP_ALIVE=5m — unload model after 5 min idle')
+  console.log('     • Use SSD for Ollama model storage (fast mmap)')
   console.log('')
 
   // Step 7: Warm up model

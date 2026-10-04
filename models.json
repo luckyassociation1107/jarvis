@@ -1,10 +1,14 @@
 {
   "_comment": "JARVIS Model Configuration — optimized for i5-12400F + 16GB + No GPU",
   "_hardware": {
-    "cpu": "Intel i5-12400F",
-    "ram": "16GB",
-    "gpu": "none",
-    "tier": "medium-cpu"
+    "cpu": "Intel i5-12400F @ 2500MHz (6P cores, 12 threads, Alder Lake)",
+    "motherboard": "Gigabyte H610M K DDR4",
+    "ram": "16GB DDR4 (8GB typically free)",
+    "gpu": "NONE — i5-12400F is F-SKU (no iGPU), no discrete GPU",
+    "storage": "SSD (check C: drive)",
+    "os": "Windows 11 Pro Build 26200 (25H2)",
+    "tier": "medium-cpu",
+    "type": "Desktop"
   },
 
   "slots": {
@@ -114,6 +118,11 @@
     "keepAlive": "5m",
     "flashAttention": false,
     "host": "127.0.0.1:11434",
-    "maxQueue": 10
+    "maxQueue": 10,
+    "numThreads": 10,
+    "numBatch": 256,
+    "mmap": true,
+    "mlock": false,
+    "_notes": "i5-12400F: 10 threads optimal, Q4_K_M quant, CPU-only, mmap=true for RAM efficiency"
   }
 }
