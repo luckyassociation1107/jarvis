@@ -255,15 +255,19 @@ incomplete-file rejection, and the browser-cached Kokoro path.
 `npm run test:installers` covers loopback endpoint aliases, manual/per-slot
 overrides, and read-only preflight behavior against a mock model server.
 `npm run test:control` covers the command-line policy (parsing, the allowlist
-and deny rules in both modes, working-directory roots) and the desktop control
+and deny rules in both modes, working-directory roots), the desktop control
 surface (key-combo parsing, per-platform arguments for Windows, macOS and
 Linux, quoting of typed text, capability gaps, app discovery and launch
-matching) without running a command or moving a pointer.
+matching) and the capability block (what a headless, read-only Linux host says
+about itself, and what a write-enabled one says instead) without running a
+command or moving a pointer.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
 33-tier catalogue/statuses, the live `/autopilot/config` share change,
-Telugu-to-English code-intent routing, vision prompt fusion, and the fact that
+Telugu-to-English code-intent routing, vision prompt fusion, the machine block
+the model is actually sent (including its truthful write state), the fact that
 the acting shell/desktop tools are absent from the model's tool list while
-writes are off, against a local stub model server. These are deterministic/mock
+writes are off, and that an unchecked refusal is challenged and replaced before
+the browser hears it, against a local stub model server. These are deterministic/mock
 checks, not model inference. No full Ollama-backed conversation, real Whisper
 transcription/model download, or Windows/macOS desktop action has been verified
 in this workspace — that control code is exercised only through the arguments
@@ -670,6 +674,41 @@ Write mode is not one switch with one meaning. The browser and desktop servers
 can be used while the command line stays on its allowlist, and the deny list
 keeps holding either way. If you only want the interface and the odd script,
 leave `JARVIS_SHELL_MODE` alone.
+
+---
+
+## How he decides
+
+JARVIS is not allowed to answer "can you" from imagination. Before every
+question, `bridge/capability.mjs` probes this machine — the OS and core count,
+free RAM and disk, whether there is a desktop session and what it is missing,
+which common programs are installed, whether writes are on and how the command
+line is policed, which local model slots are filled, which servers are
+connected — and appends that block to the system prompt. He plans against the
+machine as it is now, not as it was at boot.
+
+The rules that use it:
+
+1. **Check before answering.** The block, plus `command_info`,
+   `desktop_capabilities`, `list_apps` and `list_processes` for anything that
+   may have changed. He never refuses a task he has not checked the machine for,
+   and never promises one either.
+2. **If it can be done, plan the route and take it** — the narrowest tool that
+   finishes the job — then report what actually happened.
+3. **If it cannot be done as asked, plan the nearest thing that can be**: the
+   same end by another tool, a lower fidelity, a smaller local model, offline
+   instead of online, the part that is possible now and the rest left staged.
+   He says which trade he took.
+4. **Only then does he say no**, naming the missing piece and what would unlock
+   it. A policy refusal is reported as a permission, never as an impossibility,
+   and a result he did not observe is never claimed as one.
+
+Those rules are not just prompt text. The opening of every answer is held back
+until it is clear he is answering rather than announcing an action or giving up.
+A refusal that arrives before a single tool has been tried is challenged once,
+with the machine's own facts pushed forward, and only the answer that checked is
+spoken — a wrong "no" is never heard. A refusal *after* a tool has actually run
+is the honest one, and is never challenged.
 
 ---
 

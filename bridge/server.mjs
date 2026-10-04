@@ -36,6 +36,7 @@ import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
 import { windowsServer } from './windows.mjs'
 import { shellServer } from './shell.mjs'
+import { machineCard } from './capability.mjs'
 import { desktopServer } from './desktop.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
@@ -344,6 +345,27 @@ REPORTING.
 - Answering a question, restate it as a full declarative rather than giving a
   bare value: "The altitude record is eighty-five thousand feet, sir."
 - Executing an order, do not restate it. Act, then report.
+
+CAPABILITY FIRST. You are a computer being asked to do something, so you plan
+against what this machine actually has — never from imagination in either
+direction. The block at the end of this prompt is a fresh probe of it.
+- Before you answer "can you", find out: the block, command_info,
+  desktop_capabilities, list_apps, list_processes. Never refuse a task you have
+  not checked the machine for, and never promise one you have not checked either.
+- If it can be done, plan the route and take it: the narrowest tool that
+  finishes the job, run it, then report what actually happened.
+- If it cannot be done as asked, that is not the end of the answer. Design the
+  closest thing the machine can do — the same end by another tool, a lower
+  fidelity, a smaller local model, a shorter clip, offline instead of online,
+  the part that is possible now and the rest left staged. Take that route and
+  say in one line which trade you made.
+- Only when nothing on the machine reaches the goal do you say it: "That cannot
+  be done with what is here." Name the missing piece and what would unlock it.
+  One sentence, a fact about the machine, no apology, no hedging.
+- A policy refusal is not a capability limit. If a command is refused, say the
+  permission is off — never that it is impossible.
+- Never claim a result you did not observe. An invented file, download or click
+  is worse than a refusal: one is a gap, the other is a lie.
 
 NEVER.
 - No filler words at all: no um, well, so, okay, right, let me check, one moment.
@@ -1368,6 +1390,23 @@ const handleConnection = async (socket) => {
   const history = [{ role: 'system', content: SYSTEM_PROMPT }]
 
   /**
+   * The static prompt plus a live probe of this machine.
+   *
+   * The block is what turns "I cannot do that" from a reflex into a judgement:
+   * the model can see which programs exist, whether there is a display, how
+   * much disk and RAM are left, whether writes are on, and which local model
+   * slots are filled — so a plan it makes is a plan for this computer.
+   */
+  const systemPrompt = () => `${SYSTEM_PROMPT}
+
+${machineCard({
+    servers: [...clients.keys()],
+    slots: Object.entries(PIPELINE).map(([slot, spec]) => ({ slot, model: spec.model, fits: spec.fits })),
+    writes: ALLOW_WRITES,
+    quota: `${(AUTOPILOT_PLAN.budget.models / 1024 ** 3).toFixed(2)} GB (${AUTOPILOT_PLAN.budget.sharePercent}% of free RAM when the plan was made)`,
+  })}`
+
+  /**
    * Resolves when the turn in flight has actually finished.
    *
    * Waiting on an abort alone is not enough. It stops the request, but the last
@@ -1420,6 +1459,12 @@ const handleConnection = async (socket) => {
     abort = controller
     inTurn = true
     history.push({ role: 'user', content: text })
+
+    // The machine block is re-probed every turn rather than frozen at connect:
+    // RAM, disk, the program inventory and the tool list all change while the
+    // conversation runs, and planning against a stale fact is worse than not
+    // having it at all.
+    history[0] = { role: 'system', content: systemPrompt() }
 
     try {
       const said = await runTurn({

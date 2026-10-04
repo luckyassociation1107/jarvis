@@ -50,9 +50,13 @@ const asked = []
 let chatHits = 0
 /** Set when the chat slot narrates instead of acting. */
 let sawChatNarrate = false
+/** Set when the bridge challenged a refusal before speaking it. */
+let sawDeclineRetry = false
 let visionSawImage = false
 /** Tool names the model was offered, from the first request that carried any. */
 let offeredTools = null
+/** The system prompt the model was actually sent, once it carried the machine block. */
+let systemSeen = null
 let visionSawIntent = false
 let coderSawCombinedVisionPrompt = false
 let coderSawEnglishTranslation = false
@@ -137,6 +141,8 @@ const http = createServer((req, res) => {
     if (payload.model === REASON && /High-level English coding prompt: Debug the Python function/i.test(userText)) {
       coderSawEnglishTranslation = true
     }
+    const system = (payload.messages ?? []).find((message) => message.role === 'system' && typeof message.content === 'string' && message.content.includes('WHAT THIS MACHINE CAN DO'))
+    if (system && !systemSeen) systemSeen = system.content
     const askedForTool = (payload.tools ?? []).length > 0
     if (askedForTool && !offeredTools) {
       offeredTools = (payload.tools ?? []).map((tool) => tool?.function?.name).filter(Boolean)
@@ -150,6 +156,29 @@ const http = createServer((req, res) => {
       connection: 'keep-alive',
     })
     const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+
+    // A refusal is challenged once, with the capability block pushed forward.
+    // The stub refuses on the first ask and works with what it has on the
+    // second, which is the behaviour the bridge is supposed to force.
+    const nudged = (payload.messages ?? []).some(
+      (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('do not decline a task you have not checked'),
+    )
+    if (nudged && /convert this clip/i.test(lastText(payload.messages))) {
+      sawDeclineRetry = true
+      send({ choices: [{ delta: { content: 'The encoder is missing. ' } }] })
+      send({ choices: [{ delta: { content: 'I used what is here instead, sir.' } }] })
+      send({ choices: [{ finish_reason: 'stop' }] })
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    if (/convert this clip/i.test(lastText(payload.messages))) {
+      send({ choices: [{ delta: { content: 'I cannot convert that, sir.' } }] })
+      send({ choices: [{ finish_reason: 'stop' }] })
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
 
     // The chat slot's one chance to fail: narrate a tool call instead of
     // making it. This is the failure that is invisible — fluent, confident,
@@ -297,6 +326,8 @@ const checks = [
   ['the bridge started and served a socket', sawReady],
   ['all seven built-in MCP servers connected', readyServers.length >= 7],
   ['the command line and desktop servers are in the live union', readyServers.includes('jarvis_shell') && readyServers.includes('jarvis_desktop')],
+  ['the model is told what this machine can do, not left to imagine it', Boolean(systemSeen) && /CAPABILITY FIRST/.test(systemSeen) && systemSeen.includes(`Host: ${process.platform}`)],
+  ['the machine block states the write state truthfully', Boolean(systemSeen) && /Acting tools: off/.test(systemSeen) && /writes are off, so run_command is not registered/.test(systemSeen)],
   ['the read-only shell and desktop tools reach the model', Boolean(offeredTools?.includes('mcp__jarvis_shell__command_info') && offeredTools?.includes('mcp__jarvis_shell__list_processes') && offeredTools?.includes('mcp__jarvis_desktop__desktop_capabilities') && offeredTools?.includes('mcp__jarvis_desktop__list_apps') && offeredTools?.includes('mcp__jarvis_desktop__list_windows'))],
   ['no acting tool is offered while writes are off', Boolean(offeredTools) && !offeredTools.some((name) => /^(mcp__jarvis_shell__run_command|mcp__jarvis_desktop__(click|type_text|press_keys|launch_app|quit_app|move_mouse|scroll|focus_window|window_action))$/.test(name))],
   ['the model was asked twice (answer -> tool -> answer)', calls === 2],
@@ -427,6 +458,40 @@ const memoryChecks = [
   ['the local Whisper reservation unloads the retained LLM before speech inference', !memoryTestError && JSON.stringify(memoryEvents.slice(5)) === JSON.stringify(expectedMemoryEvents.slice(5))],
 ]
 
+// --- phase three: a refusal is challenged before it is spoken ---------------
+// The machine can do this task with what it has. The first answer gives up
+// anyway, which is the failure that reads as a limit rather than a decision.
+// The bridge has to catch it, re-ask with the machine's facts, and only speak
+// the answer that checked.
+const ws3 = new WebSocket(`ws://localhost:${PORT}`)
+const frames3 = []
+let sentAsk3 = false
+try {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for frames (phase 3)')), 20000)
+    ws3.on('open', () => {})
+    ws3.on('message', (raw) => {
+      const f = JSON.parse(raw.toString())
+      frames3.push(f)
+      if (f.type === 'ready' && !sentAsk3 && Array.isArray(f.servers) && f.servers.length >= 7) {
+        sentAsk3 = true
+        ws3.send(JSON.stringify({ type: 'ask', id: 'q3', text: 'Convert this clip to mp4.' }))
+      }
+      if (f.type === 'done') { clearTimeout(timer); resolve() }
+      if (f.type === 'error') { clearTimeout(timer); reject(new Error(f.message)) }
+    })
+    ws3.on('error', reject)
+  })
+} catch (error) {
+  frames3.push({ type: 'error', message: error.message })
+}
+const spoken3 = frames3.filter((f) => f.type === 'text').map((f) => f.delta).join('')
+const declineChecks = [
+  ['a refusal with no check behind it was challenged', sawDeclineRetry],
+  ['the unchecked refusal never reached the browser', spoken3.length > 0 && !/cannot/i.test(spoken3)],
+  ['the answer that used what the machine has was spoken instead', /instead/.test(spoken3)],
+]
+
 // Routing is a pure function of the conversation, so it is checked directly
 // rather than inferred from what a stub happened to be sent. One case per slot,
 // because the middle one fails silently: a text model shown a photograph
@@ -524,6 +589,13 @@ try {
   allocationChecks.push([`allocation endpoint error: ${error.message}`, false])
 }
 console.log('')
+let declineFailed = 0
+for (const [name, ok] of declineChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) declineFailed++
+}
+failed += declineFailed
+console.log('')
 let allocationFailed = 0
 for (const [name, ok] of allocationChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
@@ -532,7 +604,7 @@ for (const [name, ok] of allocationChecks) {
 failed += allocationFailed
 await rm(process.env.JARVIS_RAM_CONFIG, { force: true })
 
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${declineChecks.length - declineFailed}/${declineChecks.length} decline challenge, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
 
 ws.close()
 ws2.close()

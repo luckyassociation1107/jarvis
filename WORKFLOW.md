@@ -15,7 +15,7 @@ Node bridge (bridge/server.mjs)
         ├── multilingual intent extraction and English translation
         ├── RAM-planned chat, vision and coding slots
         ├── optional local multilingual Whisper STT
-        └── built-in and configured MCP tools, including Windows window controls
+        └── built-in and configured MCP tools (browser, camera, command line, desktop)
 ```
 
 The default model endpoint is `http://localhost:11434/v1`. Ollama is the
@@ -62,9 +62,9 @@ request reloads it as needed.
 - Whisper picks multilingual quantized models, not `.en` variants; the selected
   fitting model and runtime are installed automatically by the root setup script
   when possible.
-- When the allocation is smaller than the smallest model (for example a 1 GB
-  machine at a 40% share), the 0.873B model is clearly best-effort and is
-  skipped. Whisper base can still fit. At 500 MB even local Whisper is outside
+- When the allocation is smaller than the smallest model (a 1 GB machine, or
+  any share that leaves under a gigabyte), the 0.873B model is clearly
+  best-effort and is skipped. Whisper base can still fit. At 500 MB even local Whisper is outside
   the allocation; browser/OS fallbacks are used.
 
 The **MODEL STACK** HUD panel (key `M`) shows the live plan and a 33-row
@@ -79,7 +79,21 @@ reused; other tiers and over-budget best-effort models are skipped. Standalone
 
 ## A turn
 
-1. The browser listens for a wake phrase and captures speech.
+0. Before the model is asked anything, `bridge/capability.mjs` probes the host —
+   OS and core count, free RAM and disk, the desktop session and what it is
+   missing, which common programs are installed, whether writes are on and how
+   the shell is policed, which local model slots are filled, which MCP servers
+   are connected — and appends that block to the system prompt. It is refreshed
+   every turn, so a plan is made against the machine as it is now rather than as
+   it was at boot. The prompt's CAPABILITY FIRST rules use it: check, then act;
+   if the exact thing is impossible, plan the nearest version the machine can
+   do; only then say plainly what cannot be done and what is missing.
+1. The browser listens for a wake phrase and captures speech. The opening of
+   each answer is held for a few dozen characters: an announcement of an action
+   that never happens is discarded, and a refusal that arrives before any tool
+   has run is re-asked once with the capability block pushed forward, so what
+   the user hears is the answer that checked the machine.
+
 2. With `VITE_STT_ENGINE=whisper`, local VAD segments are converted to 16 kHz
    mono WAV and sent to the local bridge. Whisper auto-detects language. The
    default `browser` STT path remains dependent on Chrome/Edge.

@@ -43,6 +43,16 @@ const {
   process.exit(1)
 })
 
+const {
+  gatherCapabilities,
+  machineCard,
+  probePrograms,
+  summariseCapabilities,
+} = await import('../bridge/capability.mjs').catch((error) => {
+  console.error(`FAIL  bridge/capability.mjs would not load: ${error.message}`)
+  process.exit(1)
+})
+
 // --- shell: parsing ---------------------------------------------------------
 
 assert.deepEqual(splitSegments('ls -la | wc -l'), ['ls -la', 'wc -l'], 'pipes split into segments')
@@ -231,7 +241,65 @@ for (const name of ['launch_app', 'quit_app', 'focus_window', 'window_action', '
   assert.ok(writeDesktop.includes(name), `write mode registers ${name}`)
 }
 
+// --- what the model is told about this machine -----------------------------
+
+const capFacts = {
+  platform: 'linux',
+  arch: 'x64',
+  release: '6.1.0',
+  cores: 8,
+  load1: 0.4,
+  totalRamGb: 16,
+  freeRamGb: 9.5,
+  diskFreeGb: 120,
+  diskPath: '/home/u',
+  session: 'headless',
+  gaps: ['no DISPLAY or WAYLAND_DISPLAY: there is no desktop session to control', 'xdotool is missing: pointer, typing and key combos are unavailable'],
+  pointer: null,
+  installed: ['git', 'node', 'jq'],
+  missing: ['ffmpeg', 'docker', 'xdotool'],
+  writes: false,
+  shellMode: 'allowlist',
+  shellAllowCount: 40,
+  roots: ['/home/u', '/tmp', '/repo'],
+  slots: [{ slot: 'chat', model: 'qwen-test', fits: true }],
+  servers: ['jarvis', 'jarvis_shell'],
+  quota: '9.5 GB (100% of free RAM when the plan was made)',
+}
+const capCard = summariseCapabilities(capFacts)
+assert.match(capCard, /^WHAT THIS MACHINE CAN DO/, 'the block opens by naming itself')
+assert.match(capCard, /Host: linux x64, 8 cores, 16 GB RAM with 9.5 GB free right now, 120 GB free on the volume holding \/home\/u/, 'host, RAM and disk are stated as facts')
+assert.ok(capCard.includes('No display session'), 'a headless host is stated plainly')
+assert.ok(!capCard.includes('no DISPLAY or WAYLAND_DISPLAY'), 'the missing display is not repeated as a control gap')
+assert.ok(capCard.includes('xdotool is missing'), 'the gap that matters is named')
+assert.ok(capCard.includes('Programs not installed: ffmpeg, docker, xdotool'), 'missing programs are listed so a plan can route around them')
+assert.ok(capCard.includes('allowlist (40 programs), and writes are off'), 'the command-line policy is stated with its consequence')
+assert.ok(capCard.includes('Acting tools: off'), 'a read-only bridge says so')
+assert.ok(capCard.includes('chat=qwen-test'), 'the local model slots are visible')
+assert.ok(capCard.includes('Servers connected: jarvis, jarvis_shell'), 'the connected servers are visible')
+assert.ok(capCard.includes('the live tools still win'), 'the block admits it is a probe, not the truth')
+
+const capActing = summariseCapabilities({ ...capFacts, writes: true })
+assert.ok(capActing.includes('Acting tools: on') && !capActing.includes('run_command is not registered'), 'write mode is stated as an open surface')
+const capFull = summariseCapabilities({ ...capFacts, writes: true, shellMode: 'full', slots: [], servers: [] })
+assert.ok(capFull.includes('Command line: full'), 'a full command line is stated as such')
+assert.ok(!capFull.includes('Local model slots') && !capFull.includes('Servers connected'), 'empty sections are omitted rather than printed blank')
+const capWayland = summariseCapabilities({ ...capFacts, session: 'wayland', gaps: [], pointer: 'xdotool' })
+assert.ok(capWayland.includes('pointer control only reaches XWayland windows'), 'the Wayland caveat travels into the block')
+
+const live = gatherCapabilities({ servers: ['jarvis'], slots: [{ slot: 'chat', model: 'm', fits: true }] })
+assert.equal(live.platform, process.platform, 'the live probe reports this platform')
+assert.ok(['windows', 'aqua', 'x11', 'wayland', 'headless'].includes(live.session), 'the live probe reports a known session')
+assert.ok(Array.isArray(live.installed) && live.installed.length > 0, 'a developer machine has at least one of the probed programs')
+assert.ok(live.diskFreeGb === null || live.diskFreeGb > 0, 'disk headroom is reported or omitted')
+assert.ok(machineCard().startsWith('WHAT THIS MACHINE CAN DO'), 'machineCard is the probe and the renderer in one step')
+assert.ok(summariseCapabilities(gatherCapabilities()) === summariseCapabilities(gatherCapabilities()), 'the probe is stable within its cache window')
+assert.ok(probePrograms('darwin').includes('cliclick') && !probePrograms('darwin').includes('xdotool'), 'desktop probes are platform-specific')
+assert.ok(probePrograms('win32').includes('powershell.exe'), 'Windows probes for its own shell')
+assert.ok(!probePrograms('linux').some((name) => name.includes('/')), 'probe names are bare names, never paths')
+
 console.log('PASS  shell parsing, allowlist policy, deny rules in every mode, and command roots')
 console.log('PASS  key combos, per-platform argv, SendKeys/AppleScript/xdotool escaping, and hostile text as data')
 console.log('PASS  desktop capabilities (headless, Wayland, missing tools), app discovery and launch matching')
 console.log('PASS  read-only bridges expose no acting tool, and write mode registers the full surface')
+console.log('PASS  the capability block states the machine as it is, and never invents a missing one')
