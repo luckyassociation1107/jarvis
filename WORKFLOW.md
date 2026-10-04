@@ -94,14 +94,32 @@ reused; other tiers and over-budget best-effort models are skipped. Standalone
 6. The HUD renders the answer and speaks through system TTS or optional browser
    Kokoro TTS.
 
-## Windows management and permissions
+## Machine control and permissions
 
-On Windows, `jarvis_windows` lists real visible windows read-only. Focus,
-minimize, maximize, restore, normal close messages, and launching a fixed
-allowlist are only registered when the bridge is explicitly run in write mode:
-`npm run bridge:writes` or `npm start -- --writes`. This is not an unrestricted
-shell and does not produce an EXE or desktop bundle. Other effectful MCP tools
-remain behind the same write gate.
+Three built-in servers reach the machine, and all of them share one write gate:
+
+- `jarvis_windows` — the original Windows-only inventory: visible windows
+  read-only, with focus, minimize, maximize, restore, a normal close message and
+  a fixed launch allowlist only registered in write mode.
+- `jarvis_shell` — the command line. `command_info` and `list_processes` are
+  read-only; `run_command` exists only in write mode, runs the command with no
+  shell in between, and is checked against an allowlist of programs
+  (`JARVIS_SHELL_ALLOW` extends it, `JARVIS_SHELL_MODE=full` skips it) plus a
+  deny list that holds in every mode. Working directories are confined to home,
+  temp and the project unless `JARVIS_SHELL_ROOTS` adds more.
+- `jarvis_desktop` — the rest of the desktop on Windows, macOS and Linux:
+  installed apps, windows, pointer, keyboard and typed text. `list_apps`,
+  `list_windows` and `desktop_capabilities` are read-only; `launch_app`,
+  `quit_app`, `focus_window`, `window_action`, `type_text`, `press_keys`,
+  `move_mouse`, `click` and `scroll` are registered only in write mode.
+
+Run `npm run bridge:writes` or `npm start -- --writes` for the acting surface.
+`npm run test:control` checks the policy helpers and per-platform arguments
+without running a command or moving a pointer. `desktop_capabilities` reports
+what this session can actually do — a headless host, a Wayland session or a
+missing `xdotool`/`cliclick` is stated rather than silently ignored. This is not
+an unrestricted shell and does not produce an EXE or desktop bundle. Other
+effectful MCP tools remain behind the same write gate.
 
 ## Local setup
 

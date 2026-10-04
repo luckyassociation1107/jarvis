@@ -51,6 +51,8 @@ let chatHits = 0
 /** Set when the chat slot narrates instead of acting. */
 let sawChatNarrate = false
 let visionSawImage = false
+/** Tool names the model was offered, from the first request that carried any. */
+let offeredTools = null
 let visionSawIntent = false
 let coderSawCombinedVisionPrompt = false
 let coderSawEnglishTranslation = false
@@ -136,6 +138,9 @@ const http = createServer((req, res) => {
       coderSawEnglishTranslation = true
     }
     const askedForTool = (payload.tools ?? []).length > 0
+    if (askedForTool && !offeredTools) {
+      offeredTools = (payload.tools ?? []).map((tool) => tool?.function?.name).filter(Boolean)
+    }
     const hasToolResult = (payload.messages ?? []).some((m) => m.role === 'tool')
     const isChat = payload.model === CHAT
     const wantsTool = /screenshot/i.test(lastText(payload.messages))
@@ -261,7 +266,7 @@ await new Promise((resolve, reject) => {
     if (f.type === 'ready') {
       sawReady = true
       console.log(`  ready  servers: ${JSON.stringify(f.servers)}`)
-      if (!sentAsk && Array.isArray(f.servers) && f.servers.length >= 5) {
+      if (!sentAsk && Array.isArray(f.servers) && f.servers.length >= 7) {
         sentAsk = true
         ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Take a screenshot of my phone.' }))
       }
@@ -290,7 +295,10 @@ const done = frames.find((f) => f.type === 'done')
 const readyServers = frames.filter((f) => f.type === 'ready').pop()?.servers ?? []
 const checks = [
   ['the bridge started and served a socket', sawReady],
-  ['all five built-in MCP servers connected', readyServers.length >= 5],
+  ['all seven built-in MCP servers connected', readyServers.length >= 7],
+  ['the command line and desktop servers are in the live union', readyServers.includes('jarvis_shell') && readyServers.includes('jarvis_desktop')],
+  ['the read-only shell and desktop tools reach the model', Boolean(offeredTools?.includes('mcp__jarvis_shell__command_info') && offeredTools?.includes('mcp__jarvis_shell__list_processes') && offeredTools?.includes('mcp__jarvis_desktop__desktop_capabilities') && offeredTools?.includes('mcp__jarvis_desktop__list_apps') && offeredTools?.includes('mcp__jarvis_desktop__list_windows'))],
+  ['no acting tool is offered while writes are off', Boolean(offeredTools) && !offeredTools.some((name) => /^(mcp__jarvis_shell__run_command|mcp__jarvis_desktop__(click|type_text|press_keys|launch_app|quit_app|move_mouse|scroll|focus_window|window_action))$/.test(name))],
   ['the model was asked twice (answer -> tool -> answer)', calls === 2],
   ['the model was offered the tools', sawToolAsk],
   ['the tool it asked for was announced on the HUD', tools.includes('mcp__jarvis__blade')],
@@ -314,7 +322,7 @@ await new Promise((resolve, reject) => {
   ws2.on('message', (raw) => {
     const f = JSON.parse(raw.toString())
     frames2.push(f)
-    if (f.type === 'ready' && !sentAsk2 && Array.isArray(f.servers) && f.servers.length >= 5) {
+    if (f.type === 'ready' && !sentAsk2 && Array.isArray(f.servers) && f.servers.length >= 7) {
       sentAsk2 = true
       ws2.send(JSON.stringify({ type: 'ask', id: 'q2', text: 'good evening' }))
     }

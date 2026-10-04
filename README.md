@@ -254,12 +254,21 @@ idempotence, slot-filtered installer routing, offline Whisper installation,
 incomplete-file rejection, and the browser-cached Kokoro path.
 `npm run test:installers` covers loopback endpoint aliases, manual/per-slot
 overrides, and read-only preflight behavior against a mock model server.
+`npm run test:control` covers the command-line policy (parsing, the allowlist
+and deny rules in both modes, working-directory roots) and the desktop control
+surface (key-combo parsing, per-platform arguments for Windows, macOS and
+Linux, quoting of typed text, capability gaps, app discovery and launch
+matching) without running a command or moving a pointer.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
 33-tier catalogue/statuses, the live `/autopilot/config` share change,
-Telugu-to-English code-intent routing, and vision prompt fusion against a local
-stub model server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
-transcription/model download, or Windows desktop action has been verified in
-this workspace. GitHub Pages hosts the UI only.
+Telugu-to-English code-intent routing, vision prompt fusion, and the fact that
+the acting shell/desktop tools are absent from the model's tool list while
+writes are off, against a local stub model server. These are deterministic/mock
+checks, not model inference. No full Ollama-backed conversation, real Whisper
+transcription/model download, or Windows/macOS desktop action has been verified
+in this workspace — that control code is exercised only through the arguments
+it builds, since the sandbox has no display server, `xdotool` or `wmctrl`.
+GitHub Pages hosts the UI only.
 
 ## Model manager and local speech
 
@@ -457,10 +466,10 @@ you have installed, that is roughly:
 - **The browser** — `playwright`
 
 These are all optional. With none of them configured JARVIS still answers, still
-talks, still looks through the camera, and still drives his own interface —
-the built-in display, UI, camera, browser and Windows read-only inventory
-servers are part of the bridge. Windows control actions remain behind the
-explicit write gate.
+talks, still looks through the camera, still drives his own interface, and can
+still run a command or open an application — the built-in display, UI, camera,
+browser, command-line and desktop servers are part of the bridge. Every acting
+tool in all of them remains behind the one explicit write gate.
 
 A few things you can say:
 
@@ -490,6 +499,44 @@ He drives the UI through MCP tools the bridge exposes:
 
 So *"make it red, hide the systems list, put that render in orbit"* is a spoken
 command.
+
+### JARVIS controls the machine
+
+Two more built-in servers reach past the interface, on Windows, macOS and Linux
+alike. Both start read-only; their acting tools are not registered at all unless
+the bridge runs in write mode.
+
+- **`jarvis_shell`** — the command line. `run_command` runs one command in a
+  working directory and returns stdout, stderr, the exit code and whether it
+  timed out; `list_processes` answers *"is it still running"* and *"what is on
+  that port"*; `command_info` says whether a program exists before a promise is
+  made about it.
+- **`jarvis_desktop`** — everything else. `list_apps` enumerates installed
+  applications, `launch_app` starts one, `list_windows` / `focus_window` /
+  `window_action` bring one forward, move it, minimize, maximize or close it, and
+  `type_text`, `press_keys`, `move_mouse`, `click` and `scroll` drive what is in
+  front of you. `desktop_capabilities` reports whether this session can do any of
+  that at all, and what to install if it cannot.
+
+The shell is deliberately the most restricted surface in the project, because a
+command line is not a tool call — it is a general-purpose escape hatch. By
+default every program in the command has to be in an allowlist
+(`bridge/shell.mjs`), so `git status`, `npm test`, `ffmpeg`, `docker ps` and the
+like run, and an unknown program is refused **by name** with the reason, rather
+than failing quietly. A deny list (formatting disks, recursive deletes of `/`
+`~` or `*`, piping a download into a shell, power changes) applies in **every**
+mode, including `full`. Working directories are confined to your home, the
+temp directory and the project unless `JARVIS_SHELL_ROOTS` says otherwise.
+
+Acting tools still sit behind the one write gate: `npm run bridge:writes`, as
+described below. `run_command` never opens a shell, so a command line like
+`rm -rf node_modules` is parsed and judged as written; text typed into another
+application is passed as a single argument, never interpolated into a script.
+
+On Linux, pointer and keyboard control need `xdotool`; window management needs
+`wmctrl`. On macOS, `osascript` is used for everything except the pointer, which
+needs `cliclick` (`brew install cliclick`). Windows needs nothing beyond
+PowerShell, which is already there.
 
 ### The heads-up display
 
@@ -553,6 +600,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `JARVIS_MODEL_TIMEOUT_MS` | `180000` | Whole-turn timeout, tools and all |
 | `JARVIS_BRIDGE_PORT` | `8787` | Port for the WebSocket + HTTP endpoints |
 | `JARVIS_ALLOW_WRITES` | off | `1` allows effectful tools (see below) |
+| `JARVIS_SHELL_MODE` | `allowlist` | `full` lets `run_command` run any program the deny list allows |
+| `JARVIS_SHELL_ALLOW` | — | Extra programs for the allowlist, comma separated; a bare `*` lifts the check |
+| `JARVIS_SHELL_ROOTS` | home, temp, project | Extra working-directory roots for `run_command`, comma separated |
 | `JARVIS_ALLOWED_ORIGINS` | local dev | Extra WebSocket origins to accept |
 | `JARVIS_ALLOW_NO_ORIGIN` | off | Accept connections with no `Origin` header |
 | `JARVIS_FILE_ROOTS` | — | Roots the `/file` endpoint may serve from |
@@ -605,15 +655,21 @@ a local model rather than a hosted one, and a local model is far more willing to
 attempt a tool call it has misunderstood — so the default-deny is doing real
 work, not standing in for a model that would not have tried.
 
-To allow effectful tools (phone, browser driving, sending), run the bridge this
-way instead:
+To allow effectful tools (phone, browser driving, sending, running commands,
+clicking and typing), run the bridge this way instead:
 
 ```bash
 npm run bridge:writes
 ```
 
 > Read `decideTool()` before you do. *"Hey Jarvis, clean up my downloads folder"*
-> means something rather different with writes enabled.
+> means something rather different with writes enabled — and with
+> `JARVIS_SHELL_MODE=full`, so does almost everything else.
+
+Write mode is not one switch with one meaning. The browser and desktop servers
+can be used while the command line stays on its allowlist, and the deny list
+keeps holding either way. If you only want the interface and the odd script,
+leave `JARVIS_SHELL_MODE` alone.
 
 ---
 

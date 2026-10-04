@@ -35,6 +35,8 @@ import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
 import { windowsServer } from './windows.mjs'
+import { shellServer } from './shell.mjs'
+import { desktopServer } from './desktop.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
@@ -292,6 +294,15 @@ function decideTool(name) {
     // the explicit bridge:writes opt-in, independently of tool-name heuristics.
     if (server === 'jarvis_windows') return mcpToolOf(name) === 'list_windows' || ALLOW_WRITES
 
+    // The command line and the desktop control. Both gate themselves at
+    // construction the same way the browser server does: shellServer() and
+    // desktopServer() only build their acting tools when ALLOW_WRITES is set,
+    // so anything arriving here has already passed the one decision that
+    // matters. Reading verbs out of the names would only subtract: `run_command`
+    // and `click` begin with no read verb and would be withheld even in write
+    // mode, which is precisely when the user asked for them.
+    if (server === 'jarvis_shell' || server === 'jarvis_desktop') return true
+
     const tool = mcpToolOf(name)
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
       return ALLOW_WRITES
@@ -420,6 +431,35 @@ browser or a web page:
 - Before anything that sends, buys, deletes or posts, say in one sentence what
   you are about to do. After it, say what happened.
 - If the browser is unreachable, say so once and carry on without it.
+
+This machine — the command line and the desktop:
+- \`run_command\` runs anything the shell policy allows: git, ffmpeg, npm, docker,
+  a database client, a script in the repo. \`command_info\` tells you whether a
+  program exists before you promise it. \`list_processes\` answers "is it still
+  running" and "what is using that port" from live data rather than a guess.
+- Refusals are final. If a command is refused by the allowlist or the deny
+  list, say it is not permitted once and stop — never look for a way around it
+  and never pretend you ran it.
+- If these tools are not among the ones you have, the bridge is in read-only
+  mode. Say that writes are off and the action needs \`npm run bridge:writes\`;
+  do not describe doing it.
+- Report what the command actually printed. Do not summarise a result you did
+  not read, and do not invent an exit code.
+- \`jarvis_desktop\` is the rest of the machine: \`list_apps\` and \`launch_app\`
+  for anything installed, \`list_windows\`/\`focus_window\`/\`window_action\` to
+  bring a window forward, minimize it or put it where they asked, and
+  \`type_text\`, \`press_keys\`, \`move_mouse\`, \`click\`, \`scroll\` to drive it.
+- Focus a window before typing into it. Typing goes wherever the cursor is, so
+  an unfocused type is a message to the wrong program — the worst kind of
+  silent failure. When the target is a browser page you can name, use the
+  \`chrome_*\` tools instead; they are exact where a click is approximate.
+- Check \`desktop_capabilities\` before promising pointer control. On a headless
+  host, or with xdotool or cliclick missing, say what is missing rather than
+  reporting an action that never happened.
+- Climbing the ladder, worst case last: the browser tools, then the desktop
+  tools, then the command line. Prefer the narrowest tool that finishes the job.
+- Launching, typing, clicking and quitting all change the user's screen while
+  they are looking at it. One sentence before, one after.
 
 Your eyes:
 - \`look\` takes one frame and lets you see it. \`watch\` takes several seconds and
@@ -1146,7 +1186,7 @@ console.log(
 /**
  * One browser connection.
  *
- * Async because setting up the brain awaits real work — four in-process MCP
+ * Async because setting up the brain awaits real work — seven in-process MCP
  * servers to join and the user's own to start — and a bridge that accepted a
  * socket and then failed silently would leave the interface showing a connected
  * assistant with no tools. A failure here is logged and the socket closed, so
@@ -1220,7 +1260,7 @@ const handleConnection = async (socket) => {
   /**
    * Every tool this bridge can reach, as connected MCP clients.
    *
-   * Two kinds, and the split matters. The five JARVIS servers are built inside
+   * Two kinds, and the split matters. The seven JARVIS servers are built inside
    * this process and reach the browser through callbacks that close over this
    * socket, so they are per-connection — an in-memory transport joins each to a
    * client with no port and no subprocess. Everything else the user has
@@ -1248,6 +1288,12 @@ const handleConnection = async (socket) => {
     jarvis_eyes: visionServer(ask),
     // Read-only window inventory by default; acting tools exist only behind the write gate.
     jarvis_windows: windowsServer({ allowWrites: ALLOW_WRITES }),
+    // The command line. Programs are checked against an allowlist unless the
+    // user asked for the whole shell; the deny list holds in every mode.
+    jarvis_shell: shellServer({ allowWrites: ALLOW_WRITES }),
+    // The rest of the desktop: windows, pointer, keyboard and installed apps,
+    // on all three platforms. Acting tools are built only in write mode.
+    jarvis_desktop: desktopServer({ allowWrites: ALLOW_WRITES }),
   }
 
   for (const [name, server] of Object.entries(own)) {
