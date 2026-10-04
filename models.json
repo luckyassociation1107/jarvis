@@ -1,0 +1,119 @@
+{
+  "_comment": "JARVIS Model Configuration — optimized for i5-12400F + 16GB + No GPU",
+  "_hardware": {
+    "cpu": "Intel i5-12400F",
+    "ram": "16GB",
+    "gpu": "none",
+    "tier": "medium-cpu"
+  },
+
+  "slots": {
+    "chat": {
+      "_purpose": "Primary conversation — fast responses, good quality",
+      "primary": "qwen2.5:3b",
+      "fallback": "llama3.2:3b",
+      "quality": "qwen2.5:7b",
+      "contextLength": 4096,
+      "maxTokens": 1024,
+      "temperature": 0.7,
+      "numThreads": 8,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "15-25 tok/s (3B) | 6-10 tok/s (7B)"
+    },
+
+    "reason": {
+      "_purpose": "Complex reasoning — logic, math, code, planning",
+      "primary": "qwen2.5:7b",
+      "fallback": "deepseek-r1:7b",
+      "quality": "qwen2.5:14b",
+      "contextLength": 4096,
+      "maxTokens": 2048,
+      "temperature": 0.3,
+      "numThreads": 8,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "6-10 tok/s (7B) | 2-4 tok/s (14B)"
+    },
+
+    "vision": {
+      "_purpose": "Image understanding — screen analysis, object detection",
+      "primary": "llava:7b",
+      "fallback": "minicpm-v:8b",
+      "contextLength": 2048,
+      "maxTokens": 512,
+      "temperature": 0.5,
+      "numThreads": 8,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "4-6 tok/s"
+    }
+  },
+
+  "install": {
+    "_instructions": "Run these commands to install recommended models",
+    "quick": [
+      "ollama pull qwen2.5:3b",
+      "ollama pull llama3.2:3b"
+    ],
+    "recommended": [
+      "ollama pull qwen2.5:3b",
+      "ollama pull qwen2.5:7b",
+      "ollama pull llava:7b"
+    ],
+    "full": [
+      "ollama pull qwen2.5:3b",
+      "ollama pull qwen2.5:7b",
+      "ollama pull llava:7b",
+      "ollama pull deepseek-r1:7b",
+      "ollama pull phi3:mini"
+    ]
+  },
+
+  "performance": {
+    "maxConcurrentInferences": 1,
+    "cacheEnabled": true,
+    "cacheSize": 100,
+    "maxHistoryMessages": 20,
+    "maxMemoryEntries": 500,
+    "backgroundProcessing": false,
+    "streamingEnabled": true,
+    "warmupOnStart": true
+  },
+
+  "modules": {
+    "eager": [
+      "agent", "workflow", "language", "commands", "memory",
+      "context", "emotion", "proactive", "local-llm",
+      "hardware-profile", "perf-optimizer", "local-llm-optimized"
+    ],
+    "lazy": [
+      "app-launcher", "vision-controller", "documents", "code-exec",
+      "digital-twin", "self-improve", "universal-translator",
+      "reasoning-engine", "wisdom", "personality", "empathy",
+      "predict-scheduler", "creative-writer"
+    ],
+    "deferred": [
+      "autonomous-coder", "research", "research-lab", "scientist",
+      "swarm", "multiverse", "world-sim", "simulation",
+      "music-studio", "holographic", "visual-storyteller",
+      "knowledge-graph", "hive-mind", "genetic", "quantum",
+      "replicator", "foresight", "memetic", "emergent",
+      "threat-model", "diplomacy", "wisdom-traditions",
+      "planetary", "economy", "education", "health", "ethics",
+      "society", "macro-memory", "orchestrator", "executive",
+      "operational", "resource-mgr", "proactive-v2"
+    ],
+    "disabled": [
+      "dream",
+      "time-travel",
+      "memory-palace"
+    ]
+  },
+
+  "ollama": {
+    "numParallel": 1,
+    "maxLoadedModels": 1,
+    "keepAlive": "5m",
+    "flashAttention": false,
+    "host": "127.0.0.1:11434",
+    "maxQueue": 10
+  }
+}
