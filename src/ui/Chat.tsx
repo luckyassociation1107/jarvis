@@ -21,6 +21,8 @@ type RuntimeSnapshot = {
     totalGb?: number
     effectiveModelGb?: number
     currentFreeGb?: number
+    freeGb?: number
+    sharePercent?: number
   }
   fits?: RuntimeSlot[]
   modelSlots?: RuntimeSlot[]
@@ -308,7 +310,7 @@ export function Chat({ onSend }: ChatProps) {
               </span>
               <span className="chat-telemetry-chip chat-ram-chip">
                 <i aria-hidden="true" />{ram
-                  ? `RAM ${ram.totalGb?.toFixed(1) ?? '—'} GB · JARVIS ${ram.effectiveModelGb?.toFixed(1) ?? '—'} GB`
+                  ? `RAM ${ram.freeGb?.toFixed(1) ?? '—'} GB FREE · AI ${ram.sharePercent?.toFixed(0) ?? '—'}% = ${ram.effectiveModelGb?.toFixed(1) ?? '—'} GB`
                   : blocked ? 'LOCAL RAM / PRIVATE' : 'RAM / —'}
               </span>
               <span className={`chat-telemetry-state ${chatModelState === 'ready' ? 'is-ready' : ''}`}>{chatSlotLabel}</span>

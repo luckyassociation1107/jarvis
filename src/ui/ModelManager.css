@@ -71,11 +71,27 @@
 .budget-segment { position: relative; display: grid; align-content: space-between; gap: 8px; }
 .budget-segment i { position: absolute; top: 11px; right: 12px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
 .budget-segment b { color: currentColor; font-size: 13px; font-weight: 500; }
-.budget-os { color: var(--mm-cyan); }
-.budget-apps { color: var(--mm-violet); }
+.budget-free { color: var(--mm-cyan); }
+.budget-share { color: var(--mm-violet); }
 .budget-ai { color: var(--mm-lime); }
 .budget-current b { display: block; margin-top: 9px; color: var(--mm-amber); font-size: 13px; font-weight: 500; }
 .budget-current small { display: block; margin-top: 4px; color: rgba(191, 222, 233, .55); font-size: 7px; }
+
+/* Allocation controls: the user's share of free RAM, not a fixed split. */
+.model-manager-allocation { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) minmax(0, .7fr) auto auto; gap: 10px; align-items: end; margin: 0 0 12px; padding: 12px 13px; border: 1px solid rgba(113, 232, 255, .22); background: rgba(3, 10, 18, .9); }
+.allocation-copy b { display: block; color: var(--mm-lime); font-size: 8px; letter-spacing: .14em; }
+.allocation-copy p { margin: 6px 0 0; color: rgba(191, 222, 233, .62); font-size: 9px; line-height: 1.5; }
+.allocation-slider,
+.allocation-cap { display: grid; gap: 5px; min-width: 0; }
+.allocation-slider span,
+.allocation-cap span { color: rgba(191, 222, 233, .62); font-size: 7px; letter-spacing: .13em; }
+.allocation-slider span { color: var(--mm-cyan); font-size: 13px; letter-spacing: .04em; }
+.allocation-slider input { width: 100%; accent-color: var(--mm-cyan); }
+.allocation-cap input { width: 100%; padding: 6px 8px; border: 1px solid rgba(113, 232, 255, .28); background: rgba(3, 16, 26, .9); color: var(--mm-cyan); font: inherit; font-size: 11px; }
+.model-manager-allocation > button { padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--mm-lime) 55%, transparent); background: color-mix(in srgb, var(--mm-lime) 12%, transparent); color: var(--mm-lime); font: inherit; font-size: 8px; letter-spacing: .13em; cursor: pointer; }
+.model-manager-allocation > button.allocation-rescan { border-color: rgba(113, 232, 255, .38); background: transparent; color: rgba(191, 222, 233, .78); }
+.model-manager-allocation > button:disabled { opacity: .5; cursor: default; }
+.model-manager-allocation-note { margin: 0 0 12px; }
 
 .model-manager-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .model-slot-card { position: relative; min-width: 0; padding: 13px 14px 12px; border: 1px solid rgba(113, 232, 255, .22); background: linear-gradient(135deg, rgba(113, 232, 255, .06), transparent 65%), rgba(3, 12, 21, .85); }
@@ -135,6 +151,8 @@
   .model-manager-budget { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-manager-budget > div { min-height: 62px; }
   .budget-total { grid-column: 1 / -1; }
+  .model-manager-allocation { grid-template-columns: 1fr; align-items: stretch; }
+  .model-manager-allocation > button { width: 100%; }
   .model-manager-grid { grid-template-columns: 1fr; }
   .model-manager-install { align-items: stretch; flex-direction: column; }
   .model-manager-install > button { width: 100%; }

@@ -34,9 +34,15 @@ export const MODEL_URL = (
   process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
 ).replace(/\/+$/, '')
 
-/** One RAM plan is shared by chat, vision, coding and the diagnostics routes. */
+/**
+ * One RAM plan is shared by chat, vision, coding and the diagnostics routes.
+ *
+ * `let`, and reassigned by replanAutopilot(), so the bridge can follow a live
+ * allocation change without a restart. ESM importers see the new value because
+ * they read the live binding at call time.
+ */
 const AUTOPILOT = buildAutopilotPlan()
-export const AUTOPILOT_PLAN = AUTOPILOT
+export let AUTOPILOT_PLAN = AUTOPILOT
 
 /** Some servers want *something* in the header even with no auth. */
 const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
@@ -111,7 +117,34 @@ export const PIPELINE = Object.fromEntries(
 )
 
 /** The name the boot line and error messages lead with. */
-export const BRIDGE_MODEL_NAME = modelFor('chat')
+export let BRIDGE_MODEL_NAME = modelFor('chat')
+
+/**
+ * Re-plan against the current free RAM and the current allocation.
+ *
+ * Called when the user changes the share or the hard cap from MODEL STACK.
+ * Slots with a JARVIS_MODEL_* override keep that override; every other slot
+ * follows the new plan. The residency bookkeeping is left alone: a tag that
+ * stops being selected is unloaded by the existing queue on the next switch.
+ */
+export function replanAutopilot(options = {}) {
+  const next = buildAutopilotPlan(options)
+  AUTOPILOT_PLAN = next
+  for (const slot of Object.keys(SLOTS)) {
+    const override = process.env[`JARVIS_MODEL_${slot.toUpperCase()}`]
+    const chosen = next.choices?.[slot]
+    SLOTS[slot].model = override ?? (chosen?.fits ? chosen.model : null)
+    const entry = PIPELINE[slot]
+    if (entry) {
+      entry.model = modelFor(slot)
+      entry.fits = PINNED || override ? null : (chosen?.fits ?? false)
+      entry.residentBytes = chosen?.residentBytes ?? null
+      entry.unavailable = !modelFor(slot)
+    }
+  }
+  BRIDGE_MODEL_NAME = modelFor('chat')
+  return next
+}
 
 /** Tool-use attempts per question before giving up and answering in prose. */
 const MAX_TURNS = Number(process.env.JARVIS_MODEL_MAX_TURNS ?? 8)

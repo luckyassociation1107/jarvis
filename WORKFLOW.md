@@ -27,46 +27,51 @@ and starts an installed local Ollama CLI when available.
 
 ## RAM planner and models
 
-The split is fixed: 35% OS, 25% other applications, and at most 40% for JARVIS.
-At bridge startup, the planner samples total and current free RAM, then chooses
-a Qwen3.5 abliterated multimodal rung by estimated resident memory with
-runtime/context headroom. Restart the bridge to re-plan after free memory
-changes. Chat, vision and reason remain distinct routes but share the same
-weights at each normal tier; their disk download counts once, and Ollama can
-keep a shared tag warm between those routes. Local model inference is serialized
-to enforce the one-model resident peak: switching to a different local tag or
-local Whisper unloads the retained tag first, even if another route can use it
-later. The next request reloads it as needed.
+There is no fixed split. At bridge startup the planner samples how much RAM is
+free right now — `MemAvailable` on Linux, so reclaimable page cache counts —
+and gives the AI the share the user asked for, 100% by default, optionally
+bounded by a hard gigabyte cap. The share comes from the MODEL STACK panel
+(APPLY / RESCAN), from `JARVIS_RAM_SHARE` / `JARVIS_RAM_CAP_GB`, or from the
+saved `models/ram-allocation.json`; changing it re-plans the running bridge
+immediately, and it can always be re-sampled without a restart. Whatever is not
+allocated simply stays free for the rest of the machine.
 
-- All chat/coding models are abliterated instruct builds. Native Ollama tiers
+Chat, vision and reason remain distinct routes but share the same weights at
+most allocations; their disk download counts once, and Ollama can keep a shared
+tag warm between those routes. Local model inference is serialized to enforce
+the one-model resident peak: switching to a different local tag or local Whisper
+unloads the retained tag first, even if another route can use it later. The next
+request reloads it as needed.
+
+- All chat/coding models are abliterated instruct builds. Native Ollama rungs
   progress from 0.873B Q8_0, through 2.27B and 4.54B in Q4_K_M/Q8_0, to 9.65B
-  Q4_K_M/Q8_0, 27.8B Q4_K_M and 36.0B Q4_K_M where memory fits. High-memory
+  Q4_K_M/Q8_0, 27.8B Q4_K_M and 36.0B Q4_K_M where the allocation fits. Higher
   rungs continue with 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0
-  (39/46 GB), and 36B F16 (72/80 GB). Beyond these, the native 122B tag
-  (125B parameters, Q4_K_M, 81 GB download) is offered only when its
-  conservative 96 GB resident estimate fits—first around 240 GB total RAM
-  under a fully free 40% cap. At 256 GB with
-  enough free memory, Kokoro FP32 also fits beside it at an estimated 97.5 GB
-  peak resident; the reference catalogue itself remains 33 rows through 32 GB.
+  (39/46 GB), and 36B F16 (72/80 GB). Beyond these, the native 122B tag (125B
+  parameters, Q4_K_M, 81 GB download) is offered only when the allocation can
+  cover its conservative 96 GB resident estimate. On a big enough host, Kokoro
+  FP32 can also fit beside it; the reference catalogue itself remains 33 rows
+  through 32 GB.
 - Vision is present in all 33 reference profiles and always uses a multimodal
-  rung. At 500 MB–3 GB the smallest model estimates 1.30 GB resident and is
+  rung. At the smallest allocations the 0.873B model (1.30 GB resident) is
   displayed as **best-effort only**; it is neither auto-installed nor run as a
-  fit. The first fully-free reference profile where it fits is 4 GB. At 32 GB,
-  chat/coding use a 27.8B Q2_K GGUF candidate (12.4 GB resident) while vision
-  uses native Ollama 9.65B Q8_0 (12.3 GB resident). The Q2_K Ollama import is
-  untested here and never receives image requests. Vision capability metadata
-  is checked before pixels are sent.
+  fit. Larger allocations reach the 27.8B Q2_K GGUF candidate (12.4 GB resident)
+  for chat/coding while vision stays on a native multimodal Ollama tag; that
+  Q2_K import is untested here and never receives image requests. Vision
+  capability metadata is checked before pixels are sent.
 - Whisper picks multilingual quantized models, not `.en` variants; the selected
   fitting model and runtime are installed automatically by the root setup script
   when possible.
-- At 1 GB total RAM, the AI cap is 0.4 GB, so the 0.873B model is clearly
-  best-effort and is skipped. Whisper base can fit. At 500 MB even local Whisper
-  is outside the reserved budget; browser/OS fallbacks are used.
+- When the allocation is smaller than the smallest model (for example a 1 GB
+  machine at a 40% share), the 0.873B model is clearly best-effort and is
+  skipped. Whisper base can still fit. At 500 MB even local Whisper is outside
+  the allocation; browser/OS fallbacks are used.
 
 The **MODEL STACK** HUD panel (key `M`) shows the live plan and a 33-row
-500 MB–32 GB reference catalogue. The catalog is informational; it never
-installs every tier. `GET /autopilot` is read-only. `POST /autopilot/install`
-remains a separate user-triggered download action. The root `build.ps1` / `build.sh`
+500 MB–32 GB reference catalogue for the current share. The catalog is
+informational; it never installs every tier. `GET /autopilot` is read-only,
+`POST /autopilot/config` only saves the share/cap and re-plans, and
+`POST /autopilot/install` remains a separate user-triggered download action. The root `build.ps1` / `build.sh`
 path checks, installs and starts Ollama when needed, then installs only selected
 fitting Ollama models and the planned Whisper model/runtime. Existing assets are
 reused; other tiers and over-budget best-effort models are skipped. Standalone

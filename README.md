@@ -30,9 +30,10 @@ effectful tools still have a separate default-deny permission gate.
 ## Model slots and multilingual workflow
 
 JARVIS routes each turn deliberately. RAM autopilot normally assigns one
-abliterated Qwen3.5 multimodal tag across chat, vision and coding. At 32 GB it
-uses a higher-parameter text/coding rung plus a separate native Ollama vision
-rung, keeping image support independent of the third-party GGUF import:
+abliterated Qwen3.5 multimodal tag across chat, vision and coding. When the
+allocation is large enough a higher-parameter rung is selected; when it is
+tight, the plan steps down honestly and keeps image support on a native Ollama
+vision rung rather than guessing from a text-only model:
 
 | Slot | Capability | RAM-selected model |
 |---|---|---|
@@ -49,74 +50,112 @@ English rewrite. Chat, vision and reason remain separate routes. Where they
 share a tag, its weights are downloaded once and can stay warm between those
 routes. If a different local tag or Whisper needs the same reserved memory, the
 bridge serializes the work and unloads the retained tag first; the next request
-reloads it. The 32 GB high-parameter profile uses distinct text and vision
-tags. Overrides can still pin individual slots to another local model/server.
+reloads it. Overrides can still pin individual slots to another local
+model/server.
 
-## RAM autopilot and explicit installation
+## RAM allocation and explicit installation
 
-The plan preserves the requested allocation:
+There is no fixed OS/apps/AI split. The planner looks at how much RAM is free
+right now and gives the AI the share you ask for — **all of it by default** —
+optionally bounded by a hard gigabyte cap:
 
 ```
-35%  operating system
-25%  other running applications
-40%  maximum JARVIS allocation
+JARVIS_RAM_SHARE=80    # 80% of free RAM (0.8 and "80%" also work)
+JARVIS_RAM_CAP_GB=12   # optional hard ceiling; wins when it is smaller
 ```
+
+Whatever you do not allocate simply stays free for the rest of the machine.
+Set the share from the MODEL STACK panel with the slider and cap field (APPLY
+saves it; RESCAN re-samples free memory and rebuilds the plan), or with the two
+environment variables above. The panel persists your choice to
+`models/ram-allocation.json` (`JARVIS_RAM_CONFIG` relocates that file), and the
+bridge re-plans immediately, without a restart, so the next turn already routes
+to whatever the new ceiling selects. On Linux, free RAM means the kernel's
+`MemAvailable` — reclaimable page cache counts as free, so the number matches
+what a system monitor shows — and `os.freemem()` elsewhere.
 
 The planner compares each selected model's estimated active-memory requirement
-(weights plus runtime/context headroom) with the fixed 40% ceiling. Routes that
-use the same tag share its download and may share residency; switching to a
-different local tag or Whisper releases the previous JARVIS-managed local
-Ollama model first, preserving the sequential peak estimate. The 32 GB profile
-deliberately splits text/coding from image understanding: a larger-parameter
-Q2_K GGUF for chat/reason and a native Ollama Q8_0 model for verified vision.
-Browser TTS has a separate resident allowance. Estimates are conservative
-guides, not hardware guarantees. Free RAM is sampled when the bridge starts;
-restart the bridge to re-plan after host memory availability changes.
+(weights plus runtime/context headroom) with that ceiling. Routes that use the
+same tag share its download and may share residency; switching to a different
+local tag or Whisper releases the previous JARVIS-managed local Ollama model
+first, preserving the sequential peak estimate. Browser TTS has a separate
+resident allowance. Estimates are conservative guides, not hardware
+guarantees. Free RAM is sampled when the bridge starts and at every APPLY or
+RESCAN; other applications growing later is the reason the share and cap exist.
+
+The table below is the reference catalogue at the **default 100% share with all
+reported RAM free**, so it reads as "what this machine would get if nothing else
+were running". Lower the share and every row scales with it.
 
 | Total RAM | JARVIS cap | Chat | Vision | Coding / reason | Whisper STT | TTS | Unique selected assets* | Peak resident estimate |
 |---:|---:|---|---|---|---|---|---:|---:|
-| 500 MB | 0.20 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | unavailable | Browser/OS | 0.00 GB | 0.00 GB |
-| 1 GB | 0.40 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual base Q5_1 | Browser/OS | 0.06 GB | 0.33 GB |
-| 2 GB | 0.80 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual small Q5_1 | Browser/OS | 0.19 GB | 0.68 GB |
-| 4 GB | 1.60 GB | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 1.54 GB | 1.35 GB |
-| 8 GB | 3.20 GB | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 3.24 GB | 3.15 GB |
-| 12 GB | 4.80 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 3.84 GB | 4.10 GB |
-| 16 GB | 6.40 GB | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 5.74 GB | 6.10 GB |
-| 24 GB | 9.60 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
-| 32 GB | 12.80 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Browser/OS | 22.44 GB | 12.40 GB |
+| 500 MB | 0.50 GB | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | base Q5_1 | Browser/OS | 0.06 GB | 0.33 GB |
+| 1 GB | 1.00 GB | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | small Q5_1 | Browser/OS | 0.19 GB | 0.68 GB |
+| 2 GB | 2.00 GB | 873M Q8_0 · fit | 873M Q8_0 · fit | 873M Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 1.54 GB | 1.35 GB |
+| 3 GB | 3.00 GB | 2.27B Q4_K_M · fit | 2.27B Q4_K_M · fit | 2.27B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 2.44 GB | 2.35 GB |
+| 4 GB | 4.00 GB | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 3.32 GB | 3.88 GB |
+| 5 GB | 5.00 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 3.92 GB | 4.83 GB |
+| 6 GB | 6.00 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 4.16 GB | 5.60 GB |
+| 7 GB | 7.00 GB | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 5.82 GB | 6.83 GB |
+| 8 GB | 8.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 7.14 GB | 7.80 GB |
+| 9 GB | 9.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 7.22 GB | 8.53 GB |
+| 10 GB | 10.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 11 GB | 11.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 12 GB | 12.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 13 GB | 13.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Browser/OS | 22.44 GB | 12.40 GB |
+| 14 GB | 14.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 15 GB | 15.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 16 GB | 16.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 17 GB | 17.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 18 GB | 18.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 19 GB | 19.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 20 GB | 20.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 17.54 GB | 20.00 GB |
+| 21 GB | 21.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 17.62 GB | 20.73 GB |
+| 22 GB | 22.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 23 GB | 23.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 24 GB | 24.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 25 GB | 25.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 26 GB | 26.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 27 GB | 27.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 28 GB | 28.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 24.54 GB | 28.00 GB |
+| 29 GB | 29.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 24.62 GB | 28.73 GB |
+| 30 GB | 30.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
+| 31 GB | 31.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
+| 32 GB | 32.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
 
 Vision is required and stays visible in all 33 reference profiles. At 500 MB
-through 3 GB, its smallest rung (0.873B Q8_0, estimated 1.30 GB resident) is
+and 1 GB, its smallest rung (0.873B Q8_0, estimated 1.30 GB resident) is
 labelled **best-effort only**; it is not auto-downloaded or invoked as though it
-fits. Under a fully free 40% budget, the first reference tier where it fits is
-4 GB. At 32 GB, the catalogue now reaches a **27.8B Q2_K** text/coding rung
-(10.9 GB estimate including the repository's separate image-projector file,
-12.4 GB resident) while vision stays on the native Ollama **9.65B Q8_0** tag
-(11 GB download, 12.3 GB resident). The HF-to-Ollama Q2_K import has not been
-verified by this project; the image route never relies on it, and Ollama's
-vision metadata is checked before sending pixels. This two-model plan is about
-22.44 GB of unique downloads, but only the larger active model is counted in
-the resident peak. Larger 27.8B Q4_K_M (17 GB download, 20 GB resident) and
-36.0B Q4_K_M (24 GB download, 28 GB resident) remain available above the 32 GB
-reference range when their resident estimates fit. The extended native ladder
-then offers 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0 (39/46 GB), and
-36B F16 (72/80 GB) as progressively higher-memory tiers. At the top is
-Ollama's native **122B tag (125B parameters, Q4_K_M)** at about 81 GB download /
-96 GB estimated resident, first eligible around 240 GB total RAM with the full
-40% allowance free. On a 256 GB host with sufficient free memory, the plan can
-also select multilingual Whisper and browser-cached Kokoro FP32, for roughly
-97.5 GB peak resident under the 102.4 GB cap. These remain multimodal, and
-current-free-memory checks can step the plan down; workstation tiers are outside
-the 33-row 0.5–32 GB reference catalogue.
+fits. With the default all-free-RAM share, the first reference tier where it
+fits is 2 GB. Rows scale with the share: at 50%, for example, the 16 GB row
+behaves roughly like the 8 GB row above it.
 
-The 1–3 GB tiers still show vision as **best-effort only** and never auto-run
-it. High-end Q8 rungs are used at 8, 16 and 32 GB when the fixed 40% cap allows.
+Above 12 GB of allocation the ladder reaches the **27.8B Q2_K** text/coding rung
+(10.9 GB estimate including the repository's separate image-projector file,
+12.4 GB resident) while vision stays on a native multimodal Ollama tag. That
+HF-to-Ollama import has not been verified by this project; the image route never
+relies on it, and Ollama's vision metadata is checked before sending pixels.
+Larger shared rungs follow: 27.8B Q4_K_M (17 GB download, 20 GB resident) and
+36.0B Q4_K_M (24 GB download, 28 GB resident). The extended native ladder then
+offers 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0 (39/46 GB), and 36B
+F16 (72/80 GB) as progressively higher-memory tiers. At the top is Ollama's
+native **122B tag (125B parameters, Q4_K_M)** at about 81 GB download / 96 GB
+estimated resident, selected only when your allocation is at least that large —
+with the default 100% share that means roughly 200+ GB of free RAM, or any
+smaller machine whose user explicitly set a share/cap that big. On such a host
+the plan can also select multilingual Whisper and browser-cached Kokoro FP32.
+These remain multimodal, and every plan re-checks current free memory; the
+workstation rungs sit outside the 33-row 0.5–32 GB reference catalogue.
+
+The small tiers show vision as **best-effort only** and never auto-run it.
+High-end Q8 rungs are used wherever the allocation allows them.
 
 *Unique selected-asset totals count each distinct selected LLM tag once, plus
 the selected Whisper file and (where chosen) browser-cached Kokoro asset. They
 are catalogue estimates before reusing anything already installed; other RAM
-tiers are never downloaded. Actual live planning can step down when current free
-memory is lower than the reference profile.
+tiers are never downloaded. Actual live planning steps down when current free
+memory is lower than the reference profile, or when the user's share is below
+100%.
 
 Chat, vision and coding use abliterated instruct builds only; the planner
 refuses a non-abliterated model. Every advertised vision rung is multimodal.
@@ -130,7 +169,9 @@ an unverified third-party projector import.
 
 Open **MODEL STACK** in the HUD (or press **M**) to inspect the live RAM plan,
 all 33 reference tiers from 500 MB through 32 GB, selected models, estimates and
-limits. `GET /autopilot` is read-only. The panel's **INSTALL SELECTED STACK**
+limits, and to set the AI's share of free RAM. `GET /autopilot` is read-only;
+`POST /autopilot/config` saves a share/cap and re-plans live (the panel's APPLY
+and RESCAN buttons), and never downloads anything. The **INSTALL SELECTED STACK**
 button remains an explicit manual action. The root `build.ps1` / `build.sh`
 workflow instead automates first-run setup: it checks for Ollama, installs it
 from the official installer only when a fitting local Ollama model is selected,
@@ -207,26 +248,32 @@ recogniser, not a chat model.
 
 Official Ollama catalogue entries and published model-size tags were checked
 while building the planner. `npm run test:autopilot` passes 13 deterministic
-RAM profiles and mocked checks for non-fitting skips, Ollama-tag idempotence,
-slot-filtered installer routing, offline Whisper installation, incomplete-file
-rejection, and the browser-cached Kokoro path. `npm run test:installers` covers
-loopback endpoint aliases, manual/per-slot overrides, and read-only preflight
-behavior against a mock model server. `npm run smoke` exercises the bridge and tool loop,
-RAM-plan response shape and 33-tier catalogue/statuses, Telugu-to-English
-code-intent routing, and vision prompt fusion against a local stub model
-server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
+RAM profiles and mocked checks for share/cap parsing, saved-vs-environment
+precedence, the hard cap winning over the share, non-fitting skips, Ollama-tag
+idempotence, slot-filtered installer routing, offline Whisper installation,
+incomplete-file rejection, and the browser-cached Kokoro path.
+`npm run test:installers` covers loopback endpoint aliases, manual/per-slot
+overrides, and read-only preflight behavior against a mock model server.
+`npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
+33-tier catalogue/statuses, the live `/autopilot/config` share change,
+Telugu-to-English code-intent routing, and vision prompt fusion against a local
+stub model server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
 transcription/model download, or Windows desktop action has been verified in
 this workspace. GitHub Pages hosts the UI only.
 
 ## Model manager and local speech
 
 `GET /models` compares the dynamic chat/vision/coding slots with Ollama's
-installed tags. `GET /autopilot` reports the live RAM allocation, selected
+installed tags. `GET /autopilot` reports the live RAM allocation (free RAM now,
+your share, the resulting ceiling, and how much was left unallocated), selected
 variants, estimated active memory, expected downloads and unsupported
-capabilities; it also exposes the full RAM-tier catalogue. The HUD's
-`POST /autopilot/install` action remains user-triggered. The root setup scripts
-handle Ollama installation and selected model setup automatically; the endpoint
-itself never launches a system installer.
+capabilities; it also exposes the full RAM-tier catalogue for your current
+share. `POST /autopilot/config` writes `{ share, capGb }` (both optional, plus
+`rescan: true` to just re-sample memory) to `models/ram-allocation.json` and
+rebuilds the plan immediately. The HUD's `POST /autopilot/install` action
+remains user-triggered. The root setup scripts handle Ollama installation and
+selected model setup automatically; neither endpoint launches a system
+installer.
 
 **Speech-to-text:** RAM autopilot selects local multilingual Whisper when it fits
 and has been installed; the root build scripts check/download the selected file
@@ -494,6 +541,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `JARVIS_MODEL_CHAT` | RAM-selected | Override the planner's conversation/intent model |
 | `JARVIS_MODEL_VISION` | RAM-selected or unavailable | Override the planner's image model |
 | `JARVIS_MODEL_REASON` | RAM-selected | Override the planner's abliterated coding/tool model |
+| `JARVIS_RAM_SHARE` | `100%` | AI share of currently free RAM (`80`, `0.8`, `"80%"`) |
+| `JARVIS_RAM_CAP_GB` | — | Hard allocation ceiling in GB; wins when smaller than the share |
+| `JARVIS_RAM_CONFIG` | `models/ram-allocation.json` | Where the panel's saved share/cap lives |
 | `JARVIS_OLLAMA_URL` | `http://localhost:11434` | Ollama management/download API root |
 | `JARVIS_MODEL_*_URL` | inherits the base URL | Move one slot to another machine |
 | `JARVIS_MODEL_NAME` | — | Pins every slot to one model |
@@ -518,8 +568,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 
 ### The pipeline
 
-`bridge/autopilot.mjs` selects the model/quant rung from the RAM plan, unless a
-`JARVIS_MODEL_*` environment variable explicitly overrides that slot. Images
+`bridge/autopilot.mjs` selects the model/quant rung from the RAM allocation
+(your share of free RAM, or `100%` by default), unless a `JARVIS_MODEL_*`
+environment variable explicitly overrides that slot. Images
 route to `vision`; coding, technical and tool-shaped turns route to `reason`;
 ordinary conversation and multilingual intent translation use `chat`. A missing
 vision model produces a clear RAM-limit error rather than a confident guess from

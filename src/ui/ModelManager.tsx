@@ -48,7 +48,18 @@ type RuntimeSlotStatus = {
 
 type PlanPayload = {
   summary: string
-  ram: { totalGb: number; osGb: number; appsGb: number; modelsGb: number; effectiveModelGb: number; currentFreeGb: number }
+  ram: {
+    totalGb: number
+    freeGb: number
+    currentFreeGb: number
+    unallocatedGb: number
+    modelsGb: number
+    effectiveModelGb: number
+    sharePercent: number
+    capGb: number | null
+    allocationSource: string
+  }
+  allocation?: { sharePercent: number; capGb: number | null; source: string } | null
   fits: PlannedSlot[]
   skipped: { id: string; model: string | null; needsGb: number; why: string }[]
   totalDownloadGb: number
@@ -101,6 +112,10 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
   const [starting, setStarting] = useState(false)
   const [jobId, setJobId] = useState('')
   const [job, setJob] = useState<InstallJob | null>(null)
+  const [sharePercent, setSharePercent] = useState(100)
+  const [capGb, setCapGb] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [allocationNote, setAllocationNote] = useState('')
 
   const refresh = useCallback(async () => {
     if (blocked) return
@@ -110,13 +125,55 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
       const response = await fetch(`${BRIDGE_HTTP_URL}/autopilot`, { cache: 'no-store' })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(String(data.error ?? `Local bridge returned HTTP ${response.status}`))
-      setPlan(data as PlanPayload)
+      const next = data as PlanPayload
+      setPlan(next)
+      setSharePercent(Math.round(next.ram.sharePercent))
+      setCapGb(next.ram.capGb != null ? String(next.ram.capGb) : '')
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'Local bridge is unavailable.')
     } finally {
       setLoading(false)
     }
   }, [blocked])
+
+  const postAllocation = useCallback(async (body: Record<string, unknown>, note: string) => {
+    setSaving(true)
+    setLoadError('')
+    setAllocationNote('')
+    try {
+      const response = await fetch(`${BRIDGE_HTTP_URL}/autopilot/config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(String(data.error ?? `Allocation update returned HTTP ${response.status}`))
+      setAllocationNote(note)
+      await refresh()
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Could not update the allocation.')
+    } finally {
+      setSaving(false)
+    }
+  }, [refresh])
+
+  const applyAllocation = useCallback(async () => {
+    const trimmed = capGb.trim()
+    const cap = trimmed === '' ? null : Number(trimmed)
+    if (cap !== null && (!Number.isFinite(cap) || cap <= 0)) {
+      setAllocationNote('')
+      setLoadError('Hard cap must be a positive number of GB, or left blank for no cap.')
+      return
+    }
+    await postAllocation(
+      { share: sharePercent, capGb: cap },
+      `AI share saved: ${sharePercent}% of free RAM${cap === null ? '' : `, hard cap ${cap} GB`}. The bridge re-planned immediately.`,
+    )
+  }, [capGb, postAllocation, sharePercent])
+
+  const rescan = useCallback(async () => {
+    await postAllocation({ rescan: true }, 'Free RAM sampled again and the plan rebuilt against it.')
+  }, [postAllocation])
 
   useEffect(() => {
     void Promise.resolve().then(() => refresh())
@@ -210,14 +267,14 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
           <div>
             <span className="model-manager-kicker">J.A.R.V.I.S. / LOCAL CONTROL PLANE</span>
             <h2 id="model-manager-title">RAM / MODEL STACK</h2>
-            <p>Autopilot chooses progressive abliterated chat/coding models with an independently verified multimodal vision route.</p>
+            <p>Autopilot chooses progressive abliterated chat/coding models with an independently verified multimodal vision route, inside the share of free RAM you decide.</p>
           </div>
           <button type="button" className="model-manager-close" onClick={onClose} aria-label="Close model stack">×</button>
         </header>
 
         <div className="model-manager-status-row">
           <span className={`model-manager-link ${plan ? 'is-linked' : ''}`}><i />{blocked ? 'STATIC HOST / LOCAL BRIDGE BLOCKED' : plan ? 'LOCAL BRIDGE LINKED' : loading ? 'READING LOCAL PROFILE' : 'NO LOCAL BRIDGE'}</span>
-          <span className="model-manager-summary">{plan?.summary ?? '35% OS / 25% APPS / 40% MAXIMUM AI'}</span>
+          <span className="model-manager-summary">{plan?.summary ?? 'NO FIXED SPLIT / AI TAKES YOUR SHARE OF FREE RAM'}</span>
         </div>
 
         {blocked ? (
@@ -232,11 +289,49 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
           <>
             <div className="model-manager-budget" aria-label="RAM allocation">
               <div className="budget-total"><span>HOST RAM</span><strong>{plan.ram.totalGb.toFixed(1)}<small> GB</small></strong></div>
-              <div className="budget-segment budget-os"><i /><span>OS / 35%</span><b>{plan.ram.osGb.toFixed(1)} GB</b></div>
-              <div className="budget-segment budget-apps"><i /><span>OTHER APPS / 25%</span><b>{plan.ram.appsGb.toFixed(1)} GB</b></div>
-              <div className="budget-segment budget-ai"><i /><span>JARVIS CAP / 40%</span><b>{plan.ram.modelsGb.toFixed(1)} GB</b></div>
-              <div className="budget-current"><span>ACTIVE-MODEL CEILING</span><b>{plan.ram.effectiveModelGb.toFixed(2)} GB</b><small>{plan.ram.currentFreeGb.toFixed(1)} GB free at bridge start</small></div>
+              <div className="budget-segment budget-free"><i /><span>FREE NOW</span><b>{plan.ram.freeGb.toFixed(1)} GB</b></div>
+              <div className="budget-segment budget-share"><i /><span>AI SHARE</span><b>{plan.ram.sharePercent.toFixed(0)}%</b></div>
+              <div className="budget-segment budget-ai"><i /><span>AI CEILING{plan.ram.capGb != null ? ` / ${plan.ram.capGb} GB CAP` : ''}</span><b>{plan.ram.modelsGb.toFixed(1)} GB</b></div>
+              <div className="budget-current"><span>UNALLOCATED / LEFT TO THE MACHINE</span><b>{plan.ram.unallocatedGb.toFixed(2)} GB</b><small>plan made with {plan.ram.currentFreeGb.toFixed(1)} GB free · source: {plan.ram.allocationSource}</small></div>
             </div>
+
+            <div className="model-manager-allocation">
+              <div className="allocation-copy">
+                <b>AI SHARE OF FREE RAM</b>
+                <p>JARVIS takes the share you choose of whatever is free right now. No fixed OS/apps percentage is reserved for him; lower the share or set a hard cap to keep more breathing room.</p>
+              </div>
+              <label className="allocation-slider">
+                <span>{sharePercent}%</span>
+                <input
+                  type="range"
+                  min={5}
+                  max={100}
+                  step={5}
+                  value={sharePercent}
+                  onChange={(event) => setSharePercent(Number(event.target.value))}
+                  disabled={saving}
+                />
+              </label>
+              <label className="allocation-cap">
+                <span>HARD CAP / GB</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  placeholder="none"
+                  value={capGb}
+                  onChange={(event) => setCapGb(event.target.value)}
+                  disabled={saving}
+                />
+              </label>
+              <button type="button" onClick={() => void applyAllocation()} disabled={saving}>
+                {saving ? 'APPLYING…' : 'APPLY'}
+              </button>
+              <button type="button" className="allocation-rescan" onClick={() => void rescan()} disabled={saving}>
+                RESCAN FREE RAM
+              </button>
+            </div>
+            {allocationNote && <div className="model-manager-message model-manager-allocation-note">{allocationNote}</div>}
 
             <div className="model-manager-grid">
               {plan.fits.map((slot) => (
@@ -270,7 +365,7 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
                   <span>FULL RAM TIER CATALOGUE / 0.5–32 GB</span>
                   <small>33 reference profiles · opens for comparison</small>
                 </summary>
-                <p className="tier-catalog-note">Vision is provisioned in all 33 tiers. Most tiers share one abliterated multimodal Qwen3.5 tag; the 32 GB row splits higher-parameter Q2_K chat/coding from native Q8_0 vision. Above the reference grid, the extended plan can reach the native 122B-tag / 125B Q4_K_M workstation rung at about 240 GB total RAM; at 256 GB it can also fit browser-cached Kokoro FP32. Distinct tags count once each. Rows assume all RAM is free; below 4 GB the smallest 0.8B Q8 model is best-effort only and never auto-run.</p>
+                <p className="tier-catalog-note">Rows assume all RAM is free and apply your current AI share{plan.ram.capGb != null ? ` and ${plan.ram.capGb} GB hard cap` : ''}. Vision is provisioned in every row. Rows where the shared allocation fits one tag show the same abliterated multimodal Qwen3.5 model across chat, vision and coding; larger allocations reach the higher-parameter rungs, up to the native 122B-tag / 125B Q4_K_M workstation model. Distinct tags count once each. At the smallest tiers the 0.8B Q8 model is best-effort only and never auto-run.</p>
                 <div className="tier-table-wrap">
                   <table>
                     <thead><tr><th>RAM</th><th>JARVIS cap</th><th>Chat</th><th>Vision / image</th><th>Coding / reason</th><th>Multilingual STT</th><th>TTS</th><th>Assets</th></tr></thead>

@@ -21,10 +21,10 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, withLocalSpeechModel } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, withLocalSpeechModel, replanAutopilot } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
-import { install as autopilotInstall, planSummary, ladder as autopilotLadder, tierProfiles } from './autopilot.mjs'
+import { availableRam, install as autopilotInstall, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -652,6 +652,27 @@ function corsFor(req) {
   return headers
 }
 
+/**
+ * Read a small JSON object from a POST body.
+ *
+ * Deliberately capped: every endpoint that uses it takes user-typed
+ * configuration, never media, so anything larger is a mistake or an attack.
+ */
+async function readJsonBody(req, limit = 64 * 1024) {
+  const announced = Number(req.headers['content-length'] ?? 0)
+  if (announced > limit) throw new Error('Request body is too large.')
+  const chunks = []
+  let bytes = 0
+  for await (const chunk of req) {
+    bytes += chunk.length
+    if (bytes > limit) throw new Error('Request body is too large.')
+    chunks.push(chunk)
+  }
+  const text = Buffer.concat(chunks).toString('utf8').trim()
+  if (!text) return {}
+  return JSON.parse(text)
+}
+
 // One HTTP server for both the speech proxy and the WebSocket upgrade.
 const http = await import('node:http')
 
@@ -727,12 +748,17 @@ const handleRequest = async (req, res) => {
       summary: planSummary(p),
       ram: {
         totalGb: +(p.budget.total / 1073741824).toFixed(2),
-        osGb: +(p.budget.os / 1073741824).toFixed(2),
-        appsGb: +(p.budget.apps / 1073741824).toFixed(2),
         modelsGb: +(p.budget.models / 1073741824).toFixed(2),
         effectiveModelGb: +(p.effectiveModelBytes / 1073741824).toFixed(2),
+        // Free RAM now (live) and free RAM when the plan was last made.
+        freeGb: +(availableRam() / 1073741824).toFixed(2),
         currentFreeGb: +(p.budget.free / 1073741824).toFixed(2),
+        unallocatedGb: +(p.budget.unallocated / 1073741824).toFixed(2),
+        sharePercent: p.budget.sharePercent,
+        capGb: p.budget.capGb,
+        allocationSource: p.budget.source,
       },
+      allocation: p.allocation ?? null,
       fits: Object.entries(p.choices).map(([id, rung]) => ({
         id,
         kind: rung.kind ?? 'ollama',
@@ -761,9 +787,69 @@ const handleRequest = async (req, res) => {
       maxResidentGb: +(p.maxResidentBytes / 1073741824).toFixed(2),
       notes: p.notes,
       catalog: autopilotLadder(),
-      tiers: tierProfiles(),
+      tiers: tierProfiles({ share: p.budget.share, capGb: p.budget.capGb }),
       ollama: Boolean(runtime.ollama),
       modelSlots: runtime.slots,
+    }))
+  }
+
+  // Live allocation control: how much of the free RAM the AI may use.
+  // Saving is explicit and user-triggered; the plan is rebuilt immediately so
+  // the next turn already routes to the model the new ceiling selects.
+  if (req.method === 'POST' && requestUrl.pathname === '/autopilot/config') {
+    let patch = {}
+    try {
+      patch = await readJsonBody(req, 64 * 1024)
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: String(error?.message ?? error) }))
+    }
+    if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: 'Send a JSON object with optional share and capGb.' }))
+    }
+    const unknown = Object.keys(patch).filter((key) => !['share', 'capGb', 'rescan'].includes(key))
+    if (unknown.length) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
+    }
+    const writes = Object.hasOwn(patch, 'share') || Object.hasOwn(patch, 'capGb')
+    if (writes) {
+      const saved = await saveAllocation({ share: patch.share, capGb: patch.capGb })
+      if (!saved.ok) {
+        res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ ok: false, error: saved.error }))
+      }
+    }
+    // Always re-sample: rescan asks for a fresh look at free RAM, and any
+    // write deserves one so the panel never shows stale arithmetic.
+    const p = replanAutopilot()
+    console.log(`[jarvis] allocation ${p.budget.sharePercent}% of ${(p.budget.free / 1073741824).toFixed(2)} GB free → ${(p.budget.models / 1073741824).toFixed(2)} GB ceiling (${p.budget.source}${p.budget.capGb != null ? `, hard cap ${p.budget.capGb} GB` : ''})`)
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({
+      ok: true,
+      summary: planSummary(p),
+      changed: writes,
+      allocation: p.allocation,
+      ram: {
+        totalGb: +(p.budget.total / 1073741824).toFixed(2),
+        modelsGb: +(p.budget.models / 1073741824).toFixed(2),
+        effectiveModelGb: +(p.effectiveModelBytes / 1073741824).toFixed(2),
+        freeGb: +(availableRam() / 1073741824).toFixed(2),
+        currentFreeGb: +(p.budget.free / 1073741824).toFixed(2),
+        unallocatedGb: +(p.budget.unallocated / 1073741824).toFixed(2),
+        sharePercent: p.budget.sharePercent,
+        capGb: p.budget.capGb,
+        allocationSource: p.budget.source,
+      },
+      fits: Object.entries(p.choices).map(([id, rung]) => ({
+        id,
+        kind: rung.kind ?? 'ollama',
+        model: rung.model ?? rung.file,
+        fits: Boolean(rung.fits),
+        mode: rung.mode,
+        residentGb: +(rung.residentBytes / 1073741824).toFixed(2),
+      })),
     }))
   }
 
@@ -1001,6 +1087,13 @@ server.listen(PORT)
 
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
 console.log(`[jarvis] max ${EFFORT} tool turns`)
+console.log(
+  `[jarvis] AI allocation ${AUTOPILOT_PLAN.budget.sharePercent}% of ` +
+    `${(AUTOPILOT_PLAN.budget.free / 1073741824).toFixed(1)} GB free = ` +
+    `${(AUTOPILOT_PLAN.budget.models / 1073741824).toFixed(1)} GB` +
+    `${AUTOPILOT_PLAN.budget.capGb != null ? ` (hard cap ${AUTOPILOT_PLAN.budget.capGb} GB)` : ''}` +
+    ` — change it in MODEL STACK or with JARVIS_RAM_SHARE`,
+)
 
 // The pipeline, named slot by slot. Printed because "which route answered
 // that" is a fair question; multiple routes may share one fitted model.

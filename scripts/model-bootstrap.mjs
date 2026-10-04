@@ -3,8 +3,9 @@
  * First-run local model setup for build.ps1 / build.sh.
  *
  * Checks the live RAM plan, starts Ollama temporarily if needed, and installs
- * only selected models whose estimated resident use fits the fixed 40% JARVIS
- * allowance. Other RAM tiers are catalogue entries, never bulk downloads.
+ * only selected models whose estimated resident use fits the user's share of
+ * currently free RAM. Other RAM tiers are catalogue entries, never bulk
+ * downloads.
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { install, plan, planSummary } from '../bridge/autopilot.mjs'

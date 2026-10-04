@@ -12,6 +12,9 @@
  * Any of those can be broken by a refactor that still type-checks.
  */
 import { createServer } from 'node:http'
+import { rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocket } from 'ws'
 
 const PORT = 8791
@@ -33,6 +36,9 @@ process.env.JARVIS_MODEL_CHAT = CHAT
 process.env.JARVIS_MODEL_REASON = REASON
 process.env.JARVIS_MODEL_VISION = VISION
 process.env.JARVIS_ALLOW_NO_ORIGIN = '1'
+// Allocation changes made through the HTTP API must land in a throwaway file,
+// never in the developer's real models/ram-allocation.json.
+process.env.JARVIS_RAM_CONFIG = join(tmpdir(), `jarvis-smoke-ram-${process.pid}.json`)
 
 // --- the stub model server -------------------------------------------------
 let calls = 0
@@ -206,9 +212,10 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
   && autopilotData.tiers.every((tier) => {
     const slots = tier.slots
     if (!slots?.chat?.model || !slots?.reason?.model || !slots?.vision?.model) return false
-    const routeModelsOkay = tier.ramGb === 32
-      ? slots.chat.model === slots.reason.model && slots.chat.model !== slots.vision.model
-      : slots.chat.model === slots.vision.model && slots.vision.model === slots.reason.model
+    // Chat and coding always share a tag; vision shares it too whenever the
+    // allocation fits one multimodal model, and splits only when a larger
+    // text rung means vision must stay on its own native multimodal tag.
+    const routeModelsOkay = slots.chat.model === slots.reason.model
     return Object.values(slots).every((slot) => validTierStates.has(slot.state) && slot.fits === (slot.state === 'fits'))
       && routeModelsOkay
       && slots.vision.multimodal === true
@@ -218,6 +225,16 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
 const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
+  ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {
+    const ram = autopilotData.ram ?? {}
+    const ramFields = ['totalGb', 'freeGb', 'currentFreeGb', 'unallocatedGb', 'modelsGb', 'effectiveModelGb', 'sharePercent']
+    return ramFields.every((field) => Number.isFinite(ram[field]))
+      && ram.sharePercent > 0 && ram.sharePercent <= 100
+      && ram.capGb === null
+      && ram.modelsGb <= ram.currentFreeGb + 0.01
+      && !Number.isFinite(ram.osGb) && !Number.isFinite(ram.appsGb)
+      && autopilotData.allocation?.sharePercent === ram.sharePercent
+  })()],
   ['/autopilot returns model-status slots and notes', Array.isArray(autopilotData.modelSlots) && Array.isArray(autopilotData.notes)],
   ['/autopilot includes 33 truthful RAM profiles with a multimodal vision slot in every tier', tierCatalogOkay],
   ['/autopilot exposes explicit model size and quant metadata for routed slots', (() => {
@@ -469,7 +486,45 @@ if (multilingualFailed) failed += multilingualFailed
 if (visionFailed) failed += visionFailed
 if (memoryFailed) failed += memoryFailed
 
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory`)
+// The allocation is the user's to change at runtime. Drive the real endpoint
+// the MODEL STACK panel uses and confirm the plan follows the saved share.
+const allocationChecks = []
+try {
+  const before = await (await fetch(`http://localhost:${PORT}/autopilot`)).json()
+  const setResponse = await fetch(`http://localhost:${PORT}/autopilot/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ share: 50 }),
+  })
+  const setData = await setResponse.json()
+  const after = await (await fetch(`http://localhost:${PORT}/autopilot`)).json()
+  allocationChecks.push(
+    ['POST /autopilot/config accepts a share and reports the new ceiling', setResponse.ok === true && setData.ok === true && setData.ram.sharePercent === 50],
+    ['a 50% share halves the AI ceiling measured against free RAM', Math.abs(after.ram.modelsGb - after.ram.currentFreeGb * 0.5) < 0.05],
+    ['the saved share survives into the next plan read', after.ram.allocationSource === 'saved' && after.allocation?.share === 0.5],
+    ['the endpoint refuses a nonsense share instead of guessing', (await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ share: 900 }) })).status === 400],
+    ['the endpoint refuses unknown options', (await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nope: 1 }) })).status === 400],
+    ['RESCAN re-plans without changing the saved share', await (async () => {
+      const response = await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rescan: true }) })
+      const data = await response.json()
+      return response.ok && data.changed === false && data.ram.sharePercent === 50
+    })()],
+    ['the plan before the change was not already 50%', before.ram.sharePercent !== 50 || before.ram.allocationSource !== 'saved'],
+  )
+  await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ share: null, capGb: null }) })
+} catch (error) {
+  allocationChecks.push([`allocation endpoint error: ${error.message}`, false])
+}
+console.log('')
+let allocationFailed = 0
+for (const [name, ok] of allocationChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) allocationFailed++
+}
+failed += allocationFailed
+await rm(process.env.JARVIS_RAM_CONFIG, { force: true })
+
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
 
 ws.close()
 ws2.close()

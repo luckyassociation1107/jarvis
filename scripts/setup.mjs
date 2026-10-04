@@ -33,7 +33,7 @@ if (Number.isFinite(major) && major >= 20) {
 // --- RAM plan ------------------------------------------------------------
 const plan = AUTOPILOT_PLAN
 line(tick, `RAM planner: ${planSummary(plan)}`)
-line(info, 'Estimates only. The fixed split is 35% OS, 25% other apps and at most 40% JARVIS.')
+line(info, 'Estimates only. There is no fixed split: the AI gets the share of free RAM you choose (all of it by default).')
 
 // --- OpenAI-compatible model servers -------------------------------------
 async function inspectModelEndpoint(endpoint) {
