@@ -16,13 +16,17 @@
     "preview": "vite preview",
     "bridge": "node bridge/server.mjs",
     "bridge:writes": "node scripts/bridge-writes.mjs",
-    "setup": "node scripts/setup.mjs",
+    "setup": "node scripts/install-web.mjs",
+    "doctor": "node scripts/setup.mjs",
+    "cli": "node scripts/cli.mjs",
     "models:plan": "node scripts/model-bootstrap.mjs --plan-json",
     "models:install": "node scripts/model-bootstrap.mjs --install",
     "prebuild": "node scripts/vendor-mediapipe.mjs",
     "smoke": "node smoke.mjs",
     "test:autopilot": "node scripts/test-autopilot.mjs",
-    "test:installers": "node scripts/test-installers.mjs"
+    "test:installers": "node scripts/test-installers.mjs",
+    "test:runtime": "node scripts/test-runtime.mjs",
+    "test:control": "node scripts/test-control.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",

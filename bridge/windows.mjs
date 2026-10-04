@@ -138,7 +138,7 @@ export function windowsServer({ allowWrites = false } = {}) {
     ),
   ]
 
-  if (allowWrites && process.platform === 'win32') {
+  if (allowWrites) {
     const titleSchema = { title_contains: z.string().min(1).max(160).describe('A distinctive fragment of the visible window title.') }
     for (const action of WINDOW_ACTIONS) {
       tools.push(tool(
@@ -156,11 +156,9 @@ export function windowsServer({ allowWrites = false } = {}) {
     ))
   }
 
-  const instruction = process.platform !== 'win32'
-    ? 'Windows window controls are not available on this host. Do not claim any window action succeeded.'
-    : allowWrites
-      ? 'List windows freely. Window actions are enabled only because JARVIS_ALLOW_WRITES=1; choose a unique title and report the actual result.'
-      : 'Read-only Windows window listing is enabled. Focus, resize, close and app-launch actions are withheld until the bridge is restarted with JARVIS_ALLOW_WRITES=1.'
+  const instruction = allowWrites
+    ? 'List windows freely. Window actions are enabled only because JARVIS_ALLOW_WRITES=1; choose a unique title and report the actual result.'
+    : 'Read-only Windows window listing is enabled. Focus, resize, close and app-launch actions are withheld until the bridge is restarted with JARVIS_ALLOW_WRITES=1.'
 
   return createSdkMcpServer({ name: 'jarvis_windows', version: '1.0.0', instructions: instruction, tools })
 }

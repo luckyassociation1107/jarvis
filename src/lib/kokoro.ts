@@ -1,10 +1,10 @@
 /**
  * Neural speech, entirely in the browser.
  *
- * `speechSynthesis` is limited to whatever voices the operating system ships,
- * and on macOS the British male option is Daniel — a compact concatenative
- * voice from over a decade ago. It is the honest ceiling of the built-in API
- * and it sounds like a satnav.
+ * `speechSynthesis` is limited to whatever voices Windows ships, and the
+ * installed British male options — George, Thomas — are compact concatenative
+ * voices from years ago. It is the honest ceiling of the built-in API and it
+ * sounds like a satnav.
  *
  * Kokoro is an 82M-parameter TTS model that runs on WebGPU via ONNX. No cloud,
  * no API key, nothing leaves the machine — but it sounds like a person. It
@@ -12,7 +12,8 @@
  *
  * The cost is a one-time ~86MB model download, cached by the browser
  * afterwards. It's fetched during the boot sequence so the first "Hey Jarvis"
- * isn't waiting on it, and anything that goes wrong falls back to Daniel.
+ * isn't waiting on it, and anything that goes wrong falls back to the best
+ * system voice Windows offers.
  */
 
 import { KOKORO_VOICE } from '../config'

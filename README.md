@@ -30,9 +30,10 @@ effectful tools still have a separate default-deny permission gate.
 ## Model slots and multilingual workflow
 
 JARVIS routes each turn deliberately. RAM autopilot normally assigns one
-abliterated Qwen3.5 multimodal tag across chat, vision and coding. At 32 GB it
-uses a higher-parameter text/coding rung plus a separate native Ollama vision
-rung, keeping image support independent of the third-party GGUF import:
+abliterated Qwen3.5 multimodal tag across chat, vision and coding. When the
+allocation is large enough a higher-parameter rung is selected; when it is
+tight, the plan steps down honestly and keeps image support on a native Ollama
+vision rung rather than guessing from a text-only model:
 
 | Slot | Capability | RAM-selected model |
 |---|---|---|
@@ -49,74 +50,112 @@ English rewrite. Chat, vision and reason remain separate routes. Where they
 share a tag, its weights are downloaded once and can stay warm between those
 routes. If a different local tag or Whisper needs the same reserved memory, the
 bridge serializes the work and unloads the retained tag first; the next request
-reloads it. The 32 GB high-parameter profile uses distinct text and vision
-tags. Overrides can still pin individual slots to another local model/server.
+reloads it. Overrides can still pin individual slots to another local
+model/server.
 
-## RAM autopilot and explicit installation
+## RAM allocation and explicit installation
 
-The plan preserves the requested allocation:
+There is no fixed OS/apps/AI split. The planner looks at how much RAM is free
+right now and gives the AI the share you ask for — **all of it by default** —
+optionally bounded by a hard gigabyte cap:
 
 ```
-35%  operating system
-25%  other running applications
-40%  maximum JARVIS allocation
+JARVIS_RAM_SHARE=80    # 80% of free RAM (0.8 and "80%" also work)
+JARVIS_RAM_CAP_GB=12   # optional hard ceiling; wins when it is smaller
 ```
+
+Whatever you do not allocate simply stays free for the rest of the machine.
+Set the share from the MODEL STACK panel with the slider and cap field (APPLY
+saves it; RESCAN re-samples free memory and rebuilds the plan), or with the two
+environment variables above. The panel persists your choice to
+`models/ram-allocation.json` (`JARVIS_RAM_CONFIG` relocates that file), and the
+bridge re-plans immediately, without a restart, so the next turn already routes
+to whatever the new ceiling selects. Free RAM is the figure Windows reports as
+available, which is the conservative one: memory a program could still fault
+back in is not counted as yours.
 
 The planner compares each selected model's estimated active-memory requirement
-(weights plus runtime/context headroom) with the fixed 40% ceiling. Routes that
-use the same tag share its download and may share residency; switching to a
-different local tag or Whisper releases the previous JARVIS-managed local
-Ollama model first, preserving the sequential peak estimate. The 32 GB profile
-deliberately splits text/coding from image understanding: a larger-parameter
-Q2_K GGUF for chat/reason and a native Ollama Q8_0 model for verified vision.
-Browser TTS has a separate resident allowance. Estimates are conservative
-guides, not hardware guarantees. Free RAM is sampled when the bridge starts;
-restart the bridge to re-plan after host memory availability changes.
+(weights plus runtime/context headroom) with that ceiling. Routes that use the
+same tag share its download and may share residency; switching to a different
+local tag or Whisper releases the previous JARVIS-managed local Ollama model
+first, preserving the sequential peak estimate. Browser TTS has a separate
+resident allowance. Estimates are conservative guides, not hardware
+guarantees. Free RAM is sampled when the bridge starts and at every APPLY or
+RESCAN; other applications growing later is the reason the share and cap exist.
+
+The table below is the reference catalogue at the **default 100% share with all
+reported RAM free**, so it reads as "what this machine would get if nothing else
+were running". Lower the share and every row scales with it.
 
 | Total RAM | JARVIS cap | Chat | Vision | Coding / reason | Whisper STT | TTS | Unique selected assets* | Peak resident estimate |
 |---:|---:|---|---|---|---|---|---:|---:|
-| 500 MB | 0.20 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | unavailable | Browser/OS | 0.00 GB | 0.00 GB |
-| 1 GB | 0.40 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual base Q5_1 | Browser/OS | 0.06 GB | 0.33 GB |
-| 2 GB | 0.80 GB | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | 0.873B Q8_0 · best-effort | multilingual small Q5_1 | Browser/OS | 0.19 GB | 0.68 GB |
-| 4 GB | 1.60 GB | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | 0.873B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 1.54 GB | 1.35 GB |
-| 8 GB | 3.20 GB | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 3.24 GB | 3.15 GB |
-| 12 GB | 4.80 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 3.84 GB | 4.10 GB |
-| 16 GB | 6.40 GB | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 5.74 GB | 6.10 GB |
-| 24 GB | 9.60 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
-| 32 GB | 12.80 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Browser/OS | 22.44 GB | 12.40 GB |
+| 500 MB | 0.50 GB | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | base Q5_1 | Browser/OS | 0.06 GB | 0.33 GB |
+| 1 GB | 1.00 GB | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | 873M Q8_0 · best-effort | small Q5_1 | Browser/OS | 0.19 GB | 0.68 GB |
+| 2 GB | 2.00 GB | 873M Q8_0 · fit | 873M Q8_0 · fit | 873M Q8_0 · fit | large-v3-turbo Q5_0 | Browser/OS | 1.54 GB | 1.35 GB |
+| 3 GB | 3.00 GB | 2.27B Q4_K_M · fit | 2.27B Q4_K_M · fit | 2.27B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 2.44 GB | 2.35 GB |
+| 4 GB | 4.00 GB | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | 2.27B Q8_0 · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 3.32 GB | 3.88 GB |
+| 5 GB | 5.00 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 3.92 GB | 4.83 GB |
+| 6 GB | 6.00 GB | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | 4.54B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 4.16 GB | 5.60 GB |
+| 7 GB | 7.00 GB | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | 4.54B Q8_0 · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 5.82 GB | 6.83 GB |
+| 8 GB | 8.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 7.14 GB | 7.80 GB |
+| 9 GB | 9.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 7.22 GB | 8.53 GB |
+| 10 GB | 10.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 11 GB | 11.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 12 GB | 12.00 GB | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | 9.65B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 7.46 GB | 9.30 GB |
+| 13 GB | 13.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Browser/OS | 22.44 GB | 12.40 GB |
+| 14 GB | 14.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 15 GB | 15.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 16 GB | 16.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 17 GB | 17.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 18 GB | 18.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 19 GB | 19.00 GB | 27.8B Q2_K · fit | 9.65B Q8_0 · fit | 27.8B Q2_K · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 22.76 GB | 13.90 GB |
+| 20 GB | 20.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 17.54 GB | 20.00 GB |
+| 21 GB | 21.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 17.62 GB | 20.73 GB |
+| 22 GB | 22.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 23 GB | 23.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 24 GB | 24.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 25 GB | 25.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 26 GB | 26.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 27 GB | 27.00 GB | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | 27.8B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 17.86 GB | 21.50 GB |
+| 28 GB | 28.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Browser/OS | 24.54 GB | 28.00 GB |
+| 29 GB | 29.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro Q8 | 24.62 GB | 28.73 GB |
+| 30 GB | 30.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
+| 31 GB | 31.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
+| 32 GB | 32.00 GB | 36B Q4_K_M · fit | 36B Q4_K_M · fit | 36B Q4_K_M · fit | large-v3-turbo Q5_0 | Kokoro FP32 | 24.86 GB | 29.50 GB |
 
 Vision is required and stays visible in all 33 reference profiles. At 500 MB
-through 3 GB, its smallest rung (0.873B Q8_0, estimated 1.30 GB resident) is
+and 1 GB, its smallest rung (0.873B Q8_0, estimated 1.30 GB resident) is
 labelled **best-effort only**; it is not auto-downloaded or invoked as though it
-fits. Under a fully free 40% budget, the first reference tier where it fits is
-4 GB. At 32 GB, the catalogue now reaches a **27.8B Q2_K** text/coding rung
-(10.9 GB estimate including the repository's separate image-projector file,
-12.4 GB resident) while vision stays on the native Ollama **9.65B Q8_0** tag
-(11 GB download, 12.3 GB resident). The HF-to-Ollama Q2_K import has not been
-verified by this project; the image route never relies on it, and Ollama's
-vision metadata is checked before sending pixels. This two-model plan is about
-22.44 GB of unique downloads, but only the larger active model is counted in
-the resident peak. Larger 27.8B Q4_K_M (17 GB download, 20 GB resident) and
-36.0B Q4_K_M (24 GB download, 28 GB resident) remain available above the 32 GB
-reference range when their resident estimates fit. The extended native ladder
-then offers 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0 (39/46 GB), and
-36B F16 (72/80 GB) as progressively higher-memory tiers. At the top is
-Ollama's native **122B tag (125B parameters, Q4_K_M)** at about 81 GB download /
-96 GB estimated resident, first eligible around 240 GB total RAM with the full
-40% allowance free. On a 256 GB host with sufficient free memory, the plan can
-also select multilingual Whisper and browser-cached Kokoro FP32, for roughly
-97.5 GB peak resident under the 102.4 GB cap. These remain multimodal, and
-current-free-memory checks can step the plan down; workstation tiers are outside
-the 33-row 0.5–32 GB reference catalogue.
+fits. With the default all-free-RAM share, the first reference tier where it
+fits is 2 GB. Rows scale with the share: at 50%, for example, the 16 GB row
+behaves roughly like the 8 GB row above it.
 
-The 1–3 GB tiers still show vision as **best-effort only** and never auto-run
-it. High-end Q8 rungs are used at 8, 16 and 32 GB when the fixed 40% cap allows.
+Above 12 GB of allocation the ladder reaches the **27.8B Q2_K** text/coding rung
+(10.9 GB estimate including the repository's separate image-projector file,
+12.4 GB resident) while vision stays on a native multimodal Ollama tag. That
+HF-to-Ollama import has not been verified by this project; the image route never
+relies on it, and Ollama's vision metadata is checked before sending pixels.
+Larger shared rungs follow: 27.8B Q4_K_M (17 GB download, 20 GB resident) and
+36.0B Q4_K_M (24 GB download, 28 GB resident). The extended native ladder then
+offers 27.8B Q8_0 (30/35 GB download/resident), 36B Q8_0 (39/46 GB), and 36B
+F16 (72/80 GB) as progressively higher-memory tiers. At the top is Ollama's
+native **122B tag (125B parameters, Q4_K_M)** at about 81 GB download / 96 GB
+estimated resident, selected only when your allocation is at least that large —
+with the default 100% share that means roughly 200+ GB of free RAM, or any
+smaller machine whose user explicitly set a share/cap that big. On such a host
+the plan can also select multilingual Whisper and browser-cached Kokoro FP32.
+These remain multimodal, and every plan re-checks current free memory; the
+workstation rungs sit outside the 33-row 0.5–32 GB reference catalogue.
+
+The small tiers show vision as **best-effort only** and never auto-run it.
+High-end Q8 rungs are used wherever the allocation allows them.
 
 *Unique selected-asset totals count each distinct selected LLM tag once, plus
 the selected Whisper file and (where chosen) browser-cached Kokoro asset. They
 are catalogue estimates before reusing anything already installed; other RAM
-tiers are never downloaded. Actual live planning can step down when current free
-memory is lower than the reference profile.
+tiers are never downloaded. Actual live planning steps down when current free
+memory is lower than the reference profile, or when the user's share is below
+100%.
 
 Chat, vision and coding use abliterated instruct builds only; the planner
 refuses a non-abliterated model. Every advertised vision rung is multimodal.
@@ -130,62 +169,145 @@ an unverified third-party projector import.
 
 Open **MODEL STACK** in the HUD (or press **M**) to inspect the live RAM plan,
 all 33 reference tiers from 500 MB through 32 GB, selected models, estimates and
-limits. `GET /autopilot` is read-only. The panel's **INSTALL SELECTED STACK**
-button remains an explicit manual action. The root `build.ps1` / `build.sh`
-workflow instead automates first-run setup: it checks for Ollama, installs it
-from the official installer only when a fitting local Ollama model is selected,
-starts it if needed, then downloads only this machine's selected fitting chat,
-vision, coding and Whisper assets. Existing packages, model tags, runtime and
-Whisper files are reused; other RAM tiers and non-fitting best-effort weights are
-never bulk-downloaded. Kokoro is fetched and cached by the browser on first use
-when the RAM plan selects it. No desktop bundle or EXE is created. The separate
-`npm run setup` command remains a read-only preflight.
+limits, and to set the AI's share of free RAM. `GET /autopilot` is read-only;
+`POST /autopilot/config` saves a share/cap and re-plans live (the panel's APPLY
+and RESCAN buttons), and never downloads anything. The **INSTALL SELECTED STACK**
+button and the setup page both call `POST /autopilot/install`, and that call is
+the only thing that downloads the runtime or a model weight. Nothing downloads a tier you did
+not pick: existing packages, model tags, runtime and Whisper files are reused,
+and other RAM tiers and non-fitting best-effort weights are never bulk-fetched.
+Kokoro is fetched and cached by the browser on first use when the RAM plan
+selects it. No desktop bundle or EXE is created.
 
-## Setup and Windows controls
+**Nothing in this repository installs a program for you.** Every entry point —
+`npm run setup`, `build.ps1`, `START.cmd` — either hosts the setup page or points
+at it. The one thing that is downloaded on your behalf is the Ollama *standalone
+binary archive*, into this project's own `models/runtime/`, when you press the
+page's button; nothing is installed system-wide and no `sudo` is ever used. A
+system Ollama remains your call, through the link the page still offers.
 
-After cloning or extracting the repository, run the platform script from its
-root folder:
+## Setup: one click in the folder
+
+JARVIS is a Windows program. Download or clone the repo, open the folder, and
+double-click `START.cmd`:
+
+```
+Windows        START.cmd
+```
+
+That single action finds Node.js 20+ (and offers to install it if it is
+missing), installs the npm packages from the lockfile, builds the browser
+interface, starts the bridge and the HUD, and opens the setup page described
+below. On that page one button installs everything else: the model runtime and
+the model stack this machine can actually run.
+
+There is no macOS or Linux launcher, because there is no macOS or Linux
+product. Linux survives in this repository for exactly one reason — it is the
+host the automated test suites run on — and nothing in the app claims it as a
+target.
+
+For a completely unattended first run — no page, no second press, progress
+printed in the window — double-click `START.cmd` with `auto`, or run:
+
+```powershell
+.\START.cmd auto       # or powershell -ExecutionPolicy Bypass -File .\build.ps1 -Auto
+```
+
+It picks the same stack the page preselects (the largest rung this machine's RAM
+holds), installs the runtime and the models, and tells you when the assistant is
+ready.
+
+### The page, if you prefer running it yourself
+
+Installation is a page in your own browser, not a script in this repo. npm
+starts a small local host for that page and opens it:
+
+```bash
+npm run setup
+```
+
+That runs `scripts/install-web.mjs`. If a bridge is already answering on
+`JARVIS_BRIDGE_PORT` (8787 by default) it reuses it; otherwise it starts
+`bridge/server.mjs` for the setup session, which is why Node and this repo are
+the only prerequisites. It then prints and opens:
+
+```
+http://localhost:8787/install?hud=http://localhost:5173
+```
+
+The page is served by the bridge itself, on the same origin as the install
+endpoints, so it needs no build step, no CDN and no other server. It shows the
+`runtime` block read off your machine — platform, architecture, total RAM, free
+disk, and whether Ollama is present — then the stack rungs the RAM planner
+offers for that machine, the same `tierProfiles` the MODEL STACK panel shows.
+Pick the rung that matches what you have, press the button, and the page
+downloads *that* stack: the selected chat/vision/coding tag (downloaded once
+when the routes share it), the Whisper file, and the speech runtime. Progress
+streams step by step; if a step is skipped the page says why rather than
+pretending it succeeded.
+
+**The runtime is part of that one click.** Ollama publishes a standalone Windows
+zip next to its installer, and a page can download and unpack a zip — so the
+bridge does exactly that. It reads the release's own asset list (so a rename
+upstream cannot 404 an install), downloads the one that matches this machine's
+architecture and GPU — `ollama-windows-amd64.zip`,
+`ollama-windows-amd64-rocm.zip` for AMD cards, `ollama-windows-arm64.zip` on
+ARM — **resumes** an interrupted download from where it stopped, verifies the
+SHA-256 the release publishes, unpacks it into `models/runtime/` in Node itself
+with a CRC check on every entry (Windows has no `unzip`), starts `ollama serve`
+out of it, and only then pulls the models. No installer runs, no
+administrator prompt appears, nothing is added to your PATH, and deleting
+`models/runtime/` removes the runtime completely.
+
+There are two builds and the page offers both: the default one carries the
+NVIDIA CUDA libraries, and AMD cards need the `-rocm` archive. ROCm is
+preselected only when it is actually present on the machine. If a model server
+already answers on the model port, that whole step is one line of text and
+nothing is downloaded. If you would rather have a managed Ollama — the desktop
+app, the Windows installer, the system package — the page keeps its download
+link and a **Re-check** button, and `scripts/start.mjs` starts whichever one
+exists. `JARVIS_RUNTIME_DIR` relocates the folder, `JARVIS_RUNTIME_BASE` points
+the download at a mirror, `JARVIS_RUNTIME_API` overrides the release lookup, and
+`JARVIS_RUNTIME_MODELS` is where the portable runtime keeps its weights
+(`models/ollama` by default).
+
+`npm start` also opens that page automatically when the plan has no Ollama or a
+model slot that is not `ready`; pass `--no-open` to keep it shut. In the HUD the
+same work is the **INSTALL SELECTED STACK** button in MODEL STACK.
+
+The build script builds and launches; it no longer installs anything itself:
 
 ```powershell
 .\build.ps1
 ```
 
-```bash
-bash ./build.sh
-```
-
-The scripts check for Node.js 20+ and npm. If Node is missing, `build.ps1`
-tries WinGet; `build.sh` uses a version manager/Homebrew or downloads and
-SHA-256-verifies a user-local Node 24 LTS binary. If Windows blocks the `.ps1`
-by execution policy, use `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
+The script checks for Node.js 20+ and npm. If Node is missing, `build.ps1` tries
+WinGet, and falls back to downloading and SHA-256-verifying a user-local Node 24
+LTS build. If Windows blocks the `.ps1` by execution policy, use
+`powershell -ExecutionPolicy Bypass -File .\build.ps1`.
 The setup skips ONNX Runtime's optional Node-only CUDA provider by default; the
 browser TTS path uses the web runtime, and Ollama manages chat-model GPU use.
 Set `ONNXRUNTIME_NODE_INSTALL_CUDA=v12` before running the setup script only if
 another Node-side ONNX workload specifically needs that CUDA provider. The
 script then installs missing/stale npm packages from `package-lock.json`,
-vendors the hand-tracking runtime if needed, builds the **web UI**, and runs a
-read-only preflight. It then checks for Ollama and
-installs it only if this machine's RAM plan has a fitting local chat, vision or
-coding model. It checks/starts the local Ollama service, reuses existing model
-tags and Whisper files, installs only the selected fitting model tier plus the
-Whisper runtime when needed, then launches the local bridge and Vite app. Other
-RAM tiers are shown in the catalogue but are not downloaded. A high-memory
-machine can require over 24 GB of model downloads; the script prints the
-selected plan and size estimate before pulling. Keep the terminal open and press
-**Ctrl-C** to stop the processes.
+vendors the hand-tracking runtime if needed, builds the **web UI**, runs the
+read-only `npm run doctor` preflight, and launches the bridge and Vite app (and
+`npm start` opens the setup page when the stack is incomplete). Keep the
+terminal open and press **Ctrl-C** to stop the processes. No desktop bundle or
+EXE is created.
 
-Use `bash ./build.sh --skip-ai-models` or `./build.ps1 -SkipAiModels` to build
-and launch without installing Ollama/model weights. Use `--no-launch` or
-`-NoLaunch` to finish setup/build/model checks without starting the local web
-servers. Neither entry point creates a desktop bundle or EXE.
+Use `.\build.ps1 -SkipAiModels` to build and launch without checking for Ollama
+or model weights; the flag now only prints the setup-page pointer. Use
+`-NoLaunch` to finish the build and model checks without starting the local web
+servers.
 
-`npm run setup` is a standalone preflight only: it changes nothing. For manual
-workflows, `npm ci`, `npm run build`, `npm run models:plan`,
-`npm run models:install`, and `npm start` are separate commands. The browser
-STT/TTS choices default to RAM autopilot; Kokoro speech assets are fetched by the
-browser on first use when selected. Chrome or Edge still needs to be installed
-for the best microphone experience; the setup script does not replace the
-user's browser.
+For manual workflows, `npm ci`, `npm run build`, `npm run doctor`,
+`npm run setup`, and `npm start` are separate commands. `npm run models:plan` and
+`npm run models:install` still exist for scripted installs (`models:plan` is what
+`npm run test:installers` drives), but no build script calls them. The browser STT/TTS choices default to RAM autopilot; Kokoro speech assets
+are fetched by the browser on first use when selected. Chrome or Edge still
+needs to be installed for the best microphone experience; the setup page does
+not replace the user's browser.
 
 The bridge includes a Windows window manager when run on Windows. Window
 inventory is read-only by default. Focus, minimize, maximize, restore, close
@@ -207,26 +329,53 @@ recogniser, not a chat model.
 
 Official Ollama catalogue entries and published model-size tags were checked
 while building the planner. `npm run test:autopilot` passes 13 deterministic
-RAM profiles and mocked checks for non-fitting skips, Ollama-tag idempotence,
-slot-filtered installer routing, offline Whisper installation, incomplete-file
-rejection, and the browser-cached Kokoro path. `npm run test:installers` covers
-loopback endpoint aliases, manual/per-slot overrides, and read-only preflight
-behavior against a mock model server. `npm run smoke` exercises the bridge and tool loop,
-RAM-plan response shape and 33-tier catalogue/statuses, Telugu-to-English
-code-intent routing, and vision prompt fusion against a local stub model
-server. These are deterministic/mock checks, not model inference. No full Ollama-backed conversation, real Whisper
-transcription/model download, or Windows desktop action has been verified in
-this workspace. GitHub Pages hosts the UI only.
+RAM profiles and mocked checks for share/cap parsing, saved-vs-environment
+precedence, the hard cap winning over the share, non-fitting skips, Ollama-tag
+idempotence, slot-filtered installer routing, offline Whisper installation,
+incomplete-file rejection, and the browser-cached Kokoro path.
+`npm run test:installers` covers loopback endpoint aliases, manual/per-slot
+overrides, and read-only preflight behavior against a mock model server.
+`npm run test:control` covers the command-line policy (parsing, the allowlist
+and deny rules in both modes, working-directory roots), the desktop control
+surface (key-combo parsing, the Windows argv every operation turns into,
+SendKeys escaping, hostile text kept as data, honest refusals on any host that
+is not Windows, Start-menu app discovery and launch matching) and the capability
+block without running a command or moving a pointer.
+`npm run test:runtime` covers the one-click runtime against a local mock release
+and asset server: resolution of the Windows zip per architecture and GPU, a
+download that drops mid-transfer resuming with a `Range` request, a checksum
+that fails being deleted rather than unpacked, a release with no checksum being
+reported honestly, unpacking of a zip (stored and deflated entries alike) with
+no external tools, an entry that fails its CRC being refused, a path-traversal
+entry being reported and skipped, and the already-answering case.
+`npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
+33-tier catalogue/statuses, the served `/install` setup page and its `runtime`
+contract, the terminal client answering through the same bridge in one-shot
+mode, the live `/autopilot/config` share change,
+Telugu-to-English code-intent routing, vision prompt fusion, the machine block
+the model is actually sent (including its truthful write state), the fact that
+the acting shell/desktop tools are absent from the model's tool list while
+writes are off, and that an unchecked refusal is challenged and replaced before
+the browser hears it, against a local stub model server. These are deterministic/mock
+checks, not model inference. No full Ollama-backed conversation, real Whisper
+transcription/model download, or real Windows desktop action has been verified
+in this workspace — the control code is exercised only through the arguments it
+builds, since the sandbox the tests run in is not Windows and has no desktop.
+GitHub Pages hosts the UI only.
 
 ## Model manager and local speech
 
 `GET /models` compares the dynamic chat/vision/coding slots with Ollama's
-installed tags. `GET /autopilot` reports the live RAM allocation, selected
+installed tags. `GET /autopilot` reports the live RAM allocation (free RAM now,
+your share, the resulting ceiling, and how much was left unallocated), selected
 variants, estimated active memory, expected downloads and unsupported
-capabilities; it also exposes the full RAM-tier catalogue. The HUD's
-`POST /autopilot/install` action remains user-triggered. The root setup scripts
-handle Ollama installation and selected model setup automatically; the endpoint
-itself never launches a system installer.
+capabilities; it also exposes the full RAM-tier catalogue for your current
+share. `POST /autopilot/config` writes `{ share, capGb }` (both optional, plus
+`rescan: true` to just re-sample memory) to `models/ram-allocation.json` and
+rebuilds the plan immediately. The HUD's **INSTALL SELECTED STACK** and the
+`/install` page both call `POST /autopilot/install`, and both are user-triggered:
+the bridge downloads model files through Ollama, but never launches a system
+installer or a package manager for you.
 
 **Speech-to-text:** RAM autopilot selects local multilingual Whisper when it fits
 and has been installed; the root build scripts check/download the selected file
@@ -250,8 +399,9 @@ One browser HUD backed by a Node bridge and your own local models:
 ```
 src/ + index.html        browser HUD — voice, reactor, panels
 bridge/                  local Node bridge — model pipeline, tools, autopilot
-scripts/                 preflight, RAM/model bootstrap, build assets, local start helpers
-build.ps1 / build.sh     platform setup, web build, selected model setup, and launch
+scripts/                 setup page host, doctor preflight, terminal client, build assets, start helpers
+START.cmd                the one-click launcher for a downloaded folder
+build.ps1                Node/npm check, web build, preflight, and launch (no silent installs)
 smoke.mjs                bridge checks
 ```
 
@@ -269,17 +419,19 @@ AI session.
 
 ## Requirements
 
-**In one line:** the root setup script, a supported local model runtime when
-models fit, and a real browser for microphone/WebGL. Ollama is recommended.
+**In one line:** Windows 10 22H2 or newer, the root setup script, a supported
+local model runtime when models fit, and a real browser for microphone/WebGL.
+Ollama is recommended.
 
-- **A model server.** [Ollama](https://ollama.com) is the default. The root
-  `build.ps1` / `build.sh` checks for it and installs it from the official
-  installer only when the detected RAM plan needs a fitting local Ollama model.
-  llama.cpp, LM Studio and vLLM remain available through their OpenAI-compatible
-  endpoints; custom endpoints are not overwritten by the Ollama bootstrap.
-- **Node.js 20 or newer** and the project npm packages. The root scripts check
-  and bootstrap Node where supported, then install missing/stale packages from
-  the lockfile.
+- **A model server.** [Ollama](https://ollama.com) is the default. The setup
+  page's one button downloads Ollama's standalone build into `models/runtime/`
+  and runs it — no installer, no admin — or links the official system installer
+  if you prefer a managed one. llama.cpp, LM Studio and vLLM remain available
+  through their OpenAI-compatible endpoints; custom endpoints are never
+  overwritten.
+- **Node.js 20 or newer** and the project npm packages. `build.ps1` checks for
+  Node, offers to install it with WinGet if it is missing, then installs
+  missing/stale packages from the lockfile.
 - **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
   embedded preview pane. Preview panes (including the one inside editors) block
   microphone access, so the page loads and looks right but never hears you.
@@ -290,35 +442,80 @@ models fit, and a real browser for microphone/WebGL. Ollama is recommended.
   it. With none configured he still answers, still talks, and still drives his
   own interface.
 
-`npm run setup` is a friendly read-only preflight: it checks the RAM-selected
-plan and configured model server, but installs nothing. The root build scripts
-perform the automated first-run dependency and selected-model setup. Browser
-installation remains user-controlled; Chrome or Edge should already be
-available for microphone use.
+`npm run setup` opens the browser setup page described above; it hosts and
+serves it, and every download on it is one you press the button for. `npm run
+doctor` is the read-only preflight next to it — machine, RAM plan and model
+server state, changing nothing. Browser installation remains user-controlled;
+Chrome or Edge should already be available for microphone use.
 
 ---
 
 ## Quick start
 
-The recommended first-run path is `build.ps1` on Windows or `build.sh` on
-macOS/Linux. If you prefer manual commands:
+The recommended first-run path is:
 
 ```bash
 npm ci
-npm run build
-npm run setup       # advisory preflight; no downloads or system changes
+npm run setup       # hosts the setup page and opens it in your browser
+```
+
+On that page pick the stack for your machine and let it download; install
+Ollama from the link it gives you if you have none. Then:
+
+```bash
 npm start           # local bridge + Vite browser HUD
 ```
 
-Open the local Vite URL (normally <http://localhost:5173>) in Chrome or Edge,
-click **INITIALISE**, allow the microphone, and say **“Hey Jarvis”**. Local
-inference requires a running model server and a model that fits the selected
-RAM plan; review the plan and explicitly install fitting models from MODEL
-STACK. The endpoint is available at `localhost:8787` when the bridge is running.
+`build.ps1` wraps the same sequence on Windows:
+dependency check, web build, read-only preflight, launch. Open the local Vite
+URL (normally <http://localhost:5173>) in Chrome or Edge, click **INITIALISE**,
+allow the microphone, and say **“Hey Jarvis”**. Local inference requires a
+running model server and a model that fits the selected RAM plan; review the
+plan and install fitting models from MODEL STACK (or the setup page). The
+endpoint is available at `localhost:8787` when the bridge is running.
 
 For separate terminals, use `npm run bridge` for the local AI/tool service and
 `npm run dev` for the HUD. The GitHub Pages page is only a static view; it does
 not host Ollama or the Node bridge.
+
+## The same assistant in a terminal
+
+The browser is the face, not the brain. Everything the HUD does it does over a
+WebSocket frame protocol on port 8787, so a terminal is a first-class client —
+you, the answer, and every tool JARVIS reaches for, with nothing rendered for
+looks:
+
+```bash
+npm run cli
+```
+
+```
+  J.A.R.V.I.S · cli
+  ws://localhost:8787 · 6 servers
+  /help for commands · Ctrl-C leaves
+
+you › take a screenshot of my phone        # an example turn
+  ⚙ blade ▸ screenshot
+  Sent it to the phone.
+```
+
+It prints your messages, streams the reply as the model produces it, and shows
+each execution as a `⚙ server ▸ action` line, so a turn that quietly used a tool
+is visibly a turn that used a tool. `/status` prints the RAM plan, each model
+slot with its state, and bridge health; `/help` lists the commands. The first
+**Ctrl-C** interrupts a running turn, the second leaves.
+
+For scripts and pipes, one-shot mode keeps the answer clean:
+
+```bash
+answer=$(npm run -s cli -- --once "what is on my screen?")   # stdout = answer
+```
+
+Notes, tool lines and errors go to stderr in that mode, and the exit code is 1
+with the bridge's own message when the model is unreachable. Point it elsewhere
+with `--url ws://host:port` or `JARVIS_CLI_URL`; `--no-color` strips the ANSI
+colours. The terminal has no camera, and it says so instead of staying silent
+when a vision tool asks for a frame.
 
 ## How it works
 
@@ -410,10 +607,10 @@ you have installed, that is roughly:
 - **The browser** — `playwright`
 
 These are all optional. With none of them configured JARVIS still answers, still
-talks, still looks through the camera, and still drives his own interface —
-the built-in display, UI, camera, browser and Windows read-only inventory
-servers are part of the bridge. Windows control actions remain behind the
-explicit write gate.
+talks, still looks through the camera, still drives his own interface, and can
+still run a command or open an application — the built-in display, UI, camera,
+browser, command-line and desktop servers are part of the bridge. Every acting
+tool in all of them remains behind the one explicit write gate.
 
 A few things you can say:
 
@@ -443,6 +640,45 @@ He drives the UI through MCP tools the bridge exposes:
 
 So *"make it red, hide the systems list, put that render in orbit"* is a spoken
 command.
+
+### JARVIS controls the machine
+
+Two more built-in servers reach past the interface, on the Windows desktop.
+Both start read-only; their acting tools are not registered at all unless
+the bridge runs in write mode.
+
+- **`jarvis_shell`** — the command line. `run_command` runs one command in a
+  working directory and returns stdout, stderr, the exit code and whether it
+  timed out; `list_processes` answers *"is it still running"* and *"what is on
+  that port"*; `command_info` says whether a program exists before a promise is
+  made about it.
+- **`jarvis_desktop`** — everything else. `list_apps` enumerates installed
+  applications, `launch_app` starts one, `list_windows` / `focus_window` /
+  `window_action` bring one forward, move it, minimize, maximize or close it, and
+  `type_text`, `press_keys`, `move_mouse`, `click` and `scroll` drive what is in
+  front of you. `desktop_capabilities` reports whether this session can do any of
+  that at all, and what to install if it cannot.
+
+The shell is deliberately the most restricted surface in the project, because a
+command line is not a tool call — it is a general-purpose escape hatch. By
+default every program in the command has to be in an allowlist
+(`bridge/shell.mjs`), so `git status`, `npm test`, `ffmpeg`, `docker ps` and the
+like run, and an unknown program is refused **by name** with the reason, rather
+than failing quietly. A deny list (formatting disks, recursive deletes of `/`
+`~` or `*`, piping a download into a shell, power changes) applies in **every**
+mode, including `full`. Working directories are confined to your home, the
+temp directory and the project unless `JARVIS_SHELL_ROOTS` says otherwise.
+
+Acting tools still sit behind the one write gate: `npm run bridge:writes`, as
+described below. `run_command` never opens a shell, so a command line like
+`rm -rf node_modules` is parsed and judged as written; text typed into another
+application is passed as a single argument, never interpolated into a script.
+
+Pointer, keyboard, window and app control all go through PowerShell and
+`user32`, which are already on the machine: there is no third-party program to
+install, and no `sudo`, `brew` or `apt` line anywhere in this project. On a host
+that is not Windows the tools say so instead of half-working, and
+`desktop_capabilities` says it before anything is promised.
 
 ### The heads-up display
 
@@ -494,6 +730,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `JARVIS_MODEL_CHAT` | RAM-selected | Override the planner's conversation/intent model |
 | `JARVIS_MODEL_VISION` | RAM-selected or unavailable | Override the planner's image model |
 | `JARVIS_MODEL_REASON` | RAM-selected | Override the planner's abliterated coding/tool model |
+| `JARVIS_RAM_SHARE` | `100%` | AI share of currently free RAM (`80`, `0.8`, `"80%"`) |
+| `JARVIS_RAM_CAP_GB` | — | Hard allocation ceiling in GB; wins when smaller than the share |
+| `JARVIS_RAM_CONFIG` | `models/ram-allocation.json` | Where the panel's saved share/cap lives |
 | `JARVIS_OLLAMA_URL` | `http://localhost:11434` | Ollama management/download API root |
 | `JARVIS_MODEL_*_URL` | inherits the base URL | Move one slot to another machine |
 | `JARVIS_MODEL_NAME` | — | Pins every slot to one model |
@@ -503,6 +742,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `JARVIS_MODEL_TIMEOUT_MS` | `180000` | Whole-turn timeout, tools and all |
 | `JARVIS_BRIDGE_PORT` | `8787` | Port for the WebSocket + HTTP endpoints |
 | `JARVIS_ALLOW_WRITES` | off | `1` allows effectful tools (see below) |
+| `JARVIS_SHELL_MODE` | `allowlist` | `full` lets `run_command` run any program the deny list allows |
+| `JARVIS_SHELL_ALLOW` | — | Extra programs for the allowlist, comma separated; a bare `*` lifts the check |
+| `JARVIS_SHELL_ROOTS` | home, temp, project | Extra working-directory roots for `run_command`, comma separated |
 | `JARVIS_ALLOWED_ORIGINS` | local dev | Extra WebSocket origins to accept |
 | `JARVIS_ALLOW_NO_ORIGIN` | off | Accept connections with no `Origin` header |
 | `JARVIS_FILE_ROOTS` | — | Roots the `/file` endpoint may serve from |
@@ -518,8 +760,9 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 
 ### The pipeline
 
-`bridge/autopilot.mjs` selects the model/quant rung from the RAM plan, unless a
-`JARVIS_MODEL_*` environment variable explicitly overrides that slot. Images
+`bridge/autopilot.mjs` selects the model/quant rung from the RAM allocation
+(your share of free RAM, or `100%` by default), unless a `JARVIS_MODEL_*`
+environment variable explicitly overrides that slot. Images
 route to `vision`; coding, technical and tool-shaped turns route to `reason`;
 ordinary conversation and multilingual intent translation use `chat`. A missing
 vision model produces a clear RAM-limit error rather than a confident guess from
@@ -554,15 +797,56 @@ a local model rather than a hosted one, and a local model is far more willing to
 attempt a tool call it has misunderstood — so the default-deny is doing real
 work, not standing in for a model that would not have tried.
 
-To allow effectful tools (phone, browser driving, sending), run the bridge this
-way instead:
+To allow effectful tools (phone, browser driving, sending, running commands,
+clicking and typing), run the bridge this way instead:
 
 ```bash
 npm run bridge:writes
 ```
 
 > Read `decideTool()` before you do. *"Hey Jarvis, clean up my downloads folder"*
-> means something rather different with writes enabled.
+> means something rather different with writes enabled — and with
+> `JARVIS_SHELL_MODE=full`, so does almost everything else.
+
+Write mode is not one switch with one meaning. The browser and desktop servers
+can be used while the command line stays on its allowlist, and the deny list
+keeps holding either way. If you only want the interface and the odd script,
+leave `JARVIS_SHELL_MODE` alone.
+
+---
+
+## How he decides
+
+JARVIS is not allowed to answer "can you" from imagination. Before every
+question, `bridge/capability.mjs` probes this machine — the OS and core count,
+free RAM and disk, whether there is a desktop session and what it is missing,
+which common programs are installed, whether writes are on and how the command
+line is policed, which local model slots are filled, which servers are
+connected — and appends that block to the system prompt. He plans against the
+machine as it is now, not as it was at boot.
+
+The rules that use it:
+
+1. **Check before answering.** The block, plus `command_info`,
+   `desktop_capabilities`, `list_apps` and `list_processes` for anything that
+   may have changed. He never refuses a task he has not checked the machine for,
+   and never promises one either.
+2. **If it can be done, plan the route and take it** — the narrowest tool that
+   finishes the job — then report what actually happened.
+3. **If it cannot be done as asked, plan the nearest thing that can be**: the
+   same end by another tool, a lower fidelity, a smaller local model, offline
+   instead of online, the part that is possible now and the rest left staged.
+   He says which trade he took.
+4. **Only then does he say no**, naming the missing piece and what would unlock
+   it. A policy refusal is reported as a permission, never as an impossibility,
+   and a result he did not observe is never claimed as one.
+
+Those rules are not just prompt text. The opening of every answer is held back
+until it is clear he is answering rather than announcing an action or giving up.
+A refusal that arrives before a single tool has been tried is challenged once,
+with the machine's own facts pushed forward, and only the answer that checked is
+spoken — a wrong "no" is never heard. A refusal *after* a tool has actually run
+is the honest one, and is never challenged.
 
 ---
 

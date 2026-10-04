@@ -30,24 +30,45 @@ const ollama = createServer((req, res) => {
 await new Promise((resolve) => ollama.listen(0, '127.0.0.1', resolve))
 process.env.JARVIS_OLLAMA_URL = `http://127.0.0.1:${ollama.address().port}`
 
+// The saved allocation lives in a temp file so a developer's real
+// models/ram-allocation.json can never change what these tests assert.
+const configDir = await mkdtemp(join(tmpdir(), 'jarvis-ram-config-'))
+process.env.JARVIS_RAM_CONFIG = join(configDir, 'ram-allocation.json')
+
 let tempDir
 const mockRuntimeScope = join(process.cwd(), 'node_modules', '@lumen-labs-dev')
 const mockRuntimePackage = join(mockRuntimeScope, 'whisper-node')
 let mockRuntimeCreated = false
 let mockRuntimeScopeCreated = false
 try {
-  const { BUDGET, plan, planSummary, install, whisperFileReady, tierProfiles, ladder } = await import('../bridge/autopilot.mjs')
+  const {
+    ALLOCATION,
+    plan,
+    planSummary,
+    budget,
+    install,
+    whisperFileReady,
+    tierProfiles,
+    ladder,
+    parseShare,
+    parseCapGb,
+    saveAllocation,
+    readAllocationConfig,
+    resolveAllocation,
+  } = await import('../bridge/autopilot.mjs')
   const tiers = [0.5, 0.75, 1, 2, 3, 4, 8, 12, 16, 20, 24, 28, 32]
   const snapshots = new Map()
   for (const ramGb of tiers) {
     const total = ramGb * GB
-    const p = plan({ total, free: total, gpuInfo: null })
+    const p = plan({ total, free: total, gpuInfo: null, share: 1 })
     snapshots.set(ramGb, p)
 
-    assert.equal(p.budget.os, Math.floor(total * 0.35), `${ramGb} GB OS split`)
-    assert.equal(p.budget.apps, Math.floor(total * 0.25), `${ramGb} GB app split`)
-    assert.equal(p.budget.models, Math.floor(total * 0.40), `${ramGb} GB AI cap`)
-    assert.ok(p.effectiveModelBytes <= p.budget.models, `${ramGb} GB active model ceiling`)
+    assert.equal(p.budget.share, 1, `${ramGb} GB explicit share is used verbatim`)
+    assert.equal(p.budget.sharePercent, 100, `${ramGb} GB share renders as a percentage`)
+    assert.equal(p.budget.capGb, null, `${ramGb} GB has no hard cap unless one is set`)
+    assert.equal(p.budget.models, Math.floor(total), `${ramGb} GB AI ceiling is all free RAM at a 100% share`)
+    assert.equal(p.effectiveModelBytes, p.budget.models, `${ramGb} GB active model ceiling equals the allocation`)
+    assert.ok(p.budget.unallocated <= total, `${ramGb} GB unallocated RAM never exceeds the host`)
     assert.ok(p.maxResidentBytes <= p.effectiveModelBytes, `${ramGb} GB combined model/TTS peak`)
     assert.ok(p.choices.chat, `${ramGb} GB shows the closest abliterated chat pick`)
     assert.ok(p.choices.vision, `${ramGb} GB keeps an explicit multimodal vision pick`)
@@ -56,11 +77,6 @@ try {
     assert.ok(/abliterat/i.test(p.choices.chat.model), `${ramGb} GB chat remains abliterated`)
     assert.ok(p.choices.vision.multimodal, `${ramGb} GB vision choice accepts images`)
     assert.equal(p.choices.chat.model, p.choices.reason.model, `${ramGb} GB shares one model across chat and coding`)
-    if (ramGb === 32) {
-      assert.notEqual(p.choices.chat.model, p.choices.vision.model, '32 GB uses the larger text/coding tag but retains a native Ollama vision tag')
-    } else {
-      assert.equal(p.choices.chat.model, p.choices.vision.model, `${ramGb} GB shares one model across chat and vision`)
-    }
     assert.equal(p.choices.chat.multilingual, true, `${ramGb} GB chat is tagged multilingual`)
     assert.equal(p.choices.reason.englishOnly, true, `${ramGb} GB coding model is tagged English-only`)
     assert.ok(!p.choices.speech || !/\.en\./i.test(p.choices.speech.file), `${ramGb} GB Whisper choice is multilingual`)
@@ -77,11 +93,67 @@ try {
     assert.ok(p.totalDownloadBytes >= 0, `${ramGb} GB download estimate is non-negative`)
   }
 
-  assert.equal(BUDGET.os + BUDGET.apps + BUDGET.models, 1)
-  const catalogue = tierProfiles()
+  // The allocation model: an explicit share, an explicit cap, and the two
+  // together. A cap always wins when it is the smaller of the two.
+  const quarterShare = plan({ total: 16 * GB, free: 8 * GB, gpuInfo: null, share: 0.25 })
+  assert.equal(quarterShare.budget.models, Math.floor(8 * GB * 0.25), 'a 25% share takes a quarter of free RAM')
+  assert.equal(quarterShare.budget.unallocated, 8 * GB - quarterShare.budget.models, 'unallocated RAM is reported honestly')
+  assert.ok(/0\.8b|2b/.test(quarterShare.choices.chat.model), 'a 2 GB allocation steps down to a small rung')
+  const capped = plan({ total: 32 * GB, free: 32 * GB, gpuInfo: null, share: 1, capGb: 6 })
+  assert.equal(capped.budget.models, Math.floor(6 * GB), 'the hard cap wins when it is smaller than the share')
+  assert.equal(capped.budget.capGb, 6, 'the cap is reported for the UI')
+  assert.equal(capped.choices.chat.parametersB, 4.54, 'a 6 GB cap selects the 4.54B rung, not the 9.65B one')
+  assert.equal(capped.choices.chat.quant, 'Q4_K_M', 'the cap steps the quantization down honestly')
+  const bothLimits = plan({ total: 32 * GB, free: 16 * GB, gpuInfo: null, share: 0.5, capGb: 20 })
+  assert.equal(bothLimits.budget.models, Math.floor(8 * GB), 'share applies to free RAM before the cap is compared')
+
+  assert.equal(ALLOCATION.share, 1, 'the default share is all currently free RAM')
+  assert.equal(ALLOCATION.capGb, null, 'there is no hard cap by default')
+  assert.equal(budget(8 * GB, 4 * GB, { share: 1, capGb: null, source: 'default' }).models, 4 * GB, 'the budget arithmetic is share x free')
+  assert.equal(budget(8 * GB, 4 * GB, { share: 0.5, capGb: null, source: 'default' }).unallocated, 2 * GB, 'half of free RAM stays unallocated at a 50% share')
+
+  // Share/cap parsing accepts the shorthands a human would type.
+  assert.equal(parseShare('80'), 0.8, 'a bare 80 reads as a percentage')
+  assert.equal(parseShare('80%'), 0.8, 'a percent sign is accepted')
+  assert.equal(parseShare('0.8'), 0.8, 'a fraction is accepted')
+  assert.equal(parseShare('1'), 1, '1 means everything free')
+  assert.equal(parseShare('100'), 1, '100 means everything free')
+  assert.equal(parseShare('0'), null, 'a zero share is refused')
+  assert.equal(parseShare('150'), null, 'an over-100 share is refused')
+  assert.equal(parseShare('lots'), null, 'garbage is refused')
+  assert.equal(parseShare(null), null, 'unset stays unset')
+  assert.equal(parseCapGb('12'), 12)
+  assert.equal(parseCapGb(0), null, 'a zero cap means no cap')
+  assert.equal(parseCapGb(-4), null, 'a negative cap is refused')
+  assert.equal(parseCapGb('nope'), null, 'a non-numeric cap is refused')
+
+  // Saved settings round-trip and take precedence over the environment.
+  assert.deepEqual(readAllocationConfig(), { share: null, capGb: null }, 'nothing is saved by default')
+  const saved = await saveAllocation({ share: 75, capGb: 6 })
+  assert.equal(saved.ok, true, 'a valid allocation saves')
+  assert.deepEqual(readAllocationConfig(), { share: 0.75, capGb: 6 }, 'the saved file round-trips')
+  assert.deepEqual(
+    { share: resolveAllocation().share, capGb: resolveAllocation().capGb, source: resolveAllocation().source },
+    { share: 0.75, capGb: 6, source: 'saved' },
+    'saved settings are the resolved allocation',
+  )
+  process.env.JARVIS_RAM_SHARE = '40'
+  assert.equal(resolveAllocation().share, 0.75, 'saved settings beat the environment')
+  assert.equal(resolveAllocation({ config: { share: null, capGb: null } }).share, 0.4, 'the environment is the fallback')
+  assert.equal(resolveAllocation({ config: { share: null, capGb: null }, share: 20 }).share, 0.2, 'explicit options win over everything')
+  delete process.env.JARVIS_RAM_SHARE
+  assert.equal((await saveAllocation({ share: 0 })).ok, false, 'an invalid share is refused instead of guessed')
+  assert.equal((await saveAllocation({ capGb: -1 })).ok, false, 'an invalid cap is refused instead of guessed')
+  await saveAllocation({ share: null, capGb: null })
+  assert.deepEqual(readAllocationConfig(), { share: null, capGb: null }, 'clearing the saved settings restores the defaults')
+  assert.equal(resolveAllocation().source, 'default', 'with nothing saved or set, the default allocation applies')
+  assert.equal(plan({ total: 8 * GB, free: 8 * GB, gpuInfo: null }).budget.models, 8 * GB, 'the default plan takes all free RAM')
+
+  const catalogue = tierProfiles({ share: 1 })
   assert.equal(catalogue.length, 33, 'catalogue covers 500 MB and every integer tier from 1 to 32 GB')
   assert.equal(catalogue[0].ramGb, 0.5)
   assert.equal(catalogue.at(-1).ramGb, 32)
+  assert.equal(catalogue[7].aiCapGb, 7, 'catalogue rows apply the requested share to each tier')
   assert.ok(ladder().vision.rungs.every((rung) => /abliterat/i.test(rung.model) && rung.multimodal), 'all advertised local vision models are abliterated and multimodal')
   assert.equal(catalogue.every((tier) => Boolean(tier.slots.vision?.model && tier.slots.vision.multimodal)), true, 'all 33 reference tiers include a multimodal vision route')
   assert.equal(snapshots.get(0.5).choices.chat.fits, false, '500 MB chat is honestly best-effort only')
@@ -89,60 +161,61 @@ try {
   assert.equal(snapshots.get(0.5).choices.vision.mode, 'best-effort', 'under-budget vision is never described as a safe fit')
   assert.equal(snapshots.get(0.5).choices.tts.engine, 'system', '500 MB uses zero-model system TTS')
   assert.ok(snapshots.get(0.5).skipped.some((item) => item.cap === 'vision'), '500 MB vision is not automatically run as if it fits')
-  assert.equal(snapshots.get(1).choices.chat.fits, false, '1 GB 0.8B multimodal model does not exceed the 0.4 GB cap')
-  assert.ok(snapshots.get(1).choices.speech?.multilingual, '1 GB can use the multilingual tiny Whisper tier when current free RAM allows')
+  assert.equal(snapshots.get(1).choices.chat.fits, false, '1 GB cannot fit the 1.30 GB smallest multimodal rung')
+  assert.ok(snapshots.get(1).choices.speech?.multilingual, '1 GB can use a multilingual Whisper tier')
   assert.ok(snapshots.get(1).skipped.some((item) => item.cap === 'vision'), '1 GB plan labels its vision route best-effort')
-  assert.ok(snapshots.get(2).skipped.some((item) => item.cap === 'vision'), '2 GB plan labels its vision route best-effort')
-  assert.ok(snapshots.get(3).skipped.some((item) => item.cap === 'vision'), '3 GB stays below the smallest model resident estimate')
-  assert.equal(snapshots.get(4).choices.vision.fits, true, '4 GB is the first reference tier where the 0.8B Q8 multimodal model fits')
-  assert.match(snapshots.get(4).choices.chat.model, /qwen3\.5-abliterated:0\.8b/)
-  assert.equal(snapshots.get(8).choices.vision.parametersB, 2.27, '8 GB selects the 2.27B multimodal rung')
-  assert.equal(snapshots.get(8).choices.vision.quant, 'Q8_0', '8 GB uses the highest native quant that fits its resident ceiling')
-  assert.equal(snapshots.get(12).choices.vision.parametersB, 4.54, '12 GB selects the 4.54B Q4_K_M rung')
-  assert.equal(snapshots.get(16).choices.vision.parametersB, 4.54, '16 GB remains within the conservative resident ceiling')
-  assert.equal(snapshots.get(16).choices.vision.quant, 'Q8_0', '16 GB upgrades the 4.54B model to Q8_0')
-  assert.equal(snapshots.get(24).choices.chat.parametersB, 9.65, '24 GB selects the 9.65B Q4_K_M rung')
-  assert.equal(snapshots.get(32).choices.chat.parametersB, 27.8, '32 GB selects the higher-parameter chat rung')
-  assert.equal(snapshots.get(32).choices.chat.quant, 'Q2_K', '32 GB selects the largest text model that fits the fixed resident ceiling')
-  assert.match(snapshots.get(32).choices.chat.model, /Huihui-Qwen3\.5-27B-abliterated-GGUF:Q2_K/)
-  assert.equal(snapshots.get(32).choices.reason.model, snapshots.get(32).choices.chat.model, '32 GB shares the high-parameter text model between chat and coding')
-  assert.equal(snapshots.get(32).choices.vision.parametersB, 9.65, '32 GB keeps native Q8_0 for reliable image input')
-  assert.equal(snapshots.get(32).choices.vision.quant, 'Q8_0')
+  assert.equal(snapshots.get(2).choices.vision.fits, true, '2 GB is the first reference tier where the 0.873B Q8 multimodal model fits')
+  assert.match(snapshots.get(2).choices.chat.model, /qwen3\.5-abliterated:0\.8b/)
+  assert.equal(snapshots.get(3).choices.vision.parametersB, 2.27, '3 GB selects the 2.27B rung')
+  assert.equal(snapshots.get(3).choices.vision.quant, 'Q4_K_M', '3 GB takes the Q4_K_M quantization of that rung')
+  assert.equal(snapshots.get(4).choices.vision.quant, 'Q8_0', '4 GB upgrades the 2.27B rung to Q8_0')
+  assert.equal(snapshots.get(8).choices.vision.parametersB, 9.65, '8 GB selects the 9.65B rung')
+  assert.equal(snapshots.get(12).choices.chat.quant, 'Q4_K_M', '12 GB is not yet enough for the 12.3 GB Q8_0 9.65B rung')
+  assert.equal(snapshots.get(16).choices.chat.parametersB, 27.8, '16 GB reaches the higher-parameter text rung')
+  assert.equal(snapshots.get(16).choices.chat.quant, 'Q2_K', '16 GB selects the Q2_K text/coding candidate')
+  assert.match(snapshots.get(16).choices.chat.model, /Huihui-Qwen3\.5-27B-abliterated-GGUF:Q2_K/)
+  assert.equal(snapshots.get(16).choices.vision.parametersB, 9.65, '16 GB keeps native Q8_0 for reliable image input')
+  assert.notEqual(snapshots.get(16).choices.chat.model, snapshots.get(16).choices.vision.model, '16 GB necessarily splits text/coding from native vision')
+  assert.equal(snapshots.get(20).choices.chat.parametersB, 27.8, '20 GB reaches the 27.8B Q4_K_M rung')
+  assert.equal(snapshots.get(20).choices.chat.quant, 'Q4_K_M')
+  assert.equal(snapshots.get(20).choices.vision.model, snapshots.get(20).choices.chat.model, '20 GB shares one multimodal tag again')
+  assert.equal(snapshots.get(28).choices.chat.parametersB, 36, '28 GB reaches the 36B Q4_K_M rung')
+  assert.equal(snapshots.get(32).choices.chat.quant, 'Q4_K_M', '32 GB takes the largest rung that fits the allocation')
   assert.equal(snapshots.get(32).choices.vision.multimodal, true)
-  assert.ok(Math.abs(snapshots.get(32).totalDownloadBytes / GB - 22.44) < 0.03, '32 GB counts the distinct Q2_K and Q8_0 tags plus Whisper once each')
-  assert.match(snapshots.get(32).choices.tts.engine, /system/)
-  const highMemoryQ4 = plan({ total: 52 * GB, free: 52 * GB, gpuInfo: null })
-  assert.equal(highMemoryQ4.choices.chat.parametersB, 27.8, '27.8B Q4_K_M is enabled only when its higher RAM estimate fits')
-  assert.equal(highMemoryQ4.choices.chat.quant, 'Q4_K_M')
-  const highMemory35B = plan({ total: 80 * GB, free: 80 * GB, gpuInfo: null })
-  assert.equal(highMemory35B.choices.vision.parametersB, 36, '36B Q4_K_M is selected only above its safe RAM floor')
-  assert.equal(highMemory35B.choices.vision.quant, 'Q4_K_M')
-  const highMemory27BQ8 = plan({ total: 88 * GB, free: 88 * GB, gpuInfo: null })
-  assert.equal(highMemory27BQ8.choices.vision.parametersB, 27.8, '27B Q8_0 replaces the 36B Q4 rung when its higher resident cost fits')
-  assert.equal(highMemory27BQ8.choices.vision.quant, 'Q8_0')
-  const highMemory36BQ8 = plan({ total: 116 * GB, free: 116 * GB, gpuInfo: null })
-  assert.equal(highMemory36BQ8.choices.vision.parametersB, 36)
-  assert.equal(highMemory36BQ8.choices.vision.quant, 'Q8_0', '36B Q8_0 is enabled at its high-memory floor')
-  const highMemory36BF16 = plan({ total: 200 * GB, free: 200 * GB, gpuInfo: null })
+  assert.ok(Math.abs(snapshots.get(32).totalDownloadBytes / GB - 24.86) < 0.03, '32 GB counts the shared 36B tag, Whisper and Kokoro once each')
+  assert.match(snapshots.get(32).choices.tts.engine, /kokoro/)
+  const highMemoryQ8 = plan({ total: 52 * GB, free: 52 * GB, gpuInfo: null, share: 1 })
+  assert.equal(highMemoryQ8.choices.chat.quant, 'Q8_0', '27B/36B Q8_0 is used when the allocation covers 46 GB')
+  assert.equal(highMemoryQ8.choices.tts.engine, 'kokoro', '52 GB has room for browser-cached Kokoro')
+  assert.equal(highMemoryQ8.choices.tts.dtype, 'fp32', '52 GB selects Kokoro FP32')
+  const highMemory36BF16 = plan({ total: 80 * GB, free: 80 * GB, gpuInfo: null, share: 1 })
   assert.equal(highMemory36BF16.choices.vision.parametersB, 36)
   assert.equal(highMemory36BF16.choices.vision.quant, 'F16', '36B F16 is available only when its resident estimate fits')
-  const below125B = plan({ total: 239 * GB, free: 239 * GB, gpuInfo: null })
-  assert.equal(below125B.choices.vision.parametersB, 36, '125B stays out until its 96 GB resident estimate fits the 40% cap')
+  assert.match(highMemory36BF16.choices.tts.engine, /system/, 'the 80 GB plan keeps headroom with system TTS')
+  const below125B = plan({ total: 95 * GB, free: 95 * GB, gpuInfo: null, share: 1 })
+  assert.equal(below125B.choices.vision.parametersB, 36, '125B stays out until its 96 GB resident estimate fits the allocation')
   assert.equal(below125B.choices.vision.quant, 'F16', 'the largest fitting native rung steps down to 36B F16')
-  const first125B = plan({ total: 240 * GB, free: 240 * GB, gpuInfo: null })
-  assert.equal(first125B.choices.vision.parametersB, 125, 'the native 125B rung first fits at 240 GB total when RAM is fully free')
-  assert.match(first125B.choices.tts.engine, /system/, 'the first-fit 240 GB plan preserves headroom with system TTS')
-  const workstation125B = plan({ total: 256 * GB, free: 256 * GB, gpuInfo: null })
+  const first125B = plan({ total: 96 * GB, free: 96 * GB, gpuInfo: null, share: 1 })
+  assert.equal(first125B.choices.vision.parametersB, 125, 'the native 125B rung first fits at 96 GB free with a 100% share')
+  assert.match(first125B.choices.tts.engine, /system/, 'the first-fit 96 GB plan preserves headroom with system TTS')
+  const workstation125B = plan({ total: 256 * GB, free: 256 * GB, gpuInfo: null, share: 1 })
   assert.equal(workstation125B.choices.vision.parametersB, 125, '256 GB workstation profile unlocks the official 125B model')
   assert.equal(workstation125B.choices.vision.model, 'huihui_ai/qwen3.5-abliterated:122B')
   assert.equal(workstation125B.choices.vision.quant, 'Q4_K_M')
   assert.equal(workstation125B.choices.vision.multimodal, true, '125B high-memory vision rung supports images')
-  assert.ok(workstation125B.maxResidentBytes <= workstation125B.effectiveModelBytes, '125B resident estimate stays inside the fixed planner cap')
+  assert.ok(workstation125B.maxResidentBytes <= workstation125B.effectiveModelBytes, '125B resident estimate stays inside the allocation')
   assert.equal(workstation125B.choices.tts.engine, 'kokoro', '256 GB workstation tier has room for local neural TTS')
   assert.equal(workstation125B.choices.tts.dtype, 'fp32', 'highest-memory profile selects Kokoro FP32')
-  assert.ok(Math.abs(workstation125B.maxResidentBytes / GB - 97.5) < 0.03, '125B plus Kokoro FP32 remains below the fixed workstation cap')
+  assert.ok(Math.abs(workstation125B.maxResidentBytes / GB - 97.5) < 0.03, '125B plus Kokoro FP32 stays inside the workstation allocation')
   assert.ok(Math.abs(workstation125B.totalDownloadBytes / GB - 81.86) < 0.03, '125B shared tag, multilingual Whisper, and browser Kokoro count once in disk estimates')
+  // A 50% share on a 256 GB host behaves like a 128 GB allocation.
+  const workstationHalf = plan({ total: 256 * GB, free: 256 * GB, gpuInfo: null, share: 0.5 })
+  assert.equal(workstationHalf.budget.models, 128 * GB, 'a 50% share halves the ceiling')
+  assert.equal(workstationHalf.choices.vision.parametersB, 125, 'the 125B rung still fits a 128 GB allocation')
   assert.match(planSummary(snapshots.get(0.5)), /best-effort/i)
+  assert.match(planSummary(snapshots.get(32)), /AI share 100%/, 'the summary leads with the user-facing share')
+  assert.equal(snapshots.get(32).allocation.sharePercent, 100, 'the plan carries the resolved allocation for the UI')
+  assert.ok(!/40%|35%|25%/.test(snapshots.get(32).notes.join(' ')), 'no fixed OS/apps/AI split remains in the plan notes')
 
   // A small/corrupt file is not treated as an installed Whisper model.
   tempDir = await mkdtemp(join(tmpdir(), 'jarvis-autopilot-test-'))
@@ -190,7 +263,7 @@ try {
   installedNames = allInstalledNames
 
   // A fit=false rung remains a reported skip even if other chosen models fit
-  // and Ollama is online. A fully over-cap 500 MB plan also performs no pulls.
+  // and Ollama is online. A fully over-budget 500 MB plan also performs no pulls.
   const mixedPlan = {
     ...selectedWithoutWhisper,
     choices: { ...selectedWithoutWhisper.choices, reason: { ...selectedWithoutWhisper.choices.reason, fits: false } },
@@ -199,13 +272,14 @@ try {
   const coderSkip = mixedInstall.log.find((item) => item.cap === 'reason')
   assert.ok(coderSkip?.ok && coderSkip.skipped && coderSkip.fits === false, 'non-fitting coding rung is skipped honestly')
   const lowRamInstall = await install({ planned: snapshots.get(0.5), dir: tempDir })
-  assert.ok(lowRamInstall.log.filter((item) => ['chat', 'vision', 'reason'].includes(item.cap)).every((item) => item.ok && item.skipped && item.fits === false), 'best-effort chat, vision, and coding models are not silently downloaded below the RAM cap')
+  assert.ok(lowRamInstall.log.filter((item) => ['chat', 'vision', 'reason'].includes(item.cap)).every((item) => item.ok && item.skipped && item.fits === false), 'best-effort chat, vision, and coding models are not silently downloaded below the allocation')
   assert.equal(pullCalls, pullsBeforeSlotFilter + 1, 'neither non-fitting plan triggers an additional Ollama download')
 
-  // At 4 GB, the smallest shared multimodal model and multilingual Whisper fit.
-  // Simulate Ollama being offline and Hugging Face serving a correctly sized
-  // stream; Whisper should still install independently.
-  const offlinePlan = plan({ total: 4 * GB, free: 4 * GB, gpuInfo: null })
+  // At 4 GB with a 100% share, the smallest shared multimodal model and
+  // multilingual Whisper fit. Simulate Ollama being offline and Hugging Face
+  // serving a correctly sized stream; Whisper should still install
+  // independently.
+  const offlinePlan = plan({ total: 4 * GB, free: 4 * GB, gpuInfo: null, share: 1 })
   assert.ok(offlinePlan.choices.speech?.fits, '4 GB plan selects a fitting multilingual Whisper file')
   assert.ok(offlinePlan.choices.chat.fits && offlinePlan.choices.vision.fits && offlinePlan.choices.reason.fits, '4 GB plan selects the shared multimodal model for all three routed roles')
   if (!existsSync(mockRuntimeScope)) {
@@ -253,12 +327,13 @@ try {
   }
 
   console.log(`PASS  ${tiers.length} deterministic RAM profiles (0.5–32 GB)`)
-  console.log('PASS  fixed 35/25/40 budget, unique downloads, truthful fit flags, mandatory multimodal vision, and high-memory Q8/F16/125B rungs')
-  console.log('PASS  mandatory vision profiles, best-effort safeguards, parameter counts, progressive quantization, multilingual STT and TTS')
-  console.log('PASS  over-cap skips, mock-Ollama idempotence, slot-filtered install routes, offline Whisper install, corrupt-file detection, and browser-cached Kokoro')
+  console.log('PASS  user-chosen share of free RAM, optional hard cap, saved/env/override precedence, and no fixed 35/25/40 split')
+  console.log('PASS  unique downloads, truthful fit flags, mandatory multimodal vision, and high-memory Q8/F16/125B rungs')
+  console.log('PASS  over-allocation skips, mock-Ollama idempotence, slot-filtered install routes, offline Whisper install, corrupt-file detection, and browser-cached Kokoro')
 } finally {
   if (tempDir) await rm(tempDir, { recursive: true, force: true })
   if (mockRuntimeCreated) await rm(mockRuntimePackage, { recursive: true, force: true })
   if (mockRuntimeScopeCreated) await rm(mockRuntimeScope, { recursive: true, force: true })
+  await rm(configDir, { recursive: true, force: true })
   await new Promise((resolve, reject) => ollama.close((error) => error ? reject(error) : resolve()))
 }

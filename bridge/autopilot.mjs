@@ -1,36 +1,56 @@
 /**
  * RAM-aware local model planner and explicit installer.
  *
- * The OS/apps/model split is fixed at 35/25/40. Chat, vision, coding and
- * Whisper are planned with runtime/context headroom. Most tiers share one
- * Qwen3.5 multimodal tag across chat, vision and reason; the 32 GB tier uses a
- * larger-parameter Q2_K text/reason rung plus a native Ollama Q8_0 vision rung.
- * Beyond the 32 GB reference catalogue, an official 125B Q4_K_M multimodal
- * tag is reserved for workstation-class RAM where its estimated 96 GB resident
- * footprint stays inside the same 40% ceiling.
+ * There is no fixed OS/apps/model split. The planner samples how much RAM is
+ * free right now and lets the AI use the share the user asked for — 100% of
+ * free memory by default, or any 1–100% the user picks, optionally bounded by
+ * a hard gigabyte cap. Whatever is not allocated simply stays free for the
+ * rest of the machine. The share can be set with JARVIS_RAM_SHARE /
+ * JARVIS_RAM_CAP_GB, from the MODEL STACK panel in the HUD, or by POSTing
+ * /autopilot/config; the panel writes the same settings file the bridge reads
+ * on the next start.
+ *
+ * Chat, vision, coding and Whisper are planned with runtime/context headroom
+ * against that ceiling. Most allocations share one Qwen3.5 multimodal tag
+ * across chat, vision and reason; when the allocation is large enough an
+ * official 125B Q4_K_M multimodal tag becomes reachable, and when it is tight
+ * a smaller rung is selected instead of pretending the largest one fits.
  * Distinct model downloads count once each. Identical local tags can stay warm
  * between routes; the bridge unloads them before a different local tag or
  * Whisper uses the one-model resident budget.
  *
- * Vision is part of every reference profile. At the smallest RAM tiers it is
+ * Vision is part of every reference profile. At the smallest allocations it is
  * explicitly best-effort, not installed or invoked; the planner never claims
  * that an over-budget model can safely run.
  */
 
 import { execFile, execFileSync } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
+import { createWriteStream, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { freemem, totalmem } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
 const require = createRequire(import.meta.url)
 
-/** The split. Exported so the UI and planner always show identical arithmetic. */
-export const BUDGET = Object.freeze({ os: 0.35, apps: 0.25, models: 0.40 })
+/**
+ * Default allocation: the AI may use every byte that is free right now.
+ * `share` is a 0–1 fraction of currently free RAM; `capGb` is an optional hard
+ * ceiling in gigabytes that wins when it is smaller than the share.
+ */
+export const ALLOCATION = Object.freeze({ share: 1, capGb: null })
+
+/** Environment names for the same two knobs, plus the saved-settings file. */
+export const ALLOCATION_ENV = Object.freeze({
+  share: 'JARVIS_RAM_SHARE',
+  capGb: 'JARVIS_RAM_CAP_GB',
+  config: 'JARVIS_RAM_CONFIG',
+})
+
+const DEFAULT_CONFIG_PATH = 'models/ram-allocation.json'
 
 const GB = 1024 ** 3
 const MB = 1024 ** 2
@@ -54,8 +74,8 @@ const ACTIVE_WHISPER_FILE = '.whisper-active'
  */
 const NATIVE_MULTIMODAL = [
   // Ollama's official 122B tag is a 125B-parameter Q4_K_M multimodal model.
-  // Keep its 81 GB download / 96 GB resident estimate out of normal machines;
-  // at least 240 GB total RAM is needed for the fixed 40% planner ceiling.
+  // Its 81 GB download / 96 GB resident estimate stays out of normal machines;
+  // it is only selected when the user's allocation is at least that large.
   { model: 'huihui_ai/qwen3.5-abliterated:122B', quant: 'Q4_K_M', parametersB: 125.0, bytes: 81.0 * GB, residentBytes: 96.0 * GB, quality: 5, multimodal: true, note: 'Official 122B tag (125B parameters), Q4_K_M, text + image; estimated 96 GB resident. Requires workstation-class RAM and remains subject to current-free-memory planning.' },
   { model: 'huihui_ai/qwen3.5-abliterated:35b-a3b-fp16', quant: 'F16', parametersB: 36.0, bytes: 72.0 * GB, residentBytes: 80.0 * GB, quality: 5, multimodal: true },
   { model: 'huihui_ai/qwen3.5-abliterated:35b-a3b-q8_0', quant: 'Q8_0', parametersB: 36.0, bytes: 39.0 * GB, residentBytes: 46.0 * GB, quality: 5, multimodal: true },
@@ -133,27 +153,135 @@ export function totalRam() {
   return totalmem()
 }
 
-/** Current available memory is reported separately; it never changes the fixed 35/25/40 split. */
+/**
+ * How much RAM is actually free to hand out, in bytes.
+ *
+ * On Windows this is `os.freemem()`: the memory the OS reports as available,
+ * which is the conservative number. A machine whose monitor shows 12 GB free
+ * because ten of it is file cache will not hand all twelve to a model, and
+ * planning against the larger figure is how a small machine starts swapping.
+ *
+ * The `/proc/meminfo` branch exists for the Linux host the test suites run on,
+ * where `freemem()` inside a container answers for the host rather than the
+ * container and would make every RAM test meaningless.
+ */
 export function availableRam() {
+  try {
+    const meminfo = readFileSync('/proc/meminfo', 'utf8')
+    const match = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m)
+    if (match) return Number(match[1]) * 1024
+  } catch { /* Windows has no /proc: os.freemem() is the answer */ }
   return freemem()
+}
+
+/** Where the user's saved allocation lives (relative paths resolve from cwd). */
+export function allocationConfigPath() {
+  return resolve(process.env[ALLOCATION_ENV.config] ?? DEFAULT_CONFIG_PATH)
+}
+
+/** Accepts 0.8, "0.8", "80" or "80%" and returns a 0–1 fraction, else null. */
+export function parseShare(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  if (!text) return null
+  const percent = text.endsWith('%')
+  const numeric = Number(percent ? text.slice(0, -1).trim() : text)
+  if (!Number.isFinite(numeric)) return null
+  const share = percent || numeric > 1 ? numeric / 100 : numeric
+  if (!(share > 0) || share > 1) return null
+  return share
+}
+
+/** Accepts a positive number of gigabytes; null/'' means "no hard cap". */
+export function parseCapGb(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  return numeric
+}
+
+/** The saved allocation file, read synchronously because plan() is sync. */
+export function readAllocationConfig() {
+  try {
+    const parsed = JSON.parse(readFileSync(allocationConfigPath(), 'utf8'))
+    return {
+      share: parseShare(parsed?.share),
+      capGb: parseCapGb(parsed?.capGb),
+    }
+  } catch {
+    return { share: null, capGb: null }
+  }
+}
+
+/**
+ * Resolve the allocation actually in force.
+ *
+ * Precedence: explicit options (tests, tierProfiles) → saved user settings →
+ * environment variables → defaults (all free RAM, no cap).
+ */
+export function resolveAllocation(options = {}) {
+  const saved = options.config ?? readAllocationConfig()
+  const envShare = parseShare(process.env[ALLOCATION_ENV.share])
+  const envCap = parseCapGb(process.env[ALLOCATION_ENV.capGb])
+  const optionShare = parseShare(options.share)
+  const optionCap = options.capGb === undefined ? undefined : parseCapGb(options.capGb)
+  const share = optionShare ?? saved.share ?? envShare ?? ALLOCATION.share
+  const capGb = optionCap !== undefined ? optionCap : (saved.capGb ?? envCap ?? ALLOCATION.capGb)
+  const source = optionShare !== null || optionCap !== undefined
+    ? 'override'
+    : saved.share !== null || saved.capGb !== null
+      ? 'saved'
+      : envShare !== null || envCap !== null
+        ? 'environment'
+        : 'default'
+  return { share, capGb, source, configPath: allocationConfigPath() }
+}
+
+/**
+ * Persist a user-requested allocation and report what changed.
+ *
+ * `share: null` and `capGb: null` clear the saved value so the environment or
+ * the default takes over again. Validation is strict on purpose: a silent
+ * fallback would leave the panel showing a number the planner is not using.
+ */
+export async function saveAllocation(patch = {}) {
+  const current = readAllocationConfig()
+  const next = { share: current.share, capGb: current.capGb }
+  // undefined means "leave this knob alone"; null/'' clears it.
+  if (Object.hasOwn(patch, 'share') && patch.share !== undefined) {
+    if (patch.share === null || patch.share === '') {
+      next.share = null
+    } else {
+      const share = parseShare(patch.share)
+      if (share === null) {
+        return { ok: false, error: 'share must be between 1% and 100% of free RAM (for example 75 or "75%").' }
+      }
+      next.share = share
+    }
+  }
+  if (Object.hasOwn(patch, 'capGb') && patch.capGb !== undefined) {
+    if (patch.capGb === null || patch.capGb === '') {
+      next.capGb = null
+    } else {
+      const numeric = Number(patch.capGb)
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return { ok: false, error: 'capGb must be a positive number of gigabytes, or null for no hard cap.' }
+      }
+      next.capGb = numeric
+    }
+  }
+  const path = allocationConfigPath()
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, `${JSON.stringify({ share: next.share, capGb: next.capGb }, null, 2)}\n`, 'utf8')
+  } catch (error) {
+    return { ok: false, error: `Could not save the allocation: ${String(error?.message ?? error)}` }
+  }
+  return { ok: true, path, allocation: { share: next.share, capGb: next.capGb, source: 'saved' } }
 }
 
 /** GPU telemetry is advisory only. System RAM remains the hard budget. */
 export function gpu() {
-  if (process.platform === 'darwin') {
-    const total = totalRam()
-    return { vendor: 'apple', name: 'Apple unified memory', vram: total, usable: Math.floor(total * 0.55), note: 'shared memory; CPU RAM budget still applies' }
-  }
-  if (process.platform === 'win32') {
-    try {
-      const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-      const [first] = stdout.trim().split(/\r?\n/)
-      const [mb, ...name] = first.split(',').map((s) => s.trim())
-      const vram = Number(mb) * MB
-      if (vram > 0) return { vendor: 'nvidia', name: name.join(','), vram, usable: Math.floor(vram * 0.75), note: 'NVIDIA VRAM is advisory; CPU RAM cap is unchanged' }
-    } catch { /* no NVIDIA telemetry */ }
-    return null
-  }
   try {
     const stdout = execFileSync('nvidia-smi', ['--query-gpu=memory.total,name', '--format=csv,noheader,nounits'], { timeout: 2500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     const [first] = stdout.trim().split(/\r?\n/)
@@ -172,18 +300,35 @@ export function gpu() {
   return null
 }
 
-/** The exact fixed RAM arithmetic, with an injected total for deterministic tests. */
-export function budget(total = totalRam(), free = availableRam()) {
-  const models = Math.floor(total * BUDGET.models)
+/**
+ * The exact allocation arithmetic, with an injected total/free/allocation for
+ * deterministic tests.
+ *
+ * `models` is the ceiling for one active model: the user's share of the RAM
+ * that is free right now, reduced by an explicit hard cap when one is set.
+ * There is no OS/apps split any more — `unallocated` is simply what is left
+ * free because the user did not hand it to the AI.
+ */
+export function budget(total = totalRam(), free = availableRam(), allocation = resolveAllocation()) {
+  const share = allocation.share ?? ALLOCATION.share
+  const capBytes = allocation.capGb != null ? Math.floor(allocation.capGb * GB) : null
+  const byShare = Math.floor(free * share)
+  const models = capBytes != null ? Math.min(byShare, capBytes) : byShare
+  const sharePercent = Math.round(share * 1000) / 10
   return {
     total,
-    os: Math.floor(total * BUDGET.os),
-    apps: Math.floor(total * BUDGET.apps),
-    models,
     free,
-    freeForModels: Math.min(models, Math.floor(free * 0.9)),
-    gpuInfo: null,
     gb: total / GB,
+    share,
+    sharePercent,
+    capBytes,
+    capGb: allocation.capGb ?? null,
+    models,
+    freeForModels: models,
+    unallocated: Math.max(0, free - models),
+    source: allocation.source ?? 'default',
+    configPath: allocation.configPath ?? allocationConfigPath(),
+    gpuInfo: null,
   }
 }
 
@@ -206,31 +351,31 @@ function selectRung(cap, ramBudget, selected, skipped) {
   if (['chat', 'vision', 'reason'].includes(cap)) {
     const floor = smallest(ladder)
     selected[cap] = { ...floor, ...languagePolicy, fits: false, mode: 'best-effort' }
-    skipped.push({ cap, model: floor.model, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `minimum ${cap} model estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident; the reserved JARVIS budget is ${(ramBudget / GB).toFixed(2)} GB. Best-effort only.` })
+    skipped.push({ cap, model: floor.model, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `minimum ${cap} model estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident; the AI allocation for this machine is ${(ramBudget / GB).toFixed(2)} GB. Best-effort only.` })
     return
   }
   const floor = smallest(ladder)
-  skipped.push({ cap, model: null, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `${cap} is unavailable within this RAM tier. The smallest supported choice estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident.` })
+  skipped.push({ cap, model: null, needsGb: +(floor.residentBytes / GB).toFixed(2), why: `${cap} is unavailable within this allocation. The smallest supported choice estimates ${(floor.residentBytes / GB).toFixed(2)} GB resident.` })
 }
 
 /**
  * Plan each feature against the same sequential-runtime ceiling.
  *
- * `total`/`free` can be injected for tests. Per-capability resident estimates
- * are compared to the 40% budget; downloads are summed separately for disk.
+ * `total`/`free`/`share`/`capGb` can be injected for tests. Per-capability
+ * resident estimates are compared to the user's allocation of free RAM;
+ * downloads are summed separately for disk.
  */
 export function plan(options = {}) {
   assertModelPolicy()
   const total = options.total ?? totalRam()
   const free = options.free ?? availableRam()
-  const b = budget(total, free)
+  const b = budget(total, free, resolveAllocation(options))
   b.gpuInfo = Object.hasOwn(options, 'gpuInfo')
     ? options.gpuInfo
     : (options.total === undefined && options.free === undefined ? gpu() : null)
-  // If current free memory is lower than the reserved cap, be more conservative
-  // instead of causing avoidable paging/OOM. This does not alter the 35/25/40
-  // budget shown to the user.
-  const ceiling = b.freeForModels
+  // The ceiling is exactly what the user asked the AI to take from free RAM:
+  // no percentage is silently held back on top of that choice.
+  const ceiling = b.models
   const choices = {}
   const skipped = []
   for (const cap of Object.keys(LADDERS).filter((name) => name !== 'tts')) {
@@ -239,7 +384,7 @@ export function plan(options = {}) {
 
   // Kokoro is retained in the browser while Ollama runs. Reserve its RAM beside
   // the largest other active local model; if that cannot fit, use zero-model
-  // SpeechSynthesis rather than exceeding the fixed cap.
+  // SpeechSynthesis rather than exceeding the user's allocation.
   const primaryPeak = Math.max(0, ...Object.values(choices).filter((rung) => rung.fits).map((rung) => rung.residentBytes))
   const selectedTts = LADDERS.tts.find((candidate) => primaryPeak + candidate.residentBytes <= ceiling)
   choices.tts = { ...(selectedTts ?? LADDERS.tts.at(-1)), fits: true, mode: 'within-budget' }
@@ -258,34 +403,46 @@ export function plan(options = {}) {
   const totalDownloadBytes = [...uniqueAssets.values()].reduce((sum, rung) => sum + rung.bytes, 0)
   const llmModelCount = new Set(['chat', 'vision', 'reason'].map((cap) => choices[cap]?.model).filter(Boolean)).size
   const sharedModelNote = llmModelCount <= 1
-    ? 'Chat, vision and coding share one abliterated multimodal model at this RAM tier; its download is counted once and the fitting model stays warm across those slots.'
-    : `Chat/vision/coding use ${llmModelCount} distinct model tags at this RAM tier; repeated tags are counted once. Vision stays on a native multimodal Ollama rung.`
+    ? 'Chat, vision and coding share one abliterated multimodal model under this allocation; its download is counted once and the fitting model stays warm across those slots.'
+    : `Chat/vision/coding use ${llmModelCount} distinct model tags under this allocation; repeated tags are counted once. Vision stays on a native multimodal Ollama rung.`
+  const allocationSource = b.source === 'saved'
+    ? ' from your saved MODEL STACK setting'
+    : b.source === 'environment'
+      ? ' from the JARVIS_RAM_* environment'
+      : b.source === 'override'
+        ? ' (explicitly supplied to the planner)'
+        : ' (default)'
+  const capNote = b.capGb != null ? `, bounded by your ${b.capGb.toFixed(2)} GB hard cap` : ''
   const notes = [
-    '35% reserved for the OS, 25% for other apps, 40% maximum for JARVIS.',
+    `AI allocation${allocationSource}: ${b.sharePercent}% of the ${(b.free / GB).toFixed(2)} GB free when the plan was made = ${(b.models / GB).toFixed(2)} GB${capNote}. There is no fixed OS/apps split; change the share or set a cap in MODEL STACK, or with ${ALLOCATION_ENV.share}/${ALLOCATION_ENV.capGb}.`,
     sharedModelNote,
     `Only ${(ceiling / GB).toFixed(2)} GB is currently planned for one active model at a time; context/runtime estimates vary by backend.`,
     choices.tts.engine === 'system'
-      ? 'TTS uses the browser/OS voice at this RAM tier; voice language availability depends on the installed OS voices.'
+      ? 'TTS uses the browser/OS voice under this allocation; voice language availability depends on the installed OS voices.'
       : `TTS selects browser-local Kokoro ${choices.tts.dtype} (${(choices.tts.bytes / MB).toFixed(0)} MB weights). The browser downloads and caches it on first use; resident use is an estimate, not a measured guarantee.`,
   ]
   if (skipped.some((item) => item.cap === 'vision')) {
     const vision = choices.vision
-    const totalFloorGb = vision.residentBytes / (BUDGET.models * GB)
-    notes.push(`Vision is present in every tier as ${vision.model}, but is best-effort here: its smallest multimodal rung estimates ${(vision.residentBytes / GB).toFixed(2)} GB resident and first fits at about ${totalFloorGb.toFixed(1)} GB total RAM when free memory is available.`)
+    const totalFloorGb = vision.residentBytes / (b.share * GB)
+    notes.push(`Vision is present in every profile as ${vision.model}, but is best-effort here: its smallest multimodal rung estimates ${(vision.residentBytes / GB).toFixed(2)} GB resident and first fits when about ${totalFloorGb.toFixed(1)} GB is free at the current share.`)
   }
   if (skipped.some((item) => item.cap === 'chat' || item.cap === 'reason')) {
-    notes.push('The smallest 0.8B Q8 multimodal model estimates 1.30 GB resident; below the plan ceiling it remains best-effort and is not installed or invoked.')
+    notes.push(`The smallest 0.8B Q8 multimodal model estimates 1.30 GB resident; below the ${(ceiling / GB).toFixed(2)} GB allocation it remains best-effort and is not installed or invoked.`)
   }
   const selectedModelNotes = new Set(['chat', 'vision', 'reason']
     .map((cap) => choices[cap]?.fits ? choices[cap].note : null)
     .filter(Boolean))
   notes.push(...selectedModelNotes)
+  if (b.models < b.free) {
+    notes.push(`${(b.unallocated / GB).toFixed(2)} GB of the free RAM was left unallocated for other applications on purpose.`)
+  }
   const g = b.gpuInfo
-  if (g) notes.push(`${g.name}: ${(g.usable / GB).toFixed(1)} GB advisory VRAM; the fixed system-RAM limit still applies.`)
+  if (g) notes.push(`${g.name}: ${(g.usable / GB).toFixed(1)} GB advisory VRAM; the system-RAM allocation still applies.`)
 
   return {
     choices,
     budget: b,
+    allocation: { share: b.share, sharePercent: b.sharePercent, capGb: b.capGb, source: b.source, configPath: b.configPath },
     ramBudgetBytes: b.models,
     effectiveModelBytes: ceiling,
     maxResidentBytes,
@@ -317,7 +474,8 @@ export function planSummary(input) {
     if (sharesOneModel && llmSlots.includes(cap)) continue
     picks.push(`${cap} ${rung.quant ?? 'unknown'}${rung.fits ? '' : ' (best-effort)'}`)
   }
-  return `autopilot: ${p.budget.gb.toFixed(1)} GB RAM → ${(p.budget.models / GB).toFixed(1)} GB JARVIS cap | ${picks.join(', ')}`
+  const cap = p.budget.capGb != null ? `, hard cap ${p.budget.capGb.toFixed(1)} GB` : ''
+  return `autopilot: ${p.budget.gb.toFixed(1)} GB RAM / ${(p.budget.free / GB).toFixed(1)} GB free → AI share ${p.budget.sharePercent}% = ${(p.budget.models / GB).toFixed(2)} GB${cap} | ${picks.join(', ')}`
 }
 
 /** Install only after an explicit local UI action or setup-script invocation. */
@@ -498,11 +656,11 @@ async function ensureWhisperPackage() {
     return { id, ok: true, skipped: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'already installed' }
   } catch { /* install it below */ }
   try {
-    await execFileAsync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-save', '--prefix', process.cwd(), pkg], {
+    await execFileAsync('npm.cmd', ['install', '--no-save', '--prefix', process.cwd(), pkg], {
       timeout: 10 * 60 * 1000,
       maxBuffer: 8 * MB,
       windowsHide: true,
-      shell: process.platform === 'win32',
+      shell: true,
     })
     return { id, ok: true, path: 'node_modules/@lumen-labs-dev/whisper-node', note: 'local Whisper runtime installed by explicit model-manager action' }
   } catch (error) {
@@ -565,13 +723,14 @@ export function ladder() {
 /**
  * Reference plan for each requested machine-size tier. The catalog is for
  * comparison only: it does not install or download the models in other rows.
- * Profiles assume all reported system RAM is currently free; live planning may
- * step down when other processes reduce available memory.
+ * Profiles assume all reported system RAM is currently free and reuse the
+ * caller's allocation (share/cap), so the grid answers "what would this
+ * machine get with the settings I am using right now?".
  */
-export function tierProfiles() {
+export function tierProfiles(options = {}) {
   const sizes = [0.5, ...Array.from({ length: 32 }, (_, index) => index + 1)]
   return sizes.map((ramGb) => {
-    const profile = plan({ total: ramGb * GB, free: ramGb * GB, gpuInfo: null })
+    const profile = plan({ ...options, total: ramGb * GB, free: ramGb * GB, gpuInfo: null })
     const slots = Object.fromEntries(Object.entries(profile.choices).map(([cap, rung]) => [
       cap,
       {

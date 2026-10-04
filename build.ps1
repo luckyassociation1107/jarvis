@@ -3,7 +3,10 @@
 [CmdletBinding()]
 param(
   [switch]$NoLaunch,
-  [switch]$SkipAiModels
+  [switch]$SkipAiModels,
+  # The launcher (START.cmd) passes this: do not stop at the setup page,
+  # install the stack this machine fits and then answer.
+  [switch]$Auto
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,47 +42,6 @@ function Get-NodeVersion {
   }
   catch { return '' }
   return ''
-}
-
-function Install-OllamaIfNeeded {
-  param(
-    [Parameter(Mandatory)][string]$NodeExe,
-    [Parameter(Mandatory)][string]$RepoPath
-  )
-
-  try {
-    $checker = Join-Path $RepoPath 'scripts/model-bootstrap.mjs'
-    $decisionOutput = & $NodeExe $checker '--needs-local-ollama-install'
-    if ($LASTEXITCODE -ne 0) { throw 'Could not calculate whether Ollama is needed.' }
-    $decision = ($decisionOutput | Out-String).Trim()
-    if ($decision -ne 'yes') { return $true }
-
-    Write-Host ''
-    Write-Host 'A fitting local chat/vision/coding model is selected, but Ollama is missing.' -ForegroundColor Yellow
-    Write-Host 'Downloading the official Ollama installer; it may ask for Windows confirmation.'
-    $installerScript = Join-Path $env:TEMP "jarvis-ollama-install-$PID.ps1"
-    try {
-      Invoke-WebRequest -Uri 'https://ollama.com/install.ps1' -OutFile $installerScript
-      $hostName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
-      $hostExe = Join-Path $PSHOME $hostName
-      if (-not (Test-Path $hostExe)) { throw "Could not locate the PowerShell host at $hostExe." }
-      & $hostExe -NoProfile -ExecutionPolicy Bypass -File $installerScript
-      if ($LASTEXITCODE -ne 0) { throw "Official Ollama installer exited with code $LASTEXITCODE." }
-      Refresh-SessionPath
-      if (-not (Get-Command ollama.exe -ErrorAction SilentlyContinue)) {
-        throw 'Ollama installer returned successfully, but ollama.exe is not on the refreshed PATH.'
-      }
-      Write-Host 'Ollama is installed; model setup will start its service if necessary.' -ForegroundColor Green
-      return $true
-    }
-    finally {
-      Remove-Item $installerScript -Force -ErrorAction SilentlyContinue
-    }
-  }
-  catch {
-    Write-Warning "Ollama setup could not complete: $($_.Exception.Message). JARVIS will still launch with available browser/OS or configured remote fallbacks."
-    return $false
-  }
 }
 
 Push-Location $repo
@@ -165,22 +127,22 @@ try {
 
   Write-Host ''
   Write-Host 'Running the read-only advisory preflight…' -ForegroundColor Cyan
-  & $npmPath run setup
+  & $npmPath run doctor
   if ($LASTEXITCODE -ne 0) { throw 'The preflight command could not run.' }
 
   if (-not $SkipAiModels) {
-    $null = Install-OllamaIfNeeded -NodeExe $nodeCommand.Source -RepoPath $repo
     Write-Host ''
-    Write-Host 'Checking and installing only the selected, fitting local model assets…' -ForegroundColor Cyan
-    & $npmPath run models:install
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warning 'AI setup was partial. The web app will still launch with available browser/OS or configured remote fallbacks.'
-    }
+    Write-Host 'Models are chosen, never assumed. The setup page opens in your browser' -ForegroundColor Cyan
+    Write-Host 'so you can pick a stack and download it with one click:'
+    Write-Host ''
+    Write-Host '  npm run setup        (or open http://localhost:8787/install while the app runs)' -ForegroundColor Cyan
   } else {
     Write-Host ''
-    Write-Host 'Skipping Ollama and model-weight setup (-SkipAiModels).' -ForegroundColor Yellow
+    Write-Host 'Skipping the model setup page (-SkipAiModels).' -ForegroundColor Yellow
   }
 
+  $npmArgs = @('start')
+  if ($Auto) { $npmArgs += '--'; $npmArgs += '--auto' }
   if ($NoLaunch) {
     Write-Host ''
     Write-Host 'Setup and build complete. -NoLaunch left the bridge and browser server stopped.'
@@ -190,8 +152,15 @@ try {
   Write-Host ''
   Write-Host 'Starting the local bridge and browser HUD.' -ForegroundColor Green
   Write-Host 'Open the Vite URL printed below in Chrome or Edge. Keep this window open;'
-  Write-Host 'Ctrl-C stops the bridge and browser server together. The selected fitting model stack was prepared automatically unless -SkipAiModels was used.'
-  & $npmPath start
+  if ($Auto) {
+    Write-Host 'Ctrl-C stops the bridge and browser server together.'
+    Write-Host '-Auto: the model runtime and the stack this machine fits are installed'
+    Write-Host 'here, before the first answer, and the progress is printed below.'
+  } else {
+    Write-Host 'Ctrl-C stops the bridge and browser server together. If no model stack is'
+    Write-Host 'downloaded yet, the setup page opens automatically — pick one there.'
+  }
+  & $npmPath @npmArgs
   if ($LASTEXITCODE -ne 0) { throw "npm start exited with code $LASTEXITCODE." }
 }
 catch {

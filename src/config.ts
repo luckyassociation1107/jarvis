@@ -77,9 +77,9 @@ export const STT_ENGINE: 'auto' | 'browser' | 'whisper' = choice(
 /**
  * Speech engine.
  *
- *   'system' — the browser's own speechSynthesis. Starts on the next frame,
- *     costs nothing, but is capped by whatever voices the OS ships; on macOS
- *     the British male option is compact Daniel.
+ *   'system' — the browser's own speechSynthesis. Starts on the next frame and
+ *     costs nothing, but is capped by whatever voices the machine ships: the
+ *     installed British male options on Windows are George and Thomas.
  *
  *   'kokoro' — an 82M-parameter neural TTS running entirely in the browser via
  *     ONNX. Four proper British male voices and far better sound, nothing

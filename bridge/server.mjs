@@ -21,10 +21,11 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, withLocalSpeechModel } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, withLocalSpeechModel, replanAutopilot } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
-import { install as autopilotInstall, planSummary, ladder as autopilotLadder, tierProfiles } from './autopilot.mjs'
+import { availableRam, install as autopilotInstall, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
+import { ensureRuntime, resolveVariants, rocmSuggested, runtimeStatus } from './portable-runtime.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -35,8 +36,12 @@ import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
 import { windowsServer } from './windows.mjs'
-import { homedir, tmpdir } from 'node:os'
-import { readFileSync, realpathSync } from 'node:fs'
+import { programPath, shellServer } from './shell.mjs'
+import { machineCard } from './capability.mjs'
+import { OLLAMA_DOWNLOAD, installerPage } from './installer.mjs'
+import { desktopServer } from './desktop.mjs'
+import { homedir, tmpdir, totalmem } from 'node:os'
+import { readFileSync, realpathSync, statfsSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
@@ -44,6 +49,8 @@ import { renderPage } from './page.mjs'
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 const AUTOPILOT_JOBS = new Map()
+// One release lookup shared by every page load, refreshed every ten minutes.
+const RUNTIME_VARIANTS = { at: 0, value: null }
 
 /**
  * A crash here takes the whole assistant down mid-sentence, and most of what
@@ -92,6 +99,22 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 const isDevPort = (port) =>
   (port >= 5173 && port <= 5199) || (port >= 4173 && port <= 4199)
 
+/**
+ * Free space on the volume the models land on.
+ *
+ * Read straight from statfs rather than shelling out to `df`, because this is
+ * shown to the user before they commit to a multi-gigabyte download and it has
+ * to work on a machine with nothing installed yet.
+ */
+function diskFreeGb() {
+  try {
+    const fs = statfsSync(homedir())
+    return +((fs.bavail * fs.bsize) / 1073741824).toFixed(1)
+  } catch {
+    return null
+  }
+}
+
 function originAllowed(origin) {
   if (!origin) return ALLOW_NO_ORIGIN
   if (EXTRA_ORIGINS.has(origin.replace(/\/+$/, ''))) return true
@@ -104,7 +127,11 @@ function originAllowed(origin) {
   if (ALLOW_ARENA_PREVIEW && url.protocol === 'https:' && url.hostname.endsWith('.e2b.app')) return true
   if (url.protocol !== 'http:') return false
   if (!LOCAL_HOSTS.has(url.hostname)) return false
-  return isDevPort(Number(url.port))
+  // The bridge's own port is allowed because the setup page is served from it
+  // and posts back to it, and because a terminal client has nowhere else to
+  // come from. It is still loopback on the port this process owns, so a page
+  // on another origin gains nothing.
+  return Number(url.port) === PORT || isDevPort(Number(url.port))
 }
 
 /**
@@ -292,6 +319,15 @@ function decideTool(name) {
     // the explicit bridge:writes opt-in, independently of tool-name heuristics.
     if (server === 'jarvis_windows') return mcpToolOf(name) === 'list_windows' || ALLOW_WRITES
 
+    // The command line and the desktop control. Both gate themselves at
+    // construction the same way the browser server does: shellServer() and
+    // desktopServer() only build their acting tools when ALLOW_WRITES is set,
+    // so anything arriving here has already passed the one decision that
+    // matters. Reading verbs out of the names would only subtract: `run_command`
+    // and `click` begin with no read verb and would be withheld even in write
+    // mode, which is precisely when the user asked for them.
+    if (server === 'jarvis_shell' || server === 'jarvis_desktop') return true
+
     const tool = mcpToolOf(name)
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
       return ALLOW_WRITES
@@ -333,6 +369,27 @@ REPORTING.
 - Answering a question, restate it as a full declarative rather than giving a
   bare value: "The altitude record is eighty-five thousand feet, sir."
 - Executing an order, do not restate it. Act, then report.
+
+CAPABILITY FIRST. You are a computer being asked to do something, so you plan
+against what this machine actually has — never from imagination in either
+direction. The block at the end of this prompt is a fresh probe of it.
+- Before you answer "can you", find out: the block, command_info,
+  desktop_capabilities, list_apps, list_processes. Never refuse a task you have
+  not checked the machine for, and never promise one you have not checked either.
+- If it can be done, plan the route and take it: the narrowest tool that
+  finishes the job, run it, then report what actually happened.
+- If it cannot be done as asked, that is not the end of the answer. Design the
+  closest thing the machine can do — the same end by another tool, a lower
+  fidelity, a smaller local model, a shorter clip, offline instead of online,
+  the part that is possible now and the rest left staged. Take that route and
+  say in one line which trade you made.
+- Only when nothing on the machine reaches the goal do you say it: "That cannot
+  be done with what is here." Name the missing piece and what would unlock it.
+  One sentence, a fact about the machine, no apology, no hedging.
+- A policy refusal is not a capability limit. If a command is refused, say the
+  permission is off — never that it is impossible.
+- Never claim a result you did not observe. An invented file, download or click
+  is worse than a refusal: one is a gap, the other is a lie.
 
 NEVER.
 - No filler words at all: no um, well, so, okay, right, let me check, one moment.
@@ -421,6 +478,35 @@ browser or a web page:
   you are about to do. After it, say what happened.
 - If the browser is unreachable, say so once and carry on without it.
 
+This machine — the command line and the desktop:
+- \`run_command\` runs anything the shell policy allows: git, ffmpeg, npm, docker,
+  a database client, a script in the repo. \`command_info\` tells you whether a
+  program exists before you promise it. \`list_processes\` answers "is it still
+  running" and "what is using that port" from live data rather than a guess.
+- Refusals are final. If a command is refused by the allowlist or the deny
+  list, say it is not permitted once and stop — never look for a way around it
+  and never pretend you ran it.
+- If these tools are not among the ones you have, the bridge is in read-only
+  mode. Say that writes are off and the action needs \`npm run bridge:writes\`;
+  do not describe doing it.
+- Report what the command actually printed. Do not summarise a result you did
+  not read, and do not invent an exit code.
+- \`jarvis_desktop\` is the rest of the machine: \`list_apps\` and \`launch_app\`
+  for anything installed, \`list_windows\`/\`focus_window\`/\`window_action\` to
+  bring a window forward, minimize it or put it where they asked, and
+  \`type_text\`, \`press_keys\`, \`move_mouse\`, \`click\`, \`scroll\` to drive it.
+- Focus a window before typing into it. Typing goes wherever the cursor is, so
+  an unfocused type is a message to the wrong program — the worst kind of
+  silent failure. When the target is a browser page you can name, use the
+  \`chrome_*\` tools instead; they are exact where a click is approximate.
+- Check \`desktop_capabilities\` before promising pointer control. JARVIS drives
+  the desktop on Windows through PowerShell and user32 — nothing to install. On
+  any other host it is off, and saying so is the honest answer.
+- Climbing the ladder, worst case last: the browser tools, then the desktop
+  tools, then the command line. Prefer the narrowest tool that finishes the job.
+- Launching, typing, clicking and quitting all change the user's screen while
+  they are looking at it. One sentence before, one after.
+
 Your eyes:
 - \`look\` takes one frame and lets you see it. \`watch\` takes several seconds and
   returns them as a grid of stamped frames, so you can read movement rather than
@@ -455,8 +541,9 @@ Using tools:
  * Where /file is permitted to read from, and how big a read may get.
  *
  * The roots are realpath'd once at boot so the containment check below compares
- * like with like — on macOS os.tmpdir() is a symlink into /private/var, and a
- * string prefix test against the unresolved form would reject every screenshot.
+ * like with like: Windows resolves short 8.3 names (PROGRA~1) and junctions to
+ * their long form, and a string prefix test against the unresolved path would
+ * reject a screenshot that is genuinely inside the folder.
  */
 const IMAGE_TYPES = {
   '.png': 'image/png',
@@ -473,16 +560,16 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024
 
 const FILE_ROOTS = [
   homedir(),
-  // Both temp directories, because on macOS os.tmpdir() is the per-user
-  // $TMPDIR under /var/folders while half the tools that take a screenshot
-  // still write it to /tmp. Dropping one of them loses real panels.
+  // The per-user %TEMP%, where almost everything that takes a screenshot and
+  // hands it over writes it.
   tmpdir(),
-  '/tmp',
+  // Something wrote to the machine-wide temp instead: still a real screenshot.
+  process.env.SystemRoot ? join(process.env.SystemRoot, 'Temp') : null,
   ...(process.env.JARVIS_FILE_ROOTS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-].map((root) => {
+].filter(Boolean).map((root) => {
   try {
     return realpathSync(root)
   } catch {
@@ -652,6 +739,27 @@ function corsFor(req) {
   return headers
 }
 
+/**
+ * Read a small JSON object from a POST body.
+ *
+ * Deliberately capped: every endpoint that uses it takes user-typed
+ * configuration, never media, so anything larger is a mistake or an attack.
+ */
+async function readJsonBody(req, limit = 64 * 1024) {
+  const announced = Number(req.headers['content-length'] ?? 0)
+  if (announced > limit) throw new Error('Request body is too large.')
+  const chunks = []
+  let bytes = 0
+  for await (const chunk of req) {
+    bytes += chunk.length
+    if (bytes > limit) throw new Error('Request body is too large.')
+    chunks.push(chunk)
+  }
+  const text = Buffer.concat(chunks).toString('utf8').trim()
+  if (!text) return {}
+  return JSON.parse(text)
+}
+
 // One HTTP server for both the speech proxy and the WebSocket upgrade.
 const http = await import('node:http')
 
@@ -719,6 +827,25 @@ const handleRequest = async (req, res) => {
 
   // RAM-aware Model Stack. GET is always read-only; POST is the explicit
   // user-triggered download action and runs as a tracked background job.
+  // What the one-click installer would download: the real asset names and
+  // sizes for this machine, read from the release itself. Cached for ten
+  // minutes, because this page is opened and re-opened and GitHub's API has
+  // opinions about that.
+  if (req.method === 'GET' && requestUrl.pathname === '/autopilot/runtime') {
+    const now = Date.now()
+    if (!RUNTIME_VARIANTS.at || now - RUNTIME_VARIANTS.at > 10 * 60 * 1000) {
+      const resolved = await resolveVariants({ platform: process.platform, arch: process.arch })
+      RUNTIME_VARIANTS.value = {
+        ...resolved,
+        rocmSuggested: rocmSuggested(),
+        plan: runtimeStatus(),
+      }
+      RUNTIME_VARIANTS.at = now
+    }
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify(RUNTIME_VARIANTS.value))
+  }
+
   if (req.method === 'GET' && requestUrl.pathname === '/autopilot') {
     const p = AUTOPILOT_PLAN
     const runtime = await modelSlotStatus()
@@ -727,12 +854,17 @@ const handleRequest = async (req, res) => {
       summary: planSummary(p),
       ram: {
         totalGb: +(p.budget.total / 1073741824).toFixed(2),
-        osGb: +(p.budget.os / 1073741824).toFixed(2),
-        appsGb: +(p.budget.apps / 1073741824).toFixed(2),
         modelsGb: +(p.budget.models / 1073741824).toFixed(2),
         effectiveModelGb: +(p.effectiveModelBytes / 1073741824).toFixed(2),
+        // Free RAM now (live) and free RAM when the plan was last made.
+        freeGb: +(availableRam() / 1073741824).toFixed(2),
         currentFreeGb: +(p.budget.free / 1073741824).toFixed(2),
+        unallocatedGb: +(p.budget.unallocated / 1073741824).toFixed(2),
+        sharePercent: p.budget.sharePercent,
+        capGb: p.budget.capGb,
+        allocationSource: p.budget.source,
       },
+      allocation: p.allocation ?? null,
       fits: Object.entries(p.choices).map(([id, rung]) => ({
         id,
         kind: rung.kind ?? 'ollama',
@@ -761,17 +893,131 @@ const handleRequest = async (req, res) => {
       maxResidentGb: +(p.maxResidentBytes / 1073741824).toFixed(2),
       notes: p.notes,
       catalog: autopilotLadder(),
-      tiers: tierProfiles(),
+      tiers: tierProfiles({ share: p.budget.share, capGb: p.budget.capGb }),
       ollama: Boolean(runtime.ollama),
       modelSlots: runtime.slots,
+      // What the setup page needs to know about the host it is installing onto,
+      // as opposed to what the planner decided. Probed here rather than in the
+      // page because only the bridge can look at the filesystem.
+      runtime: {
+        platform: process.platform,
+        arch: process.arch,
+        totalRamGb: +(totalmem() / 1073741824).toFixed(1),
+        diskFreeGb: diskFreeGb(),
+        ollamaInstalled: Boolean(programPath('ollama')),
+        downloadUrl: OLLAMA_DOWNLOAD.win32,
+        // The standalone build the page can fetch for a machine that has
+        // nothing yet: same binary, no installer, unpacked inside this repo.
+        // Read per request so a download that just finished shows up here.
+        portable: runtimeStatus(),
+      },
     }))
   }
 
+  // Live allocation control: how much of the free RAM the AI may use.
+  // Saving is explicit and user-triggered; the plan is rebuilt immediately so
+  // the next turn already routes to the model the new ceiling selects.
+  if (req.method === 'POST' && requestUrl.pathname === '/autopilot/config') {
+    let patch = {}
+    try {
+      patch = await readJsonBody(req, 64 * 1024)
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: String(error?.message ?? error) }))
+    }
+    if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: 'Send a JSON object with optional share and capGb.' }))
+    }
+    const unknown = Object.keys(patch).filter((key) => !['share', 'capGb', 'rescan'].includes(key))
+    if (unknown.length) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: false, error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
+    }
+    const writes = Object.hasOwn(patch, 'share') || Object.hasOwn(patch, 'capGb')
+    if (writes) {
+      const saved = await saveAllocation({ share: patch.share, capGb: patch.capGb })
+      if (!saved.ok) {
+        res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ ok: false, error: saved.error }))
+      }
+    }
+    // Always re-sample: rescan asks for a fresh look at free RAM, and any
+    // write deserves one so the panel never shows stale arithmetic.
+    const p = replanAutopilot()
+    console.log(`[jarvis] allocation ${p.budget.sharePercent}% of ${(p.budget.free / 1073741824).toFixed(2)} GB free → ${(p.budget.models / 1073741824).toFixed(2)} GB ceiling (${p.budget.source}${p.budget.capGb != null ? `, hard cap ${p.budget.capGb} GB` : ''})`)
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({
+      ok: true,
+      summary: planSummary(p),
+      changed: writes,
+      allocation: p.allocation,
+      ram: {
+        totalGb: +(p.budget.total / 1073741824).toFixed(2),
+        modelsGb: +(p.budget.models / 1073741824).toFixed(2),
+        effectiveModelGb: +(p.effectiveModelBytes / 1073741824).toFixed(2),
+        freeGb: +(availableRam() / 1073741824).toFixed(2),
+        currentFreeGb: +(p.budget.free / 1073741824).toFixed(2),
+        unallocatedGb: +(p.budget.unallocated / 1073741824).toFixed(2),
+        sharePercent: p.budget.sharePercent,
+        capGb: p.budget.capGb,
+        allocationSource: p.budget.source,
+      },
+      fits: Object.entries(p.choices).map(([id, rung]) => ({
+        id,
+        kind: rung.kind ?? 'ollama',
+        model: rung.model ?? rung.file,
+        fits: Boolean(rung.fits),
+        mode: rung.mode,
+        residentGb: +(rung.residentBytes / 1073741824).toFixed(2),
+      })),
+    }))
+  }
+
+  // The setup page. Hosted by the bridge so `npm run setup` can open it before
+  // anything else exists on the machine, and served over the bridge's own
+  // origin so the page's fetches back into the installer endpoints are allowed.
+  if (req.method === 'GET' && (requestUrl.pathname === '/install' || requestUrl.pathname === '/setup')) {
+    const html = installerPage({
+      platform: process.platform,
+      port: PORT,
+      hudUrl: requestUrl.searchParams.get('hud'),
+    })
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    return res.end(html)
+  }
+
   if (req.method === 'POST' && requestUrl.pathname === '/autopilot/install') {
+    // The setup page sends the stack it showed; the HUD sends nothing and gets
+    // the plan for this machine. A chosen rung is planned exactly as the
+    // catalogue plans it — same allocation, same ladder — so what the page
+    // displayed is what gets downloaded.
+    let request = {}
+    try {
+      request = await readJsonBody(req, 16 * 1024)
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
+    }
+    if (request === null || typeof request !== 'object' || Array.isArray(request)) request = {}
+    const unknown = Object.keys(request).filter((key) => key !== 'ramGb' && key !== 'runtime' && key !== 'runtimeVariant')
+    if (unknown.length) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
+    }
+    let planned = AUTOPILOT_PLAN
+    if (Object.hasOwn(request, 'ramGb')) {
+      const ramGb = Number(request.ramGb)
+      if (!Number.isFinite(ramGb) || ramGb < 0.5 || ramGb > 512) {
+        res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'ramGb must be a number between 0.5 and 512.' }))
+      }
+      planned = planRam({ total: ramGb * 1073741824, free: ramGb * 1073741824, gpuInfo: null })
+    }
     const active = [...AUTOPILOT_JOBS.values()].find((job) => job.state === 'running')
     if (active) {
       res.writeHead(202, { ...cors, 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ jobId: active.id, state: active.state }))
+      return res.end(JSON.stringify({ jobId: active.id, state: active.state, summary: planSummary(planned) }))
     }
     const job = {
       id: randomUUID(),
@@ -787,15 +1033,30 @@ const handleRequest = async (req, res) => {
     for (const [id, old] of AUTOPILOT_JOBS) {
       if (old.state !== 'running' && Date.now() - old.updatedAt > 30 * 60 * 1000) AUTOPILOT_JOBS.delete(id)
     }
-    void autopilotInstall({
-      dir: 'models',
-      planned: AUTOPILOT_PLAN,
-      onStep: (step) => {
-        job.progress = step
-        job.updatedAt = Date.now()
-        job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
-      },
-    }).then((result) => {
+    const onStep = (step) => {
+      job.progress = step
+      job.updatedAt = Date.now()
+      job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
+    }
+    void (async () => {
+      // One click means the runtime too. When the page asks for it, a machine
+      // with no Ollama at all gets the standalone build fetched into the repo
+      // and started before the first model pull — and a machine that already
+      // answers on the model port skips this in one line.
+      if (request.runtime === true) {
+        const variant = request.runtimeVariant === 'rocm' ? 'rocm' : request.runtimeVariant === 'auto' ? (rocmSuggested() ? 'rocm' : 'default') : 'default'
+        const ready = await ensureRuntime({ variant, onStep })
+        if (!ready.ok) {
+          const error = ready.error ?? 'the model runtime could not be started'
+          job.error = error
+          job.state = 'failed'
+          job.updatedAt = Date.now()
+          return null
+        }
+      }
+      return autopilotInstall({ dir: 'models', planned, onStep })
+    })().then((result) => {
+      if (result === null) return
       job.result = result.log
       const failed = result.log.filter((item) => !item.ok && !item.skipped).length
       job.state = failed ? (result.log.some((item) => item.ok && !item.skipped) ? 'partial' : 'failed') : 'completed'
@@ -806,7 +1067,7 @@ const handleRequest = async (req, res) => {
       job.updatedAt = Date.now()
     })
     res.writeHead(202, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ jobId: job.id, state: job.state }))
+    return res.end(JSON.stringify({ jobId: job.id, state: job.state, summary: planSummary(planned) }))
   }
 
   if (req.method === 'GET' && requestUrl.pathname === '/autopilot/install/status') {
@@ -1001,6 +1262,13 @@ server.listen(PORT)
 
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
 console.log(`[jarvis] max ${EFFORT} tool turns`)
+console.log(
+  `[jarvis] AI allocation ${AUTOPILOT_PLAN.budget.sharePercent}% of ` +
+    `${(AUTOPILOT_PLAN.budget.free / 1073741824).toFixed(1)} GB free = ` +
+    `${(AUTOPILOT_PLAN.budget.models / 1073741824).toFixed(1)} GB` +
+    `${AUTOPILOT_PLAN.budget.capGb != null ? ` (hard cap ${AUTOPILOT_PLAN.budget.capGb} GB)` : ''}` +
+    ` — change it in MODEL STACK or with JARVIS_RAM_SHARE`,
+)
 
 // The pipeline, named slot by slot. Printed because "which route answered
 // that" is a fair question; multiple routes may share one fitted model.
@@ -1053,7 +1321,7 @@ console.log(
 /**
  * One browser connection.
  *
- * Async because setting up the brain awaits real work — four in-process MCP
+ * Async because setting up the brain awaits real work — seven in-process MCP
  * servers to join and the user's own to start — and a bridge that accepted a
  * socket and then failed silently would leave the interface showing a connected
  * assistant with no tools. A failure here is logged and the socket closed, so
@@ -1127,7 +1395,7 @@ const handleConnection = async (socket) => {
   /**
    * Every tool this bridge can reach, as connected MCP clients.
    *
-   * Two kinds, and the split matters. The five JARVIS servers are built inside
+   * Two kinds, and the split matters. The seven JARVIS servers are built inside
    * this process and reach the browser through callbacks that close over this
    * socket, so they are per-connection — an in-memory transport joins each to a
    * client with no port and no subprocess. Everything else the user has
@@ -1155,6 +1423,12 @@ const handleConnection = async (socket) => {
     jarvis_eyes: visionServer(ask),
     // Read-only window inventory by default; acting tools exist only behind the write gate.
     jarvis_windows: windowsServer({ allowWrites: ALLOW_WRITES }),
+    // The command line. Programs are checked against an allowlist unless the
+    // user asked for the whole shell; the deny list holds in every mode.
+    jarvis_shell: shellServer({ allowWrites: ALLOW_WRITES }),
+    // The rest of the desktop: windows, pointer, keyboard and installed apps.
+    // Windows only, and acting tools are built only in write mode.
+    jarvis_desktop: desktopServer({ allowWrites: ALLOW_WRITES }),
   }
 
   for (const [name, server] of Object.entries(own)) {
@@ -1229,6 +1503,23 @@ const handleConnection = async (socket) => {
   const history = [{ role: 'system', content: SYSTEM_PROMPT }]
 
   /**
+   * The static prompt plus a live probe of this machine.
+   *
+   * The block is what turns "I cannot do that" from a reflex into a judgement:
+   * the model can see which programs exist, whether there is a display, how
+   * much disk and RAM are left, whether writes are on, and which local model
+   * slots are filled — so a plan it makes is a plan for this computer.
+   */
+  const systemPrompt = () => `${SYSTEM_PROMPT}
+
+${machineCard({
+    servers: [...clients.keys()],
+    slots: Object.entries(PIPELINE).map(([slot, spec]) => ({ slot, model: spec.model, fits: spec.fits })),
+    writes: ALLOW_WRITES,
+    quota: `${(AUTOPILOT_PLAN.budget.models / 1024 ** 3).toFixed(2)} GB (${AUTOPILOT_PLAN.budget.sharePercent}% of free RAM when the plan was made)`,
+  })}`
+
+  /**
    * Resolves when the turn in flight has actually finished.
    *
    * Waiting on an abort alone is not enough. It stops the request, but the last
@@ -1281,6 +1572,12 @@ const handleConnection = async (socket) => {
     abort = controller
     inTurn = true
     history.push({ role: 'user', content: text })
+
+    // The machine block is re-probed every turn rather than frozen at connect:
+    // RAM, disk, the program inventory and the tool list all change while the
+    // conversation runs, and planning against a stale fact is worse than not
+    // having it at all.
+    history[0] = { role: 'system', content: systemPrompt() }
 
     try {
       const said = await runTurn({

@@ -34,9 +34,15 @@ export const MODEL_URL = (
   process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
 ).replace(/\/+$/, '')
 
-/** One RAM plan is shared by chat, vision, coding and the diagnostics routes. */
+/**
+ * One RAM plan is shared by chat, vision, coding and the diagnostics routes.
+ *
+ * `let`, and reassigned by replanAutopilot(), so the bridge can follow a live
+ * allocation change without a restart. ESM importers see the new value because
+ * they read the live binding at call time.
+ */
 const AUTOPILOT = buildAutopilotPlan()
-export const AUTOPILOT_PLAN = AUTOPILOT
+export let AUTOPILOT_PLAN = AUTOPILOT
 
 /** Some servers want *something* in the header even with no auth. */
 const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
@@ -111,7 +117,34 @@ export const PIPELINE = Object.fromEntries(
 )
 
 /** The name the boot line and error messages lead with. */
-export const BRIDGE_MODEL_NAME = modelFor('chat')
+export let BRIDGE_MODEL_NAME = modelFor('chat')
+
+/**
+ * Re-plan against the current free RAM and the current allocation.
+ *
+ * Called when the user changes the share or the hard cap from MODEL STACK.
+ * Slots with a JARVIS_MODEL_* override keep that override; every other slot
+ * follows the new plan. The residency bookkeeping is left alone: a tag that
+ * stops being selected is unloaded by the existing queue on the next switch.
+ */
+export function replanAutopilot(options = {}) {
+  const next = buildAutopilotPlan(options)
+  AUTOPILOT_PLAN = next
+  for (const slot of Object.keys(SLOTS)) {
+    const override = process.env[`JARVIS_MODEL_${slot.toUpperCase()}`]
+    const chosen = next.choices?.[slot]
+    SLOTS[slot].model = override ?? (chosen?.fits ? chosen.model : null)
+    const entry = PIPELINE[slot]
+    if (entry) {
+      entry.model = modelFor(slot)
+      entry.fits = PINNED || override ? null : (chosen?.fits ?? false)
+      entry.residentBytes = chosen?.residentBytes ?? null
+      entry.unavailable = !modelFor(slot)
+    }
+  }
+  BRIDGE_MODEL_NAME = modelFor('chat')
+  return next
+}
 
 /** Tool-use attempts per question before giving up and answering in prose. */
 const MAX_TURNS = Number(process.env.JARVIS_MODEL_MAX_TURNS ?? 8)
@@ -398,6 +431,40 @@ const NARRATES_INSTEAD =
 const NARRATION_WINDOW = 48
 
 /**
+ * Giving up without looking.
+ *
+ * The mirror of the narration failure, and the one the user notices most: the
+ * machine is asked for something it could do in three different ways, and the
+ * answer is a fluent "I cannot do that" — no tool tried, no capability checked,
+ * no alternative offered. Nothing is broken and nothing is logged, so it reads
+ * as a limit of the assistant rather than a decision it made.
+ *
+ * Only the opening is tested, and only until the answer has committed to a
+ * direction. A refusal later in a sentence — "the encoder is missing, so I
+ * cannot convert it, but I can with the tools here" — is a plan, not a refusal.
+ */
+const DECLINES_ABILITY =
+  /\b(i (?:can(?:no|')t|cannot|am unable|am not able)|(?:it|that|this) (?:is|isn't|is not)? ?(?:not )?possible|impossible|unable to|there(?:'s| is) no way)\b/i
+
+/**
+ * What the second attempt is told.
+ *
+ * Pushed into the system message for that request only — the conversation
+ * itself keeps the original prompt, so the nudge cannot accumulate across
+ * turns.
+ */
+const DECLINE_NUDGE = `One correction before that answer stands: do not decline a task you have not checked this machine for. Check it now — the capability block above, command_info, desktop_capabilities, list_apps, list_processes — and if the task can be done at all, do it. If the exact thing cannot be done, do the nearest thing that can and say which trade you made. If a permission is off, say the permission is off, not that it is impossible. Only if nothing reaches the goal: keep the refusal, name the missing piece, and name what would unlock it. One sentence.`
+
+/** The same conversation with the correction added to its system message. */
+function withDeclineNudge(messages) {
+  const first = messages[0]
+  if (first?.role === 'system' && typeof first.content === 'string') {
+    return [{ ...first, content: `${first.content}\n\n${DECLINE_NUDGE}` }, ...messages.slice(1)]
+  }
+  return [{ role: 'system', content: DECLINE_NUDGE }, ...messages]
+}
+
+/**
  * Pick the model for this turn.
  *
  * Decided before anything is streamed, and that ordering is the whole design.
@@ -662,12 +729,16 @@ async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
   /** Tool calls, keyed by stream index — they arrive split across chunks. */
   const calls = new Map()
   /**
-   * The chat slot's opening tokens, held until it is clear it is answering
-   * rather than announcing. Only armed when tools are on offer: with no tools
-   * there is nothing to narrate, and holding back would be pure latency.
+   * The opening tokens, held until it is clear the answer is answering rather
+   * than announcing an action or declining one. Armed whenever tools are on
+   * offer: with no tools there is nothing to narrate, and no machine to check
+   * before a refusal. A few milliseconds of latency on the smallest rung buys
+   * the guarantee that neither failure is heard.
    */
-  const HOLD = slot === 'chat' && tools.length > 0
+  const HOLD = tools.length > 0
   let held = ''
+  /** Set once the opening is identified as a decision to give up. */
+  let declining = false
 
   for (;;) {
     const { done, value } = await reader.read()
@@ -696,15 +767,24 @@ async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
 
       if (typeof delta.content === 'string' && delta.content) {
         text += delta.content
-        if (HOLD && !calls.size) {
+        if (declining) {
+          // A refusal is still being read to the end so the turn has the whole
+          // answer in hand; none of it has been forwarded, so a checked answer
+          // can replace it without the user hearing both.
+        } else if (HOLD && !calls.size) {
           held += delta.content
           // Announced an action it has not taken. Stop reading: the answer is
           // worthless and the browser has heard none of it.
-          if (NARRATES_INSTEAD.test(held)) {
+          if (slot === 'chat' && NARRATES_INSTEAD.test(held)) {
             return { text: '', toolCalls: [], narrated: true }
           }
-          // Enough to tell it is a real answer — release and carry on.
-          if (held.length >= NARRATION_WINDOW) {
+          // Gave up without checking. Hold the rest silently; runTurn decides
+          // whether a checked answer replaces it.
+          if (DECLINES_ABILITY.test(held)) {
+            declining = true
+            held = ''
+          } else if (held.length >= NARRATION_WINDOW) {
+            // Enough to tell it is a real answer — release and carry on.
             onDelta?.(held)
             held = ''
           }
@@ -742,6 +822,8 @@ async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
   return {
     text,
     narrated: false,
+    // A refusal that turned into a tool call is not a refusal.
+    declined: declining && calls.size === 0,
     toolCalls: [...calls.values()]
       .filter((c) => c.name)
       .map((c) => ({ id: c.id, name: c.name, arguments: c.args })),
@@ -815,8 +897,13 @@ export async function runTurn({
    */
   let slot = pickModel(working)
 
+  /** Whether this turn has already shown the machine what it can do. */
+  let usedTool = false
+  /** Only one challenge per turn: past that, the refusal is the answer. */
+  let declineRetried = false
+
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const first = await streamChat({ messages: working, tools, signal, onDelta, slot })
+    let first = await streamChat({ messages: working, tools, signal, onDelta, slot })
 
     // The fast slot announced an action it never took. Nothing has been spoken
     // yet, so this costs the user a pause and nothing else — and it turns a
@@ -829,10 +916,26 @@ export async function runTurn({
       Object.assign(first, retry)
     }
 
+    // A refusal before a single check is the answer this project exists not to
+    // give. Ask once more with the machine's own facts pushed forward; the
+    // first answer was held, so the user hears whichever one is worth hearing.
+    if (first.declined && !usedTool && !declineRetried) {
+      declineRetried = true
+      const retry = await streamChat({ messages: withDeclineNudge(working), tools, signal, onDelta, slot })
+      if (retry.toolCalls.length > 0 || (retry.text.trim() && !retry.declined)) {
+        first = retry
+      } else if (first.text.trim()) {
+        // The second attempt gave up too, or said nothing. The first refusal
+        // stands, and it has not been spoken yet.
+        onDelta?.(first.text)
+      }
+    }
+
     const { text, toolCalls } = first
 
     // No tool call means the model is done, whatever else it said.
     if (!toolCalls.length) return text
+    usedTool = true
 
     // The assistant turn has to be recorded verbatim, including the tool calls
     // — the API rejects a tool message that does not follow the call it answers.

@@ -11,7 +11,11 @@
  * the tool it asks for, feeds the result back, and streams the final answer.
  * Any of those can be broken by a refactor that still type-checks.
  */
+import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocket } from 'ws'
 
 const PORT = 8791
@@ -33,6 +37,9 @@ process.env.JARVIS_MODEL_CHAT = CHAT
 process.env.JARVIS_MODEL_REASON = REASON
 process.env.JARVIS_MODEL_VISION = VISION
 process.env.JARVIS_ALLOW_NO_ORIGIN = '1'
+// Allocation changes made through the HTTP API must land in a throwaway file,
+// never in the developer's real models/ram-allocation.json.
+process.env.JARVIS_RAM_CONFIG = join(tmpdir(), `jarvis-smoke-ram-${process.pid}.json`)
 
 // --- the stub model server -------------------------------------------------
 let calls = 0
@@ -44,7 +51,13 @@ const asked = []
 let chatHits = 0
 /** Set when the chat slot narrates instead of acting. */
 let sawChatNarrate = false
+/** Set when the bridge challenged a refusal before speaking it. */
+let sawDeclineRetry = false
 let visionSawImage = false
+/** Tool names the model was offered, from the first request that carried any. */
+let offeredTools = null
+/** The system prompt the model was actually sent, once it carried the machine block. */
+let systemSeen = null
 let visionSawIntent = false
 let coderSawCombinedVisionPrompt = false
 let coderSawEnglishTranslation = false
@@ -129,7 +142,12 @@ const http = createServer((req, res) => {
     if (payload.model === REASON && /High-level English coding prompt: Debug the Python function/i.test(userText)) {
       coderSawEnglishTranslation = true
     }
+    const system = (payload.messages ?? []).find((message) => message.role === 'system' && typeof message.content === 'string' && message.content.includes('WHAT THIS MACHINE CAN DO'))
+    if (system && !systemSeen) systemSeen = system.content
     const askedForTool = (payload.tools ?? []).length > 0
+    if (askedForTool && !offeredTools) {
+      offeredTools = (payload.tools ?? []).map((tool) => tool?.function?.name).filter(Boolean)
+    }
     const hasToolResult = (payload.messages ?? []).some((m) => m.role === 'tool')
     const isChat = payload.model === CHAT
     const wantsTool = /screenshot/i.test(lastText(payload.messages))
@@ -139,6 +157,29 @@ const http = createServer((req, res) => {
       connection: 'keep-alive',
     })
     const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+
+    // A refusal is challenged once, with the capability block pushed forward.
+    // The stub refuses on the first ask and works with what it has on the
+    // second, which is the behaviour the bridge is supposed to force.
+    const nudged = (payload.messages ?? []).some(
+      (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('do not decline a task you have not checked'),
+    )
+    if (nudged && /convert this clip/i.test(lastText(payload.messages))) {
+      sawDeclineRetry = true
+      send({ choices: [{ delta: { content: 'The encoder is missing. ' } }] })
+      send({ choices: [{ delta: { content: 'I used what is here instead, sir.' } }] })
+      send({ choices: [{ finish_reason: 'stop' }] })
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    if (/convert this clip/i.test(lastText(payload.messages))) {
+      send({ choices: [{ delta: { content: 'I cannot convert that, sir.' } }] })
+      send({ choices: [{ finish_reason: 'stop' }] })
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
 
     // The chat slot's one chance to fail: narrate a tool call instead of
     // making it. This is the failure that is invisible — fluent, confident,
@@ -206,18 +247,61 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
   && autopilotData.tiers.every((tier) => {
     const slots = tier.slots
     if (!slots?.chat?.model || !slots?.reason?.model || !slots?.vision?.model) return false
-    const routeModelsOkay = tier.ramGb === 32
-      ? slots.chat.model === slots.reason.model && slots.chat.model !== slots.vision.model
-      : slots.chat.model === slots.vision.model && slots.vision.model === slots.reason.model
+    // Chat and coding always share a tag; vision shares it too whenever the
+    // allocation fits one multimodal model, and splits only when a larger
+    // text rung means vision must stay on its own native multimodal tag.
+    const routeModelsOkay = slots.chat.model === slots.reason.model
     return Object.values(slots).every((slot) => validTierStates.has(slot.state) && slot.fits === (slot.state === 'fits'))
       && routeModelsOkay
       && slots.vision.multimodal === true
       && ['fits', 'best-effort'].includes(slots.vision.state)
       && /abliterat/i.test(slots.vision.model)
   })
+const setupPage = await fetch(`http://localhost:${PORT}/install`).then((r) => (r.ok ? r.text() : null)).catch(() => null)
+const runtimeData = await fetch(`http://localhost:${PORT}/autopilot/runtime`).then((r) => r.json()).catch(() => null)
 const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
+  ['/autopilot reports the host facts the setup page installs against', (() => {
+    const runtime = autopilotData.runtime ?? {}
+    const portable = runtime.portable ?? {}
+    return ['platform', 'arch', 'ollamaInstalled', 'downloadUrl'].every((key) => runtime[key] !== undefined)
+      && (runtime.diskFreeGb === null || Number.isFinite(runtime.diskFreeGb))
+      && Number.isFinite(runtime.totalRamGb)
+      && typeof portable.supported === 'boolean' && typeof portable.present === 'boolean'
+      // On Windows there is an archive to offer; anywhere else the field is
+      // empty on purpose, because offering a Windows zip to a host that cannot
+      // unpack it would be the lie this project keeps refusing to tell.
+      && (portable.supported ? Boolean(portable.asset) : portable.asset === null)
+  })()],
+  ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('autopilot/install')],
+  ['/autopilot/runtime offers the real Windows archive the one-click install would fetch', (() => {
+    const variants = runtimeData?.variants ?? []
+    if (process.platform !== 'win32') {
+      // This runner is the Linux test host, not the product's target. It must
+      // claim no archive at all rather than a name it cannot use.
+      return variants.length === 0 && runtimeData?.plan?.supported === false && runtimeData.plan.path === null
+    }
+    const first = variants.find((variant) => variant.id === 'default')
+    return Boolean(first)
+      && typeof first.name === 'string' && first.name.length > 0
+      && first.url.startsWith('http')
+      && first.kind === 'zip'
+      && typeof first.sizeBytes === 'number'
+      && typeof runtimeData.plan?.path === 'string'
+  })()],
+  ['the one-click button asks the bridge for the runtime as well as the models', Boolean(setupPage) && setupPage.includes('runtime: true') && setupPage.includes('models/runtime')],
+  ['the setup page offers the official runtime download for this platform', Boolean(setupPage) && setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
+  ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {
+    const ram = autopilotData.ram ?? {}
+    const ramFields = ['totalGb', 'freeGb', 'currentFreeGb', 'unallocatedGb', 'modelsGb', 'effectiveModelGb', 'sharePercent']
+    return ramFields.every((field) => Number.isFinite(ram[field]))
+      && ram.sharePercent > 0 && ram.sharePercent <= 100
+      && ram.capGb === null
+      && ram.modelsGb <= ram.currentFreeGb + 0.01
+      && !Number.isFinite(ram.osGb) && !Number.isFinite(ram.appsGb)
+      && autopilotData.allocation?.sharePercent === ram.sharePercent
+  })()],
   ['/autopilot returns model-status slots and notes', Array.isArray(autopilotData.modelSlots) && Array.isArray(autopilotData.notes)],
   ['/autopilot includes 33 truthful RAM profiles with a multimodal vision slot in every tier', tierCatalogOkay],
   ['/autopilot exposes explicit model size and quant metadata for routed slots', (() => {
@@ -244,7 +328,7 @@ await new Promise((resolve, reject) => {
     if (f.type === 'ready') {
       sawReady = true
       console.log(`  ready  servers: ${JSON.stringify(f.servers)}`)
-      if (!sentAsk && Array.isArray(f.servers) && f.servers.length >= 5) {
+      if (!sentAsk && Array.isArray(f.servers) && f.servers.length >= 7) {
         sentAsk = true
         ws.send(JSON.stringify({ type: 'ask', id: 'q1', text: 'Take a screenshot of my phone.' }))
       }
@@ -273,7 +357,12 @@ const done = frames.find((f) => f.type === 'done')
 const readyServers = frames.filter((f) => f.type === 'ready').pop()?.servers ?? []
 const checks = [
   ['the bridge started and served a socket', sawReady],
-  ['all five built-in MCP servers connected', readyServers.length >= 5],
+  ['all seven built-in MCP servers connected', readyServers.length >= 7],
+  ['the command line and desktop servers are in the live union', readyServers.includes('jarvis_shell') && readyServers.includes('jarvis_desktop')],
+  ['the model is told what this machine can do, not left to imagine it', Boolean(systemSeen) && /CAPABILITY FIRST/.test(systemSeen) && systemSeen.includes(`Host: ${process.platform}`)],
+  ['the machine block states the write state truthfully', Boolean(systemSeen) && /Acting tools: off/.test(systemSeen) && /writes are off, so run_command is not registered/.test(systemSeen)],
+  ['the read-only shell and desktop tools reach the model', Boolean(offeredTools?.includes('mcp__jarvis_shell__command_info') && offeredTools?.includes('mcp__jarvis_shell__list_processes') && offeredTools?.includes('mcp__jarvis_desktop__desktop_capabilities') && offeredTools?.includes('mcp__jarvis_desktop__list_apps') && offeredTools?.includes('mcp__jarvis_desktop__list_windows'))],
+  ['no acting tool is offered while writes are off', Boolean(offeredTools) && !offeredTools.some((name) => /^(mcp__jarvis_shell__run_command|mcp__jarvis_desktop__(click|type_text|press_keys|launch_app|quit_app|move_mouse|scroll|focus_window|window_action))$/.test(name))],
   ['the model was asked twice (answer -> tool -> answer)', calls === 2],
   ['the model was offered the tools', sawToolAsk],
   ['the tool it asked for was announced on the HUD', tools.includes('mcp__jarvis__blade')],
@@ -297,7 +386,7 @@ await new Promise((resolve, reject) => {
   ws2.on('message', (raw) => {
     const f = JSON.parse(raw.toString())
     frames2.push(f)
-    if (f.type === 'ready' && !sentAsk2 && Array.isArray(f.servers) && f.servers.length >= 5) {
+    if (f.type === 'ready' && !sentAsk2 && Array.isArray(f.servers) && f.servers.length >= 7) {
       sentAsk2 = true
       ws2.send(JSON.stringify({ type: 'ask', id: 'q2', text: 'good evening' }))
     }
@@ -402,6 +491,64 @@ const memoryChecks = [
   ['the local Whisper reservation unloads the retained LLM before speech inference', !memoryTestError && JSON.stringify(memoryEvents.slice(5)) === JSON.stringify(expectedMemoryEvents.slice(5))],
 ]
 
+// --- phase three: a refusal is challenged before it is spoken ---------------
+// The machine can do this task with what it has. The first answer gives up
+// anyway, which is the failure that reads as a limit rather than a decision.
+// The bridge has to catch it, re-ask with the machine's facts, and only speak
+// the answer that checked.
+const ws3 = new WebSocket(`ws://localhost:${PORT}`)
+const frames3 = []
+let sentAsk3 = false
+try {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for frames (phase 3)')), 20000)
+    ws3.on('open', () => {})
+    ws3.on('message', (raw) => {
+      const f = JSON.parse(raw.toString())
+      frames3.push(f)
+      if (f.type === 'ready' && !sentAsk3 && Array.isArray(f.servers) && f.servers.length >= 7) {
+        sentAsk3 = true
+        ws3.send(JSON.stringify({ type: 'ask', id: 'q3', text: 'Convert this clip to mp4.' }))
+      }
+      if (f.type === 'done') { clearTimeout(timer); resolve() }
+      if (f.type === 'error') { clearTimeout(timer); reject(new Error(f.message)) }
+    })
+    ws3.on('error', reject)
+  })
+} catch (error) {
+  frames3.push({ type: 'error', message: error.message })
+}
+const spoken3 = frames3.filter((f) => f.type === 'text').map((f) => f.delta).join('')
+const declineChecks = [
+  ['a refusal with no check behind it was challenged', sawDeclineRetry],
+  ['the unchecked refusal never reached the browser', spoken3.length > 0 && !/cannot/i.test(spoken3)],
+  ['the answer that used what the machine has was spoken instead', /instead/.test(spoken3)],
+]
+
+// --- phase four: the terminal client ----------------------------------------
+// The same bridge, the same frames, no browser. This is the client people
+// debug with, so it has to show the answer and every tool the model ran.
+// Spawned asynchronously on purpose: the bridge is in this process, so a
+// blocking spawn would starve the very server the client is connecting to.
+const cli = await new Promise((resolve) => {
+  const child = spawn(process.execPath, ['scripts/cli.mjs', '--once', 'Take a screenshot of my phone.', '--url', `ws://localhost:${PORT}`], {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (chunk) => { stdout += chunk })
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const timer = setTimeout(() => { child.kill('SIGKILL') }, 30000)
+  child.once('close', (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }) })
+  child.once('error', (error) => { clearTimeout(timer); resolve({ status: -1, stdout, stderr: String(error.message) }) })
+})
+const cliChecks = [
+  ['the terminal client answers through the same bridge', cli.status === 0],
+  ['it shows the tool the model executed', /blade/.test(cli.stderr ?? '')],
+  ['it prints the final answer on stdout', /Good evening, sir\./.test(cli.stdout ?? '')],
+]
+
 // Routing is a pure function of the conversation, so it is checked directly
 // rather than inferred from what a stub happened to be sent. One case per slot,
 // because the middle one fails silently: a text model shown a photograph
@@ -469,7 +616,59 @@ if (multilingualFailed) failed += multilingualFailed
 if (visionFailed) failed += visionFailed
 if (memoryFailed) failed += memoryFailed
 
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory`)
+// The allocation is the user's to change at runtime. Drive the real endpoint
+// the MODEL STACK panel uses and confirm the plan follows the saved share.
+const allocationChecks = []
+try {
+  const before = await (await fetch(`http://localhost:${PORT}/autopilot`)).json()
+  const setResponse = await fetch(`http://localhost:${PORT}/autopilot/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ share: 50 }),
+  })
+  const setData = await setResponse.json()
+  const after = await (await fetch(`http://localhost:${PORT}/autopilot`)).json()
+  allocationChecks.push(
+    ['POST /autopilot/config accepts a share and reports the new ceiling', setResponse.ok === true && setData.ok === true && setData.ram.sharePercent === 50],
+    ['a 50% share halves the AI ceiling measured against free RAM', Math.abs(after.ram.modelsGb - after.ram.currentFreeGb * 0.5) < 0.05],
+    ['the saved share survives into the next plan read', after.ram.allocationSource === 'saved' && after.allocation?.share === 0.5],
+    ['the endpoint refuses a nonsense share instead of guessing', (await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ share: 900 }) })).status === 400],
+    ['the endpoint refuses unknown options', (await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nope: 1 }) })).status === 400],
+    ['RESCAN re-plans without changing the saved share', await (async () => {
+      const response = await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rescan: true }) })
+      const data = await response.json()
+      return response.ok && data.changed === false && data.ram.sharePercent === 50
+    })()],
+    ['the plan before the change was not already 50%', before.ram.sharePercent !== 50 || before.ram.allocationSource !== 'saved'],
+  )
+  await fetch(`http://localhost:${PORT}/autopilot/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ share: null, capGb: null }) })
+} catch (error) {
+  allocationChecks.push([`allocation endpoint error: ${error.message}`, false])
+}
+console.log('')
+let declineFailed = 0
+for (const [name, ok] of declineChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) declineFailed++
+}
+failed += declineFailed
+console.log('')
+let cliFailed = 0
+for (const [name, ok] of cliChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) cliFailed++
+}
+failed += cliFailed
+console.log('')
+let allocationFailed = 0
+for (const [name, ok] of allocationChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) allocationFailed++
+}
+failed += allocationFailed
+await rm(process.env.JARVIS_RAM_CONFIG, { force: true })
+
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${declineChecks.length - declineFailed}/${declineChecks.length} decline challenge, ${cliChecks.length - cliFailed}/${cliChecks.length} terminal client, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
 
 ws.close()
 ws2.close()
