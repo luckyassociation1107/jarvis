@@ -499,6 +499,33 @@ async function main() {
       console.log('')
       line(tick, 'Setup complete!')
       console.log('')
+
+      // Show the workflow roles this model fills
+      try {
+        const { detect } = await import('./hardware.mjs')
+        const { builtinCatalogue, recommendRoles } = await import('./model-sync.mjs')
+        const hw = detect()
+        const roles = recommendRoles(builtinCatalogue(), hw)
+
+        console.log('  JARVIS workflow — this model handles:')
+        console.log('  ──────────────────────────────────────')
+        console.log('')
+        for (const [key, role] of Object.entries(roles)) {
+          if (key === 'shared') continue
+          const rec = role.recommended
+          const fits = rec && rec.model === model
+          const marker = fits ? ' ← YOU PULLED THIS' : ''
+          console.log(`  ${role.role}`)
+          console.log(`    ${role.purpose}`)
+          console.log(`    ${role.note}${marker}`)
+          console.log('')
+        }
+        if (roles.shared) {
+          console.log('  ✓ One model fills all roles (Planner + Executor + Observer)')
+        }
+      } catch { /* hardware detection unavailable */ }
+
+      console.log('')
       console.log('  Next step:')
       console.log('    npm start              # launch JARVIS')
       console.log('')

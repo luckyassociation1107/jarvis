@@ -218,4 +218,58 @@ export async function syncModels({ onProgress = () => {} } = {}) {
   return merged
 }
 
+/**
+ * Recommend models for each role in the workflow.
+ *
+ * The JARVIS workflow has three roles:
+ *   - Planner (chat): multilingual, intent, plan creation → needs best quality
+ *   - Executor (reason): coding, tool use, execution → needs instruction following
+ *   - Observer (vision): image understanding → needs multimodal
+ *
+ * One model can fill multiple roles (the shared Qwen3.5 abliterated tags do).
+ * This function recommends which model(s) to pull based on available RAM.
+ */
+export function recommendRoles(catalogue, hw) {
+  const { ram, primaryGpu } = hw
+  const budget = ram.aiBudgetGb
+
+  // Filter to abliterated, sort by quality then size
+  const abliterated = catalogue
+    .filter((m) => /abliterat/i.test(m.model ?? ''))
+    .sort((a, b) => (b.quality - a.quality) || (b.params - a.params))
+
+  // Find the best model that fits
+  const fitsBudget = abliterated.filter((m) => m.residentGb <= budget)
+  const bestFit = fitsBudget[0] ?? abliterated[abliterated.length - 1] ?? null
+
+  // For multimodal (observer), prefer vision-capable models
+  const visionCapable = abliterated.filter((m) => m.multimodal)
+  const bestVision = visionCapable.filter((m) => m.residentGb <= budget)[0]
+    ?? visionCapable[visionCapable.length - 1] ?? null
+
+  return {
+    planner: {
+      role: 'Planner (Chat)',
+      purpose: 'Multilingual understanding, intent extraction, plan creation',
+      recommended: bestFit,
+      note: bestFit ? `${bestFit.model} — handles all languages, creates execution plans` : 'no model fits',
+    },
+    executor: {
+      role: 'Executor (Reason)',
+      purpose: 'Code execution, tool use, task completion',
+      recommended: bestFit, // Usually the same model
+      note: bestFit ? `${bestFit.model} — executes plans, writes code, calls tools` : 'no model fits',
+    },
+    observer: {
+      role: 'Observer (Vision)',
+      purpose: 'Image understanding, screenshot reading, visual feedback',
+      recommended: bestVision,
+      note: bestVision
+        ? `${bestVision.model} — reads screenshots, camera photos, UI elements`
+        : 'no multimodal model fits — vision disabled',
+    },
+    shared: bestFit === bestVision,
+  }
+}
+
 export default { builtinCatalogue, syncModels }

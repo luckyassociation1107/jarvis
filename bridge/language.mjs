@@ -16,6 +16,7 @@
  */
 
 import { complete } from './local-llm.mjs'
+import { PLANNER_SYSTEM } from './workflow.mjs'
 
 const SLOT = 'chat'
 
@@ -27,41 +28,23 @@ const KNOWN = {
 
 const INTENTS = new Set(['launch', 'close', 'search', 'system', 'media', 'vision', 'code', 'chat'])
 
-const SYSTEM = `You are JARVIS's multilingual intent extractor and prompt-preparation stage.
-
-The user may write or speak in any language. Understand the full request, identify
-its language and intent, and reply with one JSON object only—no markdown or prose:
-{
-  "language": "<ISO 639-1 code of the source language>",
-  "english": "<faithful English translation of the user's words>",
-  "intent": "<one of: launch, close, search, system, media, vision, code, chat>",
-  "target": "<the app, file, object or subject, or empty string>",
-  "prompt": "<a clear high-level English instruction for the next model>",
-  "confidence": <number from 0.0 to 1.0>
-}
-
-Rules:
-- Preserve names, numbers, constraints and the user's actual goal. Do not invent
-  requirements or claim the task has already been completed.
-- Choose code when the user asks to create, edit, explain, debug, test or review
-  software. The prompt for code must be suitable for an English-only coding
-  model: state the desired outcome, relevant constraints and expected output.
-  Expand unclear phrasing only conservatively; mark missing details as questions
-  instead of making them up.
-- For other intents, prompt is a concise, actionable English restatement—not an
-  answer and not a more ambitious task than the user requested.
-- "chrome close cheyyu" means close Chrome. A normal greeting is chat.
-- Do not claim to see an image. The separate vision stage will describe pixels.
-- If a sentence is ambiguous, preserve that uncertainty and lower confidence.`
+// The planner system prompt — imported from workflow.mjs
+// It produces structured execution plans, not just intent tags.
+const SYSTEM = PLANNER_SYSTEM
 
 /**
- * Extract intent, translate faithfully, and prepare the downstream English prompt.
- * @returns {Promise<{language:string|null,english:string,intent:string,target:string,prompt:string,confidence:number,raw:boolean}>}
+ * Extract intent and create an execution plan.
+ *
+ * The planner model returns a structured plan with steps. We parse it
+ * and also maintain backward-compatible fields (english, intent, prompt)
+ * so existing callers still work.
+ *
+ * @returns {Promise<{language:string|null,english:string,intent:string,target:string,prompt:string,confidence:number,raw:boolean,plan:Array|null,response_to_user:string}>}
  */
 export async function extractIntent(text) {
   const trimmed = String(text ?? '').trim()
   if (!trimmed) {
-    return { language: null, english: '', intent: 'chat', target: '', prompt: '', confidence: 0, raw: true }
+    return { language: null, english: '', intent: 'chat', target: '', prompt: '', confidence: 0, raw: true, plan: null, response_to_user: '' }
   }
 
   let out
@@ -69,33 +52,68 @@ export async function extractIntent(text) {
     out = await complete(SLOT, [
       { role: 'system', content: SYSTEM },
       { role: 'user', content: trimmed },
-    ], { maxTokens: 500 })
+    ], { maxTokens: 700 })
   } catch {
-    return { language: null, english: trimmed, intent: 'chat', target: '', prompt: trimmed, confidence: 0, raw: true }
+    return { language: null, english: trimmed, intent: 'chat', target: '', prompt: trimmed, confidence: 0, raw: true, plan: null, response_to_user: '' }
   }
 
   const parsed = parseJson(out)
   if (!parsed) {
-    return { language: null, english: trimmed, intent: 'chat', target: '', prompt: trimmed, confidence: 0, raw: true }
+    return { language: null, english: trimmed, intent: 'chat', target: '', prompt: trimmed, confidence: 0, raw: true, plan: null, response_to_user: '' }
   }
 
   const language = normaliseLanguage(parsed.language)
-  const intent = INTENTS.has(parsed.intent) ? parsed.intent : 'chat'
   const english = typeof parsed.english === 'string' && parsed.english.trim()
     ? parsed.english.trim()
-    : trimmed
+    : typeof parsed.understanding === 'string' && parsed.understanding.trim()
+      ? parsed.understanding.trim()
+      : trimmed
+
+  // New planner format: has a plan array
+  const plan = Array.isArray(parsed.plan) ? parsed.plan : null
+
+  // Derive intent from plan actions if not explicitly set
+  let intent = INTENTS.has(parsed.intent) ? parsed.intent : null
+  if (!intent && plan) {
+    intent = deriveIntentFromPlan(plan)
+  }
+  if (!intent) intent = 'chat'
+
   const prompt = typeof parsed.prompt === 'string' && parsed.prompt.trim()
     ? parsed.prompt.trim()
-    : english
+    : plan
+      ? plan.map((s) => `Step ${s.step}: ${s.action}${s.detail ? ` — ${s.detail}` : ''}`).join('\n')
+      : english
+
+  const responseToUser = typeof parsed.response_to_user === 'string' && parsed.response_to_user.trim()
+    ? parsed.response_to_user.trim()
+    : ''
+
   return {
     language,
     english,
     intent,
-    target: typeof parsed.target === 'string' ? parsed.target.trim() : '',
+    target: typeof parsed.target === 'string' ? parsed.target.trim() : (plan?.[0]?.detail ?? ''),
     prompt,
-    confidence: clamp(Number(parsed.confidence) || 0),
+    confidence: plan ? Math.min(1, Math.max(0.5, Number(parsed.confidence) || 0.8)) : clamp(Number(parsed.confidence) || 0),
     raw: false,
+    plan,
+    response_to_user: responseToUser,
+    tools_needed: Array.isArray(parsed.tools_needed) ? parsed.tools_needed : [],
   }
+}
+
+/** Derive intent category from plan actions. */
+function deriveIntentFromPlan(plan) {
+  const actions = plan.map((s) => String(s.action ?? '').toLowerCase()).join(' ')
+  if (/open_app|launch|start_app/.test(actions)) return 'launch'
+  if (/close_app|close|quit|kill/.test(actions)) return 'close'
+  if (/search|google|find|look_up/.test(actions)) return 'search'
+  if (/play|pause|stop|next|prev|volume|media|song|video/.test(actions)) return 'media'
+  if (/screenshot|camera|photo|image|vision|screen/.test(actions)) return 'vision'
+  if (/code|write|edit|debug|build|compile|function|script/.test(actions)) return 'code'
+  if (/system|settings|battery|wifi|bluetooth|notification/.test(actions)) return 'system'
+  return 'chat'
 }
 
 /** Translate text to English without using it as an answer. */
