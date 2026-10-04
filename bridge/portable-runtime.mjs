@@ -851,11 +851,6 @@ export async function startRuntime({ bin, url = 'http://localhost:11434', models
   }
 }
 
-/** The child this process started, if any. Exported so a host can stop it. */
-export function servedRuntime() {
-  return served
-}
-
 /** Stop the runtime this process started. */
 export function stopRuntime() {
   if (!served || served.exitCode !== null || served.signalCode !== null) return false

@@ -46,6 +46,16 @@ import {
 } from '../bridge/portable-runtime.mjs'
 
 const root = mkdtempSync(join(tmpdir(), 'jarvis-runtime-'))
+// A failed assertion exits before the tidy-up at the bottom of this file, so the
+// scratch tree is also removed on exit. Nothing is left in the temp directory by
+// a test run that fails — that is exactly when nobody is looking.
+process.on('exit', () => {
+  try {
+    rmSync(root, { recursive: true, force: true })
+  } catch {
+    /* the OS will get it */
+  }
+})
 const served = join(root, 'served')
 mkdirSync(served, { recursive: true })
 

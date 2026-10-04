@@ -303,9 +303,9 @@ print the setup-page pointer. Use `--no-launch` or `-NoLaunch` to finish
 build/model checks without starting the local web servers.
 
 For manual workflows, `npm ci`, `npm run build`, `npm run doctor`,
-`npm run setup`, and `npm start` are separate commands. `npm run models:install`
-still exists for scripted installs and the test suite, but no build script calls
-it. The browser STT/TTS choices default to RAM autopilot; Kokoro speech assets
+`npm run setup`, and `npm start` are separate commands. `npm run models:plan` and
+`npm run models:install` still exist for scripted installs (`models:plan` is what
+`npm run test:installers` drives), but no build script calls them. The browser STT/TTS choices default to RAM autopilot; Kokoro speech assets
 are fetched by the browser on first use when selected. Chrome or Edge still
 needs to be installed for the best microphone experience; the setup page does
 not replace the user's browser.

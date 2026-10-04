@@ -181,8 +181,9 @@ and one button does the whole job: runtime first, then the stack you picked,
 streaming each step. It is served by the bridge itself, same-origin with those
 endpoints, so Node alone is enough. The system installer stays an alternative
 for anyone who wants a managed Ollama; it is never run for you. The server-side
-pieces stay apart: `npm run doctor` reports, `npm run setup` hosts the page,
-`npm run models:install` is the scripted download path used by tests.
+pieces stay apart: `npm run doctor` reports, `npm run setup` hosts the page, and
+`npm run models:plan` / `npm run models:install` remain the scripted path (the
+planner is exercised by `npm run test:installers`).
 
 The platform scripts still exist and no longer install anything themselves:
 

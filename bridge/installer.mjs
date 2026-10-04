@@ -19,7 +19,8 @@
 export const OLLAMA_DOWNLOAD = Object.freeze({
   win32: 'https://ollama.com/download/OllamaSetup.exe',
   darwin: 'https://ollama.com/download/Ollama.dmg',
-  linux: 'https://ollama.com/download/ollama-linux-amd64.tgz',
+  // The Linux archive name changes with the release format, so link the page.
+  linux: 'https://ollama.com/download',
 })
 
 /** The one-line command for the platforms where a package manager is normal. */
