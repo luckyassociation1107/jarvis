@@ -698,6 +698,68 @@ export const SOCIAL = {
 /* ──────────────── System / Window Controls ──────────────────────────── */
 
 export const SYSTEM = {
+  // ── App launching ──
+  openApp: {
+    name: 'Open Application',
+    description: 'Open any application by name',
+    aliases: ['open', 'launch', 'start', 'run', 'open cheyyu', 'start cheyyu', 'run cheyyu'],
+    voicePatterns: [
+      /open\s+(.+)/i,
+      /launch\s+(.+)/i,
+      /start\s+(.+)/i,
+      /run\s+(.+)/i,
+      /(.+)\s*open\s*cheyyu/i,
+      /(.+)\s*start\s*cheyyu/i,
+      /(.+)\s*launch\s*cheyyu/i,
+    ],
+    execute: 'system_open_app',
+    params: ['appName'],
+  },
+  installApp: {
+    name: 'Install Application',
+    description: 'Install an application',
+    aliases: ['install', 'install cheyyu'],
+    voicePatterns: [
+      /install\s+(.+)/i,
+      /(.+)\s*install\s*cheyyu/i,
+    ],
+    execute: 'system_install_app',
+    params: ['appName'],
+  },
+  killApp: {
+    name: 'Kill Application',
+    description: 'Force close an application',
+    aliases: ['kill', 'force close', 'kill app', 'kill cheyyu'],
+    voicePatterns: [
+      /kill\s+(.+)/i,
+      /force\s*close\s+(.+)/i,
+      /(.+)\s*kill\s*cheyyu/i,
+    ],
+    execute: 'system_kill_app',
+    params: ['appName'],
+  },
+  listApps: {
+    name: 'List Applications',
+    description: 'List installed applications',
+    aliases: ['list apps', 'show apps', 'what apps', 'apps list'],
+    voicePatterns: [
+      /(?:list|show)\s*(?:all\s*)?(?:installed\s*)?apps?/i,
+      /what\s*apps?\s*(?:are\s*)?(?:installed|available)/i,
+      /apps?\s*list/i,
+    ],
+    execute: 'system_list_apps',
+  },
+  recentApps: {
+    name: 'Recent Applications',
+    description: 'Show recently used applications',
+    aliases: ['recent apps', 'recently used', 'last apps'],
+    voicePatterns: [
+      /recent\s*(?:apps?|applications?)/i,
+      /(?:recently|last)\s*used/i,
+    ],
+    execute: 'system_recent_apps',
+  },
+  // ── Window management ──
   minimize: {
     name: 'Minimize',
     description: 'Minimize current window',
@@ -734,6 +796,19 @@ export const SYSTEM = {
     execute: 'system_switch_window',
     params: ['appName'],
   },
+  splitScreen: {
+    name: 'Split Screen',
+    description: 'Put two apps side by side',
+    aliases: ['split screen', 'side by side', 'split'],
+    voicePatterns: [
+      /split\s*screen/i,
+      /side\s*by\s*side/i,
+      /split\s+(.+)\s+and\s+(.+)/i,
+    ],
+    execute: 'system_split_screen',
+    params: ['app1', 'app2'],
+  },
+  // ── System info ──
   notifications: {
     name: 'Notifications',
     description: 'Show notifications',
@@ -807,6 +882,73 @@ export const SYSTEM = {
     aliases: ['sleep', 'sleep mode'],
     voicePatterns: [/sleep\s*(?:mode)?/i],
     execute: 'system_sleep',
+  },
+  shutdown: {
+    name: 'Shutdown',
+    description: 'Shutdown the computer',
+    aliases: ['shutdown', 'shut down', 'power off', 'shutdown cheyyu'],
+    voicePatterns: [/shutdown/i, /shut\s*down/i, /power\s*off/i],
+    execute: 'system_shutdown',
+  },
+  restart: {
+    name: 'Restart',
+    description: 'Restart the computer',
+    aliases: ['restart', 'reboot', 'restart cheyyu'],
+    voicePatterns: [/restart/i, /reboot/i],
+    execute: 'system_restart',
+  },
+  terminal: {
+    name: 'Terminal',
+    description: 'Open terminal/command prompt',
+    aliases: ['terminal', 'command prompt', 'cmd', 'shell', 'terminal open'],
+    voicePatterns: [/terminal/i, /command\s*prompt/i, /\bcmd\b/i, /shell/i],
+    execute: 'system_terminal',
+  },
+  settings: {
+    name: 'Settings',
+    description: 'Open system settings',
+    aliases: ['settings', 'preferences', 'settings open', 'system settings'],
+    voicePatterns: [/settings?/i, /preferences?/i, /system\s*settings?/i],
+    execute: 'system_settings',
+  },
+  fileManager: {
+    name: 'File Manager',
+    description: 'Open file manager/explorer',
+    aliases: ['file manager', 'files', 'explorer', 'finder', 'files open'],
+    voicePatterns: [/(?:file\s*)?(?:manager|explorer|finder)\s*(?:open)?/i, /\bfiles?\b\s*(?:open)?/i],
+    execute: 'system_file_manager',
+  },
+  calculator: {
+    name: 'Calculator',
+    description: 'Open calculator',
+    aliases: ['calculator', 'calc', 'calculator open'],
+    voicePatterns: [/calculator/i, /\bcalc\b/i],
+    execute: 'system_calculator',
+  },
+  screenshot: {
+    name: 'System Screenshot',
+    description: 'Take a system screenshot',
+    aliases: ['screenshot', 'screen capture', 'take screenshot', 'photo teesu'],
+    voicePatterns: [/screenshot/i, /screen\s*(?:shot|capture)/i, /photo\s*teesu/i],
+    execute: 'system_screenshot',
+  },
+  camera: {
+    name: 'Camera',
+    description: 'Open camera app',
+    aliases: ['camera', 'camera open', 'camera on'],
+    voicePatterns: [/camera\s*(?:open|on|app)?/i],
+    execute: 'system_camera',
+  },
+  search: {
+    name: 'System Search',
+    description: 'Search for apps, files, settings',
+    aliases: ['search', 'find', 'search for'],
+    voicePatterns: [
+      /search\s*(?:for\s*)?(.+)\s*(?:on\s*(?:the\s*)?(?:system|computer|pc))?/i,
+      /find\s+(.+)\s*(?:on\s*(?:the\s*)?(?:system|computer|pc))?/i,
+    ],
+    execute: 'system_search',
+    params: ['query'],
   },
 }
 
