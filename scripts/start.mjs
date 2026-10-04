@@ -12,6 +12,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
+import { openBrowser } from './open-browser.mjs'
 import { plan as planRam } from '../bridge/autopilot.mjs'
 import { vendorWasm } from './vendor-mediapipe.mjs'
 import {
@@ -25,6 +26,7 @@ import {
 } from './ollama-endpoints.mjs'
 
 const writes = process.argv.includes('--writes')
+const noOpen = process.argv.includes('--no-open')
 
 // A dim label per process, so the interleaved logs stay readable.
 const paint = (tag, colour) => (line) =>
@@ -181,6 +183,40 @@ await startOllamaIfNeeded()
 
 console.log('\nJ.A.R.V.I.S. starting — the brain and the face.\n')
 run('bridge', 'node', ['bridge/server.mjs'], '36', bridgeEnv)
+
+/**
+ * Installation is a page now, not a flag.
+ *
+ * When the bridge comes up without a complete stack — Ollama not running, or a
+ * model the plan chose not on disk — open the setup page so the choice and the
+ * one click are in front of the user rather than something they have to know
+ * about. Silent when the stack is already there, and skippable with --no-open.
+ */
+async function offerSetup() {
+  if (noOpen) return
+  const bridgePort = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
+  const hud = `http://localhost:${process.env.PORT ?? 5173}`
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline && !stopping) {
+    try {
+      const response = await fetch(`http://localhost:${bridgePort}/autopilot`, { signal: AbortSignal.timeout(1200) })
+      if (response.ok) {
+        const plan = await response.json()
+        const wanted = (plan.modelSlots ?? []).filter((slot) => slot.model)
+        const incomplete = wanted.some((slot) => slot.state !== 'ready')
+        if (!plan.ollama || incomplete) {
+          const url = `http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`
+          console.log(`\n  No complete model stack yet. Choose one in the setup page:\n    ${url}\n`)
+          openBrowser(url)
+        }
+        return
+      }
+    } catch { /* the bridge is still binding its port */ }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+}
+
+void offerSetup()
 // npm is a shell script on most systems; call the vite binary directly so we do
 // not need shell:true (which would break the argument handling above).
 run('face', process.execPath, ['node_modules/vite/bin/vite.js'], '35', {})

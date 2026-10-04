@@ -21,10 +21,10 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, withLocalSpeechModel, replanAutopilot } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, withLocalSpeechModel, replanAutopilot } from './local-llm.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
-import { availableRam, install as autopilotInstall, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
+import { availableRam, install as autopilotInstall, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -35,11 +35,12 @@ import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
 import { windowsServer } from './windows.mjs'
-import { shellServer } from './shell.mjs'
+import { programPath, shellServer } from './shell.mjs'
 import { machineCard } from './capability.mjs'
+import { OLLAMA_DOWNLOAD, installerPage } from './installer.mjs'
 import { desktopServer } from './desktop.mjs'
-import { homedir, tmpdir } from 'node:os'
-import { readFileSync, realpathSync } from 'node:fs'
+import { homedir, tmpdir, totalmem } from 'node:os'
+import { readFileSync, realpathSync, statfsSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
@@ -95,6 +96,22 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 const isDevPort = (port) =>
   (port >= 5173 && port <= 5199) || (port >= 4173 && port <= 4199)
 
+/**
+ * Free space on the volume the models land on.
+ *
+ * Read straight from statfs rather than shelling out to `df`, because this is
+ * shown to the user before they commit to a multi-gigabyte download and it has
+ * to work on a machine with nothing installed yet.
+ */
+function diskFreeGb() {
+  try {
+    const fs = statfsSync(homedir())
+    return +((fs.bavail * fs.bsize) / 1073741824).toFixed(1)
+  } catch {
+    return null
+  }
+}
+
 function originAllowed(origin) {
   if (!origin) return ALLOW_NO_ORIGIN
   if (EXTRA_ORIGINS.has(origin.replace(/\/+$/, ''))) return true
@@ -107,7 +124,11 @@ function originAllowed(origin) {
   if (ALLOW_ARENA_PREVIEW && url.protocol === 'https:' && url.hostname.endsWith('.e2b.app')) return true
   if (url.protocol !== 'http:') return false
   if (!LOCAL_HOSTS.has(url.hostname)) return false
-  return isDevPort(Number(url.port))
+  // The bridge's own port is allowed because the setup page is served from it
+  // and posts back to it, and because a terminal client has nowhere else to
+  // come from. It is still loopback on the port this process owns, so a page
+  // on another origin gains nothing.
+  return Number(url.port) === PORT || isDevPort(Number(url.port))
 }
 
 /**
@@ -852,6 +873,17 @@ const handleRequest = async (req, res) => {
       tiers: tierProfiles({ share: p.budget.share, capGb: p.budget.capGb }),
       ollama: Boolean(runtime.ollama),
       modelSlots: runtime.slots,
+      // What the setup page needs to know about the host it is installing onto,
+      // as opposed to what the planner decided. Probed here rather than in the
+      // page because only the bridge can look at the filesystem.
+      runtime: {
+        platform: process.platform,
+        arch: process.arch,
+        totalRamGb: +(totalmem() / 1073741824).toFixed(1),
+        diskFreeGb: diskFreeGb(),
+        ollamaInstalled: Boolean(programPath('ollama')),
+        downloadUrl: OLLAMA_DOWNLOAD[process.platform] ?? OLLAMA_DOWNLOAD.linux,
+      },
     }))
   }
 
@@ -915,11 +947,50 @@ const handleRequest = async (req, res) => {
     }))
   }
 
+  // The setup page. Hosted by the bridge so `npm run setup` can open it before
+  // anything else exists on the machine, and served over the bridge's own
+  // origin so the page's fetches back into the installer endpoints are allowed.
+  if (req.method === 'GET' && (requestUrl.pathname === '/install' || requestUrl.pathname === '/setup')) {
+    const html = installerPage({
+      platform: process.platform,
+      port: PORT,
+      hudUrl: requestUrl.searchParams.get('hud'),
+    })
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    return res.end(html)
+  }
+
   if (req.method === 'POST' && requestUrl.pathname === '/autopilot/install') {
+    // The setup page sends the stack it showed; the HUD sends nothing and gets
+    // the plan for this machine. A chosen rung is planned exactly as the
+    // catalogue plans it — same allocation, same ladder — so what the page
+    // displayed is what gets downloaded.
+    let request = {}
+    try {
+      request = await readJsonBody(req, 16 * 1024)
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
+    }
+    if (request === null || typeof request !== 'object' || Array.isArray(request)) request = {}
+    const unknown = Object.keys(request).filter((key) => key !== 'ramGb')
+    if (unknown.length) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
+    }
+    let planned = AUTOPILOT_PLAN
+    if (Object.hasOwn(request, 'ramGb')) {
+      const ramGb = Number(request.ramGb)
+      if (!Number.isFinite(ramGb) || ramGb < 0.5 || ramGb > 512) {
+        res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'ramGb must be a number between 0.5 and 512.' }))
+      }
+      planned = planRam({ total: ramGb * 1073741824, free: ramGb * 1073741824, gpuInfo: null })
+    }
     const active = [...AUTOPILOT_JOBS.values()].find((job) => job.state === 'running')
     if (active) {
       res.writeHead(202, { ...cors, 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ jobId: active.id, state: active.state }))
+      return res.end(JSON.stringify({ jobId: active.id, state: active.state, summary: planSummary(planned) }))
     }
     const job = {
       id: randomUUID(),
@@ -937,7 +1008,7 @@ const handleRequest = async (req, res) => {
     }
     void autopilotInstall({
       dir: 'models',
-      planned: AUTOPILOT_PLAN,
+      planned,
       onStep: (step) => {
         job.progress = step
         job.updatedAt = Date.now()
@@ -954,7 +1025,7 @@ const handleRequest = async (req, res) => {
       job.updatedAt = Date.now()
     })
     res.writeHead(202, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ jobId: job.id, state: job.state }))
+    return res.end(JSON.stringify({ jobId: job.id, state: job.state, summary: planSummary(planned) }))
   }
 
   if (req.method === 'GET' && requestUrl.pathname === '/autopilot/install/status') {

@@ -241,6 +241,37 @@ for (const name of ['launch_app', 'quit_app', 'focus_window', 'window_action', '
   assert.ok(writeDesktop.includes(name), `write mode registers ${name}`)
 }
 
+// --- the setup page and the terminal client --------------------------------
+
+const { OLLAMA_DOWNLOAD, installerPage } = await import('../bridge/installer.mjs')
+const setupPage = installerPage({ platform: 'win32', port: 8787, hudUrl: 'http://localhost:5173' })
+assert.ok(setupPage.startsWith('<!doctype html>'), 'the setup page is a standalone document')
+assert.ok(setupPage.includes('J.A.R.V.I.S'), 'it is branded')
+assert.ok(setupPage.includes(OLLAMA_DOWNLOAD.win32), 'it links the official installer for the platform it was rendered for')
+assert.ok(setupPage.includes('http://localhost:5173'), 'it carries the HUD link when the host script knows it')
+assert.ok(setupPage.includes('ramGb: state.selected'), 'the one button installs the stack that is selected')
+assert.ok(setupPage.includes('autopilot/install'), 'it drives the installer endpoints on the bridge that served it')
+assert.ok(!/<script[^>]+src=|<link[^>]+href="https?:/.test(setupPage), 'it loads nothing from the network — a setup page that needs a CDN is useless on a fresh machine')
+assert.ok(!setupPage.includes('undefined'), 'no field is rendered as undefined')
+const linuxPage = installerPage({ platform: 'linux', port: 8787 })
+assert.ok(linuxPage.includes('install.sh'), 'the Linux page shows the official one-line installer')
+assert.ok(!linuxPage.includes('hud='), 'without a known HUD there is no dead link')
+
+const cli = await import('../scripts/cli.mjs')
+assert.equal(cli.toolLabel('mcp__jarvis_shell__run_command'), 'shell ▸ run_command', 'tool names are shown as server and action')
+assert.equal(cli.toolLabel('mcp__jarvis__blade'), 'jarvis ▸ blade', 'a server with no suffix still reads well')
+assert.equal(cli.toolLabel('plain'), 'plain', 'a name that is not namespaced is left alone')
+assert.equal(cli.describeFrame({ type: 'tool', name: 'mcp__jarvis_desktop__click' }), '⚙ desktop ▸ click', 'an execution is shown as an execution')
+assert.equal(cli.errorLine('boom'), '! boom', 'errors are shown as errors')
+assert.equal(cli.errorLine(), '! unknown error', 'an error with no message still says something true')
+assert.equal(cli.describeFrame({ type: 'text', delta: 'hello' }), null, 'streamed words are not formatted as events')
+assert.deepEqual(cli.parseArgs(['--once', 'hi', '--no-color']), { once: 'hi', url: null, color: false }, 'one-shot mode parses')
+assert.equal(cli.parseArgs(['--url', 'ws://host:1']).url, 'ws://host:1', 'the bridge URL can be overridden')
+
+const { openBrowser } = await import('../scripts/open-browser.mjs')
+assert.equal(openBrowser('http://localhost:1', { env: { JARVIS_NO_BROWSER: '1' } }), false, 'JARVIS_NO_BROWSER keeps every browser shut')
+assert.equal(openBrowser('http://localhost:1', { env: { CI: '1' } }), false, 'a CI machine is never made to open a page')
+
 // --- what the model is told about this machine -----------------------------
 
 const capFacts = {
@@ -293,7 +324,9 @@ assert.ok(['windows', 'aqua', 'x11', 'wayland', 'headless'].includes(live.sessio
 assert.ok(Array.isArray(live.installed) && live.installed.length > 0, 'a developer machine has at least one of the probed programs')
 assert.ok(live.diskFreeGb === null || live.diskFreeGb > 0, 'disk headroom is reported or omitted')
 assert.ok(machineCard().startsWith('WHAT THIS MACHINE CAN DO'), 'machineCard is the probe and the renderer in one step')
-assert.ok(summariseCapabilities(gatherCapabilities()) === summariseCapabilities(gatherCapabilities()), 'the probe is stable within its cache window')
+// Free RAM is deliberately live, so stability is asserted on the part that is
+// cached — the program names resolved off PATH — not on the numbers that move.
+assert.deepEqual(gatherCapabilities().installed, gatherCapabilities().installed, 'the probe is stable within its cache window')
 assert.ok(probePrograms('darwin').includes('cliclick') && !probePrograms('darwin').includes('xdotool'), 'desktop probes are platform-specific')
 assert.ok(probePrograms('win32').includes('powershell.exe'), 'Windows probes for its own shell')
 assert.ok(!probePrograms('linux').some((name) => name.includes('/')), 'probe names are bare names, never paths')
@@ -303,3 +336,4 @@ console.log('PASS  key combos, per-platform argv, SendKeys/AppleScript/xdotool e
 console.log('PASS  desktop capabilities (headless, Wayland, missing tools), app discovery and launch matching')
 console.log('PASS  read-only bridges expose no acting tool, and write mode registers the full surface')
 console.log('PASS  the capability block states the machine as it is, and never invents a missing one')
+console.log('PASS  the setup page is self-contained and installs the selected stack, and the terminal client formats what it sees')

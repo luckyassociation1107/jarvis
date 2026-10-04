@@ -6,10 +6,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 TEMP_NODE_STAGE=''
-TEMP_OLLAMA_SCRIPT=''
 cleanup() {
   if [[ -n "$TEMP_NODE_STAGE" ]]; then rm -rf "$TEMP_NODE_STAGE"; fi
-  if [[ -n "$TEMP_OLLAMA_SCRIPT" ]]; then rm -f "$TEMP_OLLAMA_SCRIPT"; fi
 }
 trap cleanup EXIT
 
@@ -126,63 +124,6 @@ ensure_node() {
   command -v npm >/dev/null 2>&1 || fail 'npm is still missing. Reinstall Node.js 24 LTS from https://nodejs.org.'
 }
 
-install_ollama_if_needed() {
-  local required os
-  required="$(node scripts/model-bootstrap.mjs --needs-local-ollama-install 2>/dev/null)" || {
-    printf '  WARNING: could not check whether Ollama is required; continuing without a system install.\n' >&2
-    return 1
-  }
-  [[ "$required" == 'yes' ]] || return 0
-
-  os="$(uname -s)"
-  case "$os" in
-    Linux|Darwin) ;;
-    *)
-      printf '  WARNING: automatic Ollama installation is unsupported on %s; the UI will still launch.\n' "$os" >&2
-      return 1
-      ;;
-  esac
-
-  printf '\nA fitting local chat/vision/coding model is selected, but Ollama is missing.\n'
-  printf 'Downloading the official Ollama installer; it may request administrator access.\n'
-  TEMP_OLLAMA_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/jarvis-ollama.XXXXXX.sh")"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL 'https://ollama.com/install.sh' -o "$TEMP_OLLAMA_SCRIPT" || {
-      rm -f "$TEMP_OLLAMA_SCRIPT"
-      TEMP_OLLAMA_SCRIPT=''
-      printf '  WARNING: could not download the official Ollama installer.\n' >&2
-      return 1
-    }
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q 'https://ollama.com/install.sh' -O "$TEMP_OLLAMA_SCRIPT" || {
-      rm -f "$TEMP_OLLAMA_SCRIPT"
-      TEMP_OLLAMA_SCRIPT=''
-      printf '  WARNING: could not download the official Ollama installer.\n' >&2
-      return 1
-    }
-  else
-    rm -f "$TEMP_OLLAMA_SCRIPT"
-    TEMP_OLLAMA_SCRIPT=''
-    printf '  WARNING: curl/wget is unavailable; cannot install Ollama automatically.\n' >&2
-    return 1
-  fi
-
-  if ! sh "$TEMP_OLLAMA_SCRIPT"; then
-    rm -f "$TEMP_OLLAMA_SCRIPT"
-    TEMP_OLLAMA_SCRIPT=''
-    printf '  WARNING: Ollama installation did not complete; JARVIS will continue with supported fallbacks.\n' >&2
-    return 1
-  fi
-  rm -f "$TEMP_OLLAMA_SCRIPT"
-  TEMP_OLLAMA_SCRIPT=''
-  hash -r
-  if ! command -v ollama >/dev/null 2>&1; then
-    printf '  WARNING: the installer finished, but this shell cannot find the ollama command.\n' >&2
-    return 1
-  fi
-  printf '  Ollama is installed; the selected model setup will start its service if necessary.\n'
-}
-
 [[ -f package.json && -f package-lock.json ]] || fail 'Run this script from a complete JARVIS repository (package.json and package-lock.json are required).'
 printf '\nJ.A.R.V.I.S. — web setup, build, and run\n'
 printf '%s\n' '======================================='
@@ -219,18 +160,14 @@ printf '\nBuilding the browser UI…\n'
 npm run build || fail 'The web build failed; see the compiler output above.'
 
 printf '\nRunning the read-only advisory preflight…\n'
-npm run setup || fail 'The preflight command could not run.'
+npm run doctor || fail 'The preflight command could not run.'
 
 if (( SKIP_AI_MODELS )); then
-  printf '\nSkipping Ollama and model-weight setup (--skip-ai-models).\n'
+  printf '\nSkipping the model setup page (--skip-ai-models).\n'
 else
-  if ! install_ollama_if_needed; then
-    printf '  Continuing; the local bridge will report any unavailable model slots honestly.\n' >&2
-  fi
-  printf '\nChecking and installing only the selected, fitting local model assets…\n'
-  if ! npm run models:install; then
-    printf '\nWARNING: AI setup was partial. The web app will still launch with available browser/OS or configured remote fallbacks.\n' >&2
-  fi
+  printf '\nModels are chosen, never assumed. The setup page opens in your browser\n'
+  printf 'so you can pick a stack and download it with one click:\n\n'
+  printf '  npm run setup        (or open http://localhost:8787/install while the app runs)\n'
 fi
 
 if (( NO_LAUNCH )); then
@@ -242,7 +179,7 @@ cat <<'EOF'
 
 Starting the local bridge and browser HUD.
 Open the Vite URL printed below in Chrome or Edge. Keep this window open;
-Ctrl-C stops the bridge and browser server together. The selected fitting model
-stack is prepared automatically unless --skip-ai-models was used.
+Ctrl-C stops the bridge and browser server together. If no model stack is
+downloaded yet, the setup page opens automatically — pick one there.
 EOF
 exec npm start

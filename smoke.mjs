@@ -11,6 +11,7 @@
  * the tool it asks for, feeds the result back, and streams the final answer.
  * Any of those can be broken by a refactor that still type-checks.
  */
+import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -256,8 +257,17 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
       && ['fits', 'best-effort'].includes(slots.vision.state)
       && /abliterat/i.test(slots.vision.model)
   })
+const setupPage = await fetch(`http://localhost:${PORT}/install`).then((r) => (r.ok ? r.text() : null)).catch(() => null)
 const autopilotChecks = [
   ['/autopilot exposes a boolean Ollama status for ModelManager', typeof autopilotData.ollama === 'boolean'],
+  ['/autopilot reports the host facts the setup page installs against', (() => {
+    const runtime = autopilotData.runtime ?? {}
+    return ['platform', 'arch', 'ollamaInstalled', 'downloadUrl'].every((key) => runtime[key] !== undefined)
+      && (runtime.diskFreeGb === null || Number.isFinite(runtime.diskFreeGb))
+      && Number.isFinite(runtime.totalRamGb)
+  })()],
+  ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('pick a stack and press the button') && setupPage.includes('autopilot/install')],
+  ['the setup page offers the official runtime download for this platform', Boolean(setupPage) && setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
   ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {
     const ram = autopilotData.ram ?? {}
@@ -492,6 +502,30 @@ const declineChecks = [
   ['the answer that used what the machine has was spoken instead', /instead/.test(spoken3)],
 ]
 
+// --- phase four: the terminal client ----------------------------------------
+// The same bridge, the same frames, no browser. This is the client people
+// debug with, so it has to show the answer and every tool the model ran.
+// Spawned asynchronously on purpose: the bridge is in this process, so a
+// blocking spawn would starve the very server the client is connecting to.
+const cli = await new Promise((resolve) => {
+  const child = spawn(process.execPath, ['scripts/cli.mjs', '--once', 'Take a screenshot of my phone.', '--url', `ws://localhost:${PORT}`], {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (chunk) => { stdout += chunk })
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const timer = setTimeout(() => { child.kill('SIGKILL') }, 30000)
+  child.once('close', (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }) })
+  child.once('error', (error) => { clearTimeout(timer); resolve({ status: -1, stdout, stderr: String(error.message) }) })
+})
+const cliChecks = [
+  ['the terminal client answers through the same bridge', cli.status === 0],
+  ['it shows the tool the model executed', /blade/.test(cli.stderr ?? '')],
+  ['it prints the final answer on stdout', /Good evening, sir\./.test(cli.stdout ?? '')],
+]
+
 // Routing is a pure function of the conversation, so it is checked directly
 // rather than inferred from what a stub happened to be sent. One case per slot,
 // because the middle one fails silently: a text model shown a photograph
@@ -596,6 +630,13 @@ for (const [name, ok] of declineChecks) {
 }
 failed += declineFailed
 console.log('')
+let cliFailed = 0
+for (const [name, ok] of cliChecks) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
+  if (!ok) cliFailed++
+}
+failed += cliFailed
+console.log('')
 let allocationFailed = 0
 for (const [name, ok] of allocationChecks) {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`)
@@ -604,7 +645,7 @@ for (const [name, ok] of allocationChecks) {
 failed += allocationFailed
 await rm(process.env.JARVIS_RAM_CONFIG, { force: true })
 
-console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${declineChecks.length - declineFailed}/${declineChecks.length} decline challenge, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
+console.log(`\n  ${loopPassed}/${checks.length} loop checks, ${autopilotChecks.length - autopilotFailed}/${autopilotChecks.length} autopilot contract, ${declineChecks.length - declineFailed}/${declineChecks.length} decline challenge, ${cliChecks.length - cliFailed}/${cliChecks.length} terminal client, ${routingChecks.length - routeFailed}/${routingChecks.length} routing, ${netChecks.length - netFailed}/${netChecks.length} net, ${multilingualChecks.length - multilingualFailed}/${multilingualChecks.length} multilingual, ${visionChecks.length - visionFailed}/${visionChecks.length} vision, ${memoryChecks.length - memoryFailed}/${memoryChecks.length} memory, ${allocationChecks.length - allocationFailed}/${allocationChecks.length} allocation`)
 
 ws.close()
 ws2.close()

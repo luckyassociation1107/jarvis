@@ -20,10 +20,13 @@ Node bridge (bridge/server.mjs)
 
 The default model endpoint is `http://localhost:11434/v1`. Ollama is the
 recommended runtime; llama.cpp, LM Studio and vLLM can use the OpenAI-compatible
-route. The root `build.ps1` / `build.sh` checks for Ollama and installs it only
-when the selected fitting local plan needs Ollama-backed models; it starts the
-service if it is not already responding. A manual `npm start` only runs the app
-and starts an installed local Ollama CLI when available.
+route. Ollama is installed by *you*, from the link the setup page gives you — no
+script here runs an installer, silently or with `sudo`. `npm run setup` hosts
+that page (`bridge/installer.mjs` serving `GET /install`) on the bridge's own
+port and opens it in your browser; if no bridge is running, it starts one for
+the setup session. `npm start` opens the same page when the plan has no Ollama
+or a model slot that is not ready, and starts an installed local Ollama CLI when
+one is available.
 
 ## RAM planner and models
 
@@ -60,8 +63,8 @@ request reloads it as needed.
   Q2_K import is untested here and never receives image requests. Vision
   capability metadata is checked before pixels are sent.
 - Whisper picks multilingual quantized models, not `.en` variants; the selected
-  fitting model and runtime are installed automatically by the root setup script
-  when possible.
+  fitting model and runtime are downloaded by the setup page (or the HUD's
+  INSTALL SELECTED STACK button) when you press the button.
 - When the allocation is smaller than the smallest model (a 1 GB machine, or
   any share that leaves under a gigabyte), the 0.873B model is clearly
   best-effort and is skipped. Whisper base can still fit. At 500 MB even local Whisper is outside
@@ -71,11 +74,13 @@ The **MODEL STACK** HUD panel (key `M`) shows the live plan and a 33-row
 500 MB–32 GB reference catalogue for the current share. The catalog is
 informational; it never installs every tier. `GET /autopilot` is read-only,
 `POST /autopilot/config` only saves the share/cap and re-plans, and
-`POST /autopilot/install` remains a separate user-triggered download action. The root `build.ps1` / `build.sh`
-path checks, installs and starts Ollama when needed, then installs only selected
-fitting Ollama models and the planned Whisper model/runtime. Existing assets are
-reused; other tiers and over-budget best-effort models are skipped. Standalone
-`npm run setup` stays an advisory preflight and installs nothing.
+`POST /autopilot/install` is the single user-triggered download action — the
+same endpoint behind both the panel's INSTALL SELECTED STACK button and the
+setup page. It downloads only the selected fitting Ollama models, Whisper model
+and speech runtime; existing assets are reused, and other tiers and over-budget
+best-effort models are skipped. Neither the endpoint nor any script runs a
+system installer for Ollama: the page links it and re-checks `runtime` when you
+say you installed it. `npm run doctor` is the read-only preflight.
 
 ## A turn
 
@@ -137,7 +142,27 @@ effectful MCP tools remain behind the same write gate.
 
 ## Local setup
 
-After cloning/extracting, use the root script for the current platform:
+Installation happens in your browser, not in a script. After cloning/extracting:
+
+```bash
+npm ci
+npm run setup
+```
+
+`npm run setup` (`scripts/install-web.mjs`) reuses a bridge already answering on
+port 8787, or starts `bridge/server.mjs` for the session; it prints
+`http://localhost:8787/install?hud=…` and opens it in the default browser. That
+page is the installer: it reads `runtime` (platform, arch, RAM, free disk,
+whether Ollama is present), lists the stack rungs the RAM planner offers — the
+same catalogue as MODEL STACK — and downloads the stack you pick through
+`POST /autopilot/install`, streaming each step. It is served by the bridge
+itself, same-origin with those endpoints, so Node alone is enough. Ollama is a
+separate program: the page links the official installer for your platform and
+offers **Re-check**; it never installs it for you. The server-side pieces stay
+apart: `npm run doctor` reports, `npm run setup` hosts the page, `npm run
+models:install` is the scripted download path used by tests.
+
+The platform scripts still exist and no longer install anything themselves:
 
 ```powershell
 .\build.ps1
@@ -147,26 +172,37 @@ After cloning/extracting, use the root script for the current platform:
 bash ./build.sh
 ```
 
-It checks for Node.js 20+ and npm. If Node is missing, `build.ps1` tries
+They check for Node.js 20+ and npm. If Node is missing, `build.ps1` tries
 WinGet; `build.sh` uses a version manager/Homebrew or downloads and verifies a
 user-local Node 24 LTS binary. If Windows blocks the script, invoke it with
-`powershell -ExecutionPolicy Bypass -File .uild.ps1`. It then installs missing
-npm packages, vendors required browser assets, builds the web UI, and runs a
-read-only preflight. By default it checks/installs Ollama only if a fitting local
-chat/vision/coding slot needs it, starts the service, reuses installed files, and
-automatically downloads only this machine's selected fitting models/Whisper
-runtime. It then starts the bridge and Vite together. Open the printed URL in
-Chrome or Edge, click **INITIALISE**, and allow the microphone. Keep the terminal
-open; Ctrl-C stops the app. `bash ./build.sh --skip-ai-models` or
-`.uild.ps1 -SkipAiModels` skips Ollama and model installs; `--no-launch` /
-`-NoLaunch` runs setup/build/model checks without starting the app. The scripts
-remain web-only: no desktop/EXE bundle. Ollama defaults to port `11434`; the
-bridge uses port `8787`. Manual model setup remains available from MODEL STACK.
+`powershell -ExecutionPolicy Bypass -File .\build.ps1`. They then install missing
+npm packages, vendor required browser assets, build the web UI, run the
+read-only `npm run doctor` preflight, and start the bridge and Vite together —
+and because `npm start` is what launches them, the setup page opens
+automatically whenever the stack is incomplete. Open the printed URL in Chrome
+or Edge, click **INITIALISE**, and allow the microphone. Keep the terminal open;
+Ctrl-C stops the app. `bash ./build.sh --skip-ai-models` or
+`.\build.ps1 -SkipAiModels` builds and launches without the model checks (they
+now only point at the setup page); `--no-launch` / `-NoLaunch` skips the launch.
+The scripts remain web-only: no desktop/EXE bundle. Ollama defaults to port
+`11434`; the bridge uses port `8787`.
 
 
-`npm run setup` is a separate preflight-only command: it changes nothing and
-downloads no models. For a manual development workflow, run `npm ci`,
-`npm run build`, and `npm start`.
+For a manual development workflow, run `npm ci`, `npm run build`, and
+`npm start`.
+
+## The terminal client
+
+The HUD is one client of the bridge, not the only one. `npm run cli`
+(`scripts/cli.mjs`) is a two-way chat surface over the same WebSocket: your
+messages in, the model's answer streamed back, and one line per execution
+(`⚙ shell ▸ run_command`) so a turn that used a tool is visibly a turn that used
+a tool. `/status` prints the RAM plan, the state of each model slot and bridge
+health; `/help` lists commands; the first Ctrl-C interrupts the turn and the
+second exits. `npm run cli -- --once "question"` answers once with the reply on
+stdout and notes on stderr, which is what the smoke suite drives. Because the
+terminal has no camera, it answers a frame request with a truthful refusal
+rather than holding the turn open.
 
 ## GitHub Pages
 

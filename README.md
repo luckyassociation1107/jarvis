@@ -172,20 +172,62 @@ all 33 reference tiers from 500 MB through 32 GB, selected models, estimates and
 limits, and to set the AI's share of free RAM. `GET /autopilot` is read-only;
 `POST /autopilot/config` saves a share/cap and re-plans live (the panel's APPLY
 and RESCAN buttons), and never downloads anything. The **INSTALL SELECTED STACK**
-button remains an explicit manual action. The root `build.ps1` / `build.sh`
-workflow instead automates first-run setup: it checks for Ollama, installs it
-from the official installer only when a fitting local Ollama model is selected,
-starts it if needed, then downloads only this machine's selected fitting chat,
-vision, coding and Whisper assets. Existing packages, model tags, runtime and
-Whisper files are reused; other RAM tiers and non-fitting best-effort weights are
-never bulk-downloaded. Kokoro is fetched and cached by the browser on first use
-when the RAM plan selects it. No desktop bundle or EXE is created. The separate
-`npm run setup` command remains a read-only preflight.
+button and the setup page both call `POST /autopilot/install`, and that call is
+the only thing that downloads model weights. Nothing downloads a tier you did
+not pick: existing packages, model tags, runtime and Whisper files are reused,
+and other RAM tiers and non-fitting best-effort weights are never bulk-fetched.
+Kokoro is fetched and cached by the browser on first use when the RAM plan
+selects it. No desktop bundle or EXE is created.
 
-## Setup and Windows controls
+**Nothing in this repository installs a program for you.** Every entry point —
+`npm run setup`, `build.sh`, `build.ps1` — either hosts the setup page or points
+at it; the page links the official installer for your platform, and you run it.
+That includes Ollama, which is never installed silently and never with `sudo`
+on your behalf.
 
-After cloning or extracting the repository, run the platform script from its
-root folder:
+## Setup: the page does the installing
+
+Installation is a page in your own browser, not a script in this repo. npm
+starts a small local host for that page and opens it:
+
+```bash
+npm run setup
+```
+
+That runs `scripts/install-web.mjs`. If a bridge is already answering on
+`JARVIS_BRIDGE_PORT` (8787 by default) it reuses it; otherwise it starts
+`bridge/server.mjs` for the setup session, which is why Node and this repo are
+the only prerequisites. It then prints and opens:
+
+```
+http://localhost:8787/install?hud=http://localhost:5173
+```
+
+The page is served by the bridge itself, on the same origin as the install
+endpoints, so it needs no build step, no CDN and no other server. It shows the
+`runtime` block read off your machine — platform, architecture, total RAM, free
+disk, and whether Ollama is present — then the stack rungs the RAM planner
+offers for that machine, the same `tierProfiles` the MODEL STACK panel shows.
+Pick the rung that matches what you have, press the button, and the page
+downloads *that* stack: the selected chat/vision/coding tag (downloaded once
+when the routes share it), the Whisper file, and the speech runtime. Progress
+streams step by step; if a step is skipped the page says why rather than
+pretending it succeeded.
+
+Ollama itself is a program, and the page does not install it silently. It links
+[yours](https://ollama.com/download) — `OllamaSetup.exe`, `Ollama.dmg`,
+`ollama-linux-amd64.tgz`, or the official `curl -fsSL https://ollama.com/install.sh | sh`
+one-liner on Linux — and offers a **Re-check** button that re-reads `runtime`
+instead of guessing. Install it, restart it, re-check, and the model downloads
+run. On a machine where a complete stack is already present the page says so and
+you can close it.
+
+`npm start` also opens that page automatically when the plan has no Ollama or a
+model slot that is not `ready`; pass `--no-open` to keep it shut. In the HUD the
+same work is the **INSTALL SELECTED STACK** button in MODEL STACK.
+
+The platform scripts build and launch; they no longer install anything
+themselves:
 
 ```powershell
 .\build.ps1
@@ -204,29 +246,24 @@ browser TTS path uses the web runtime, and Ollama manages chat-model GPU use.
 Set `ONNXRUNTIME_NODE_INSTALL_CUDA=v12` before running the setup script only if
 another Node-side ONNX workload specifically needs that CUDA provider. The
 script then installs missing/stale npm packages from `package-lock.json`,
-vendors the hand-tracking runtime if needed, builds the **web UI**, and runs a
-read-only preflight. It then checks for Ollama and
-installs it only if this machine's RAM plan has a fitting local chat, vision or
-coding model. It checks/starts the local Ollama service, reuses existing model
-tags and Whisper files, installs only the selected fitting model tier plus the
-Whisper runtime when needed, then launches the local bridge and Vite app. Other
-RAM tiers are shown in the catalogue but are not downloaded. A high-memory
-machine can require over 24 GB of model downloads; the script prints the
-selected plan and size estimate before pulling. Keep the terminal open and press
-**Ctrl-C** to stop the processes.
+vendors the hand-tracking runtime if needed, builds the **web UI**, runs the
+read-only `npm run doctor` preflight, and launches the bridge and Vite app (and
+`npm start` opens the setup page when the stack is incomplete). Keep the
+terminal open and press **Ctrl-C** to stop the processes. No desktop bundle or
+EXE is created.
 
 Use `bash ./build.sh --skip-ai-models` or `./build.ps1 -SkipAiModels` to build
-and launch without installing Ollama/model weights. Use `--no-launch` or
-`-NoLaunch` to finish setup/build/model checks without starting the local web
-servers. Neither entry point creates a desktop bundle or EXE.
+and launch without checking for Ollama or model weights; those flags now only
+print the setup-page pointer. Use `--no-launch` or `-NoLaunch` to finish
+build/model checks without starting the local web servers.
 
-`npm run setup` is a standalone preflight only: it changes nothing. For manual
-workflows, `npm ci`, `npm run build`, `npm run models:plan`,
-`npm run models:install`, and `npm start` are separate commands. The browser
-STT/TTS choices default to RAM autopilot; Kokoro speech assets are fetched by the
-browser on first use when selected. Chrome or Edge still needs to be installed
-for the best microphone experience; the setup script does not replace the
-user's browser.
+For manual workflows, `npm ci`, `npm run build`, `npm run doctor`,
+`npm run setup`, and `npm start` are separate commands. `npm run models:install`
+still exists for scripted installs and the test suite, but no build script calls
+it. The browser STT/TTS choices default to RAM autopilot; Kokoro speech assets
+are fetched by the browser on first use when selected. Chrome or Edge still
+needs to be installed for the best microphone experience; the setup page does
+not replace the user's browser.
 
 The bridge includes a Windows window manager when run on Windows. Window
 inventory is read-only by default. Focus, minimize, maximize, restore, close
@@ -262,7 +299,9 @@ matching) and the capability block (what a headless, read-only Linux host says
 about itself, and what a write-enabled one says instead) without running a
 command or moving a pointer.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
-33-tier catalogue/statuses, the live `/autopilot/config` share change,
+33-tier catalogue/statuses, the served `/install` setup page and its `runtime`
+contract, the terminal client answering through the same bridge in one-shot
+mode, the live `/autopilot/config` share change,
 Telugu-to-English code-intent routing, vision prompt fusion, the machine block
 the model is actually sent (including its truthful write state), the fact that
 the acting shell/desktop tools are absent from the model's tool list while
@@ -283,10 +322,10 @@ variants, estimated active memory, expected downloads and unsupported
 capabilities; it also exposes the full RAM-tier catalogue for your current
 share. `POST /autopilot/config` writes `{ share, capGb }` (both optional, plus
 `rescan: true` to just re-sample memory) to `models/ram-allocation.json` and
-rebuilds the plan immediately. The HUD's `POST /autopilot/install` action
-remains user-triggered. The root setup scripts handle Ollama installation and
-selected model setup automatically; neither endpoint launches a system
-installer.
+rebuilds the plan immediately. The HUD's **INSTALL SELECTED STACK** and the
+`/install` page both call `POST /autopilot/install`, and both are user-triggered:
+the bridge downloads model files through Ollama, but never launches a system
+installer or a package manager for you.
 
 **Speech-to-text:** RAM autopilot selects local multilingual Whisper when it fits
 and has been installed; the root build scripts check/download the selected file
@@ -310,8 +349,8 @@ One browser HUD backed by a Node bridge and your own local models:
 ```
 src/ + index.html        browser HUD — voice, reactor, panels
 bridge/                  local Node bridge — model pipeline, tools, autopilot
-scripts/                 preflight, RAM/model bootstrap, build assets, local start helpers
-build.ps1 / build.sh     platform setup, web build, selected model setup, and launch
+scripts/                 setup page host, doctor preflight, terminal client, build assets, start helpers
+build.ps1 / build.sh     Node/npm check, web build, preflight, and launch (no silent installs)
 smoke.mjs                bridge checks
 ```
 
@@ -332,11 +371,11 @@ AI session.
 **In one line:** the root setup script, a supported local model runtime when
 models fit, and a real browser for microphone/WebGL. Ollama is recommended.
 
-- **A model server.** [Ollama](https://ollama.com) is the default. The root
-  `build.ps1` / `build.sh` checks for it and installs it from the official
-  installer only when the detected RAM plan needs a fitting local Ollama model.
-  llama.cpp, LM Studio and vLLM remain available through their OpenAI-compatible
-  endpoints; custom endpoints are not overwritten by the Ollama bootstrap.
+- **A model server.** [Ollama](https://ollama.com) is the default, and the
+  setup page links its official installer for your platform so *you* install it.
+  No build script installs it, silently or otherwise. llama.cpp, LM Studio and
+  vLLM remain available through their OpenAI-compatible endpoints; custom
+  endpoints are never overwritten.
 - **Node.js 20 or newer** and the project npm packages. The root scripts check
   and bootstrap Node where supported, then install missing/stale packages from
   the lockfile.
@@ -350,35 +389,80 @@ models fit, and a real browser for microphone/WebGL. Ollama is recommended.
   it. With none configured he still answers, still talks, and still drives his
   own interface.
 
-`npm run setup` is a friendly read-only preflight: it checks the RAM-selected
-plan and configured model server, but installs nothing. The root build scripts
-perform the automated first-run dependency and selected-model setup. Browser
-installation remains user-controlled; Chrome or Edge should already be
-available for microphone use.
+`npm run setup` opens the browser setup page described above; it hosts and
+serves it, and every download on it is one you press the button for. `npm run
+doctor` is the read-only preflight next to it — machine, RAM plan and model
+server state, changing nothing. Browser installation remains user-controlled;
+Chrome or Edge should already be available for microphone use.
 
 ---
 
 ## Quick start
 
-The recommended first-run path is `build.ps1` on Windows or `build.sh` on
-macOS/Linux. If you prefer manual commands:
+The recommended first-run path is:
 
 ```bash
 npm ci
-npm run build
-npm run setup       # advisory preflight; no downloads or system changes
+npm run setup       # hosts the setup page and opens it in your browser
+```
+
+On that page pick the stack for your machine and let it download; install
+Ollama from the link it gives you if you have none. Then:
+
+```bash
 npm start           # local bridge + Vite browser HUD
 ```
 
-Open the local Vite URL (normally <http://localhost:5173>) in Chrome or Edge,
-click **INITIALISE**, allow the microphone, and say **“Hey Jarvis”**. Local
-inference requires a running model server and a model that fits the selected
-RAM plan; review the plan and explicitly install fitting models from MODEL
-STACK. The endpoint is available at `localhost:8787` when the bridge is running.
+`build.ps1` / `build.sh` wrap the same sequence on Windows and macOS/Linux:
+dependency check, web build, read-only preflight, launch. Open the local Vite
+URL (normally <http://localhost:5173>) in Chrome or Edge, click **INITIALISE**,
+allow the microphone, and say **“Hey Jarvis”**. Local inference requires a
+running model server and a model that fits the selected RAM plan; review the
+plan and install fitting models from MODEL STACK (or the setup page). The
+endpoint is available at `localhost:8787` when the bridge is running.
 
 For separate terminals, use `npm run bridge` for the local AI/tool service and
 `npm run dev` for the HUD. The GitHub Pages page is only a static view; it does
 not host Ollama or the Node bridge.
+
+## The same assistant in a terminal
+
+The browser is the face, not the brain. Everything the HUD does it does over a
+WebSocket frame protocol on port 8787, so a terminal is a first-class client —
+you, the answer, and every tool JARVIS reaches for, with nothing rendered for
+looks:
+
+```bash
+npm run cli
+```
+
+```
+  J.A.R.V.I.S · cli
+  ws://localhost:8787 · 6 servers
+  /help for commands · Ctrl-C leaves
+
+you › take a screenshot of my phone        # an example turn
+  ⚙ blade ▸ screenshot
+  Sent it to the phone.
+```
+
+It prints your messages, streams the reply as the model produces it, and shows
+each execution as a `⚙ server ▸ action` line, so a turn that quietly used a tool
+is visibly a turn that used a tool. `/status` prints the RAM plan, each model
+slot with its state, and bridge health; `/help` lists the commands. The first
+**Ctrl-C** interrupts a running turn, the second leaves.
+
+For scripts and pipes, one-shot mode keeps the answer clean:
+
+```bash
+answer=$(npm run -s cli -- --once "what is on my screen?")   # stdout = answer
+```
+
+Notes, tool lines and errors go to stderr in that mode, and the exit code is 1
+with the bridge's own message when the model is unreachable. Point it elsewhere
+with `--url ws://host:port` or `JARVIS_CLI_URL`; `--no-color` strips the ANSI
+colours. The terminal has no camera, and it says so instead of staying silent
+when a vision tool asks for a frame.
 
 ## How it works
 
