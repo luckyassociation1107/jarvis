@@ -131,70 +131,74 @@ function availableRam() {
  * The same model catalogue the web setup page uses, from the autopilot plan.
  * We import it so the CLI and the page always agree on what is available.
  */
-async function getModelTiers() {
-  try {
-    const { plan, ladder } = await import('../bridge/autopilot.mjs')
-    const p = plan()
-    const ladders = ladder()
-    return { tiers: [], plan: p, ladders, ok: true }
-  } catch {
-    return { tiers: [], plan: null, ladders: null, ok: false }
-  }
-}
 
-/* ──────────────── model picker with quantization filter ───────────────── */
+/* ──────────────── model picker with hardware filtering ───────────────── */
 
 /**
  * Interactive model picker.
  *
  * Flow:
- *   1. Show machine info (RAM, budget)
- *   2. Show available quantization levels → user picks one
- *   3. Show parameter sizes for that quant → user picks one
- *   4. Confirm & pull
+ *   1. Auto-detect hardware (CPU, GPU, RAM, disk)
+ *   2. Sync latest abliterated models from Ollama registry
+ *   3. Filter catalogue to only what fits THIS machine
+ *   4. Show available quantization levels → user picks one
+ *   5. Show models for that quant → user picks one
+ *   6. Confirm & pull
  */
 async function promptModelChoice() {
-  const { plan: p, ladders, ok } = await getModelTiers()
-  const freeRam = availableRam()
-
-  // Build the full catalogue from the ladder
-  const catalogue = buildCatalogue(ladders)
-
-  if (!catalogue.length) {
-    line(warn, 'No models available.')
-    return promptFromHardcoded()
-  }
+  // ── Step 1: Hardware detection ──
+  const { detect, filterCatalogue } = await import('./hardware.mjs')
+  const { syncModels, builtinCatalogue } = await import('./model-sync.mjs')
 
   console.log('')
-  console.log('  Choose a model to pull')
-  console.log('  ═══════════════════════')
+  console.log('  Scanning hardware…')
+  const hw = detect()
 
-  // Machine info
-  const totalRamGb = (totalmem() / GB).toFixed(1)
-  const freeRamGb = (freeRam / GB).toFixed(1)
-  const budgetGb = p ? (p.effectiveModelBytes / GB).toFixed(1) : '?'
-  line(info, `RAM: ${totalRamGb} GB total · ${freeRamGb} GB free · ${budgetGb} GB AI ceiling`)
-  line(info, `GPU: ${detectGpu()}`)
-  if (p?.budget) {
-    line(info, `Plan: ${(p.budget.share * 100).toFixed(0)}% of free RAM${p.budget.capGb ? ` · hard cap ${p.budget.capGb} GB` : ''}`)
-  }
+  console.log('')
+  console.log('  Machine profile')
+  console.log('  ═══════════════')
+  for (const l of hw.summary) line(info, l)
   console.log('')
 
-  // ── Step 1: Pick quantization level ──
-  const quantLevels = getAvailableQuants(catalogue)
-  const quantChoice = await pickQuantization(quantLevels, catalogue, freeRam)
+  // ── Step 2: Sync models ──
+  let catalogue
+  try {
+    catalogue = await syncModels({ onProgress: (msg) => line(info, msg) })
+  } catch {
+    line(warn, 'Registry sync failed. Using built-in catalogue.')
+    catalogue = builtinCatalogue()
+  }
+
+  // ── Step 3: Filter by hardware ──
+  const filtered = filterCatalogue(catalogue, hw)
+
+  if (!filtered.length) {
+    line(warn, 'No abliterated models fit this machine.')
+    line(info, `AI budget: ${hw.ram.aiBudgetGb} GB · Disk: ${hw.disk.freeGb} GB free`)
+    line(info, 'Free up RAM or disk space and try again.')
+    return null
+  }
+
+  console.log(`  ${filtered.length} abliterated models fit this hardware (sorted by best match)`)
+  console.log('')
+
+  // ── Step 4: Pick quantization level ──
+  const quantLevels = getAvailableQuants(filtered)
+  const quantChoice = await pickQuantization(quantLevels, filtered, hw)
   if (!quantChoice) return null
 
-  // ── Step 2: Pick parameter size ──
-  const filtered = catalogue.filter((m) => m.quant === quantChoice)
-  const model = await pickParameterSize(filtered, freeRam)
+  // ── Step 5: Pick parameter size ──
+  const byQuant = filtered.filter((m) => m.quant === quantChoice)
+  const model = await pickParameterSize(byQuant, hw)
   if (!model) return null
 
-  // ── Step 3: Confirm ──
+  // ── Step 6: Confirm ──
   console.log('')
-  line(info, `Model: ${model.model}`)
-  line(info, `Quant: ${model.quant} · ${model.params}B · ${model.sizeGb.toFixed(1)} GB download`)
-  line(info, `Fits:  ${model.sizeGb * 1.3 <= freeRam / GB ? 'yes' : '⚠ tight — may need swap'}`)
+  line(info, `Model:    ${model.model}`)
+  line(info, `Quant:    ${model.quant} · ${model.params}B · ${model.sizeGb.toFixed(1)} GB download`)
+  line(info, `Resident: ~${model.residentGb.toFixed(1)} GB in RAM`)
+  line(info, `RAM fit:  ${model.ramFit ? '✓ yes' : '⚠ tight'}`)
+  line(info, `Disk fit: ${model.diskFit ? '✓ yes' : '⚠ tight'}`)
 
   const confirm = await ask(`\n  Pull ${model.model}? [Y/n] `)
   if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
@@ -206,41 +210,12 @@ async function promptModelChoice() {
 }
 
 /**
- * Build a flat catalogue from the autopilot ladder.
- * Deduplicates by model name, keeps the best metadata.
- */
-function buildCatalogue(ladders) {
-  if (!ladders?.chat?.rungs) return []
-
-  const seen = new Set()
-  const models = []
-
-  for (const rung of ladders.chat.rungs) {
-    if (!rung.model || seen.has(rung.model)) continue
-    seen.add(rung.model)
-    models.push({
-      model: rung.model,
-      quant: rung.quant ?? '?',
-      params: rung.parametersB ?? 0,
-      sizeGb: rung.downloadGb ?? 0,
-      residentGb: rung.residentGb ?? 0,
-      quality: rung.quality ?? 0,
-      multimodal: rung.multimodal ?? false,
-      note: rung.note ?? '',
-    })
-  }
-
-  return models.sort((a, b) => b.sizeGb - a.sizeGb)
-}
-
-/**
  * Get unique quantization levels from the catalogue, ordered by quality.
  */
 function getAvailableQuants(catalogue) {
   const QUANT_ORDER = ['F16', 'Q8_0', 'Q6_K', 'Q5_K_M', 'Q4_K_M', 'Q3_K_M', 'Q2_K']
   const present = new Set(catalogue.map((m) => m.quant))
   const ordered = QUANT_ORDER.filter((q) => present.has(q))
-  // Add any quants not in our order list at the end
   for (const q of present) {
     if (!ordered.includes(q)) ordered.push(q)
   }
@@ -250,9 +225,10 @@ function getAvailableQuants(catalogue) {
 /**
  * Step 1: Let the user pick a quantization level.
  *
- * Shows each level with quality description, model count, and size range.
+ * Shows each level with quality description, model count, size range.
+ * Recommends based on detected GPU.
  */
-async function pickQuantization(quants, catalogue, freeRam) {
+async function pickQuantization(quants, catalogue, hw) {
   const QUANT_INFO = {
     'F16':    { label: 'Full precision (F16)',     quality: '★★★★★ largest, best quality' },
     'Q8_0':   { label: 'High quality (Q8_0)',      quality: '★★★★☆ near-lossless, large' },
@@ -263,29 +239,28 @@ async function pickQuantization(quants, catalogue, freeRam) {
     'Q2_K':   { label: 'Smallest (Q2_K)',          quality: '★★ fastest, noticeable loss' },
   }
 
-  // Find recommended quant based on free RAM
-  const freeGb = freeRam / GB
-  let recIdx = quants.length - 1 // default: smallest
-  for (let i = 0; i < quants.length; i++) {
-    const smallestInQuant = catalogue.filter((m) => m.quant === quants[i]).sort((a, b) => a.sizeGb - b.sizeGb)[0]
-    if (smallestInQuant && smallestInQuant.sizeGb * 1.3 <= freeGb) {
-      recIdx = i
-      break
-    }
-  }
+  // Recommend based on GPU detection
+  const gpuHint = hw.primaryGpu
+    ? `${hw.primaryGpu.backend.toUpperCase()} detected → prefer Q8_0 for speed`
+    : 'CPU-only → prefer Q4_K_M for balance'
 
-  console.log('  Step 1: Quantization level')
-  console.log('  ───────────────────────────')
+  // Find recommended index
+  let recIdx = quants.indexOf(hw.preferredQuant)
+  if (recIdx < 0) recIdx = quants.length > 2 ? 2 : quants.length - 1
+
+  console.log(`  Step 1: Quantization level  (${gpuHint})`)
+  console.log('  ───────────────────────────────────────────')
   console.log('')
 
   quants.forEach((q, i) => {
     const num = String(i + 1).padStart(3)
     const info = QUANT_INFO[q] ?? { label: q, quality: '' }
     const modelsInQuant = catalogue.filter((m) => m.quant === q)
-    const sizeRange = modelsInQuant.length
-      ? `${modelsInQuant[modelsInQuant.length - 1].sizeGb.toFixed(1)}–${modelsInQuant[0].sizeGb.toFixed(1)} GB`
+    const sizes = modelsInQuant.map((m) => m.sizeGb).sort((a, b) => a - b)
+    const sizeRange = sizes.length
+      ? `${sizes[0].toFixed(1)}–${sizes[sizes.length - 1].toFixed(1)} GB`
       : ''
-    const rec = i === recIdx ? '  ← recommended' : ''
+    const rec = i === recIdx ? '  ← recommended for your hardware' : ''
     console.log(`  ${num}  ${info.label.padEnd(32)} ${info.quality.padEnd(30)} ${sizeRange.padStart(14)}  (${modelsInQuant.length} models)${rec}`)
   })
 
@@ -308,9 +283,9 @@ async function pickQuantization(quants, catalogue, freeRam) {
 /**
  * Step 2: Let the user pick a parameter size for the chosen quantization.
  *
- * Shows models sorted by parameter count (smallest to largest).
+ * Shows models sorted by parameter count. Marks RAM fit and disk fit.
  */
-async function pickParameterSize(models, freeRam) {
+async function pickParameterSize(models, hw) {
   if (!models.length) {
     line(warn, 'No models for this quantization.')
     return null
@@ -319,29 +294,29 @@ async function pickParameterSize(models, freeRam) {
   // Sort by parameter size ascending
   const sorted = [...models].sort((a, b) => a.params - b.params)
 
-  // Find recommended: largest model that fits
-  const freeGb = freeRam / GB
+  // Find recommended: largest model that fits in both RAM and disk
   let recIdx = 0
   for (let i = sorted.length - 1; i >= 0; i--) {
-    if (sorted[i].sizeGb * 1.3 <= freeGb) { recIdx = i; break }
+    if (sorted[i].ramFit && sorted[i].diskFit) { recIdx = i; break }
   }
 
   console.log('')
   console.log(`  Step 2: Parameter size (${sorted[0].quant})`)
   console.log('  ──────────────────────────────────────')
   console.log('')
-  console.log('  #   Params     Model                                          Download    Resident    Fits?')
-  console.log('  ─── ────────── ────────────────────────────────────────────── ─────────── ─────────── ────')
+  console.log('  #   Params     Model                                          Download    Resident  RAM  Disk')
+  console.log('  ─── ────────── ────────────────────────────────────────────── ─────────── ───────── ──── ────')
 
   sorted.forEach((m, i) => {
     const num = String(i + 1).padStart(3)
     const params = `${m.params.toFixed(1)}B`.padEnd(10)
     const name = m.model.length > 48 ? m.model.slice(0, 45) + '…' : m.model.padEnd(48)
     const size = `${m.sizeGb.toFixed(1)} GB`.padStart(11)
-    const resident = `${m.residentGb.toFixed(1)} GB`.padStart(11)
-    const fits = m.sizeGb * 1.3 <= freeGb ? ' ✓' : ' ✗'
+    const resident = `${m.residentGb.toFixed(1)} GB`.padStart(9)
+    const ramOk = m.ramFit ? '  ✓' : '  ✗'
+    const diskOk = m.diskFit ? ' ✓' : ' ✗'
     const rec = i === recIdx ? '  ← recommended' : ''
-    console.log(`  ${num}  ${params} ${name} ${size}     ${resident} ${fits}${rec}`)
+    console.log(`  ${num}  ${params} ${name} ${size}     ${resident}  ${ramOk}  ${diskOk}${rec}`)
   })
 
   console.log('')
@@ -358,82 +333,6 @@ async function pickParameterSize(models, freeRam) {
   }
 
   return sorted[chosen]
-}
-
-/** Fallback when the autopilot ladder cannot be loaded. */
-async function promptFromHardcoded() {
-  const catalogue = [
-    { model: 'huihui_ai/qwen3.5-abliterated:9b-q8_0',   quant: 'Q8_0',   params: 9.65,  sizeGb: 11.0, residentGb: 12.3 },
-    { model: 'huihui_ai/qwen3.5-abliterated:9b',         quant: 'Q4_K_M', params: 9.65,  sizeGb: 6.6,  residentGb: 7.8 },
-    { model: 'huihui_ai/qwen3.5-abliterated:4B-q8_0',    quant: 'Q8_0',   params: 4.54,  sizeGb: 5.2,  residentGb: 6.1 },
-    { model: 'huihui_ai/qwen3.5-abliterated:4b',         quant: 'Q4_K_M', params: 4.54,  sizeGb: 3.3,  residentGb: 4.1 },
-    { model: 'huihui_ai/qwen3.5-abliterated:2B-q8_0',    quant: 'Q8_0',   params: 2.27,  sizeGb: 2.7,  residentGb: 3.15 },
-    { model: 'huihui_ai/qwen3.5-abliterated:2b',         quant: 'Q4_K_M', params: 2.27,  sizeGb: 1.9,  residentGb: 2.35 },
-    { model: 'huihui_ai/qwen3.5-abliterated:0.8b',       quant: 'Q8_0',   params: 0.873, sizeGb: 1.0,  residentGb: 1.3 },
-  ]
-
-  const freeRam = availableRam()
-  const freeGb = freeRam / GB
-
-  console.log('')
-  console.log('  Choose a model to pull')
-  console.log('  ═══════════════════════')
-  line(info, `Free RAM: ${freeGb.toFixed(1)} GB`)
-  console.log('')
-
-  // Step 1: quant
-  const quants = ['Q8_0', 'Q4_K_M']
-  console.log('  Step 1: Quantization level')
-  console.log('  ───────────────────────────')
-  console.log('')
-  console.log('    1  High quality (Q8_0)              ★★★★☆ near-lossless, larger')
-  console.log('    2  Compact (Q4_K_M)                 ★★★   most popular, smaller   ← recommended')
-  console.log('')
-  const qAnswer = await ask('  Pick quantization (1–2) [2]: ')
-  const qIdx = qAnswer === '1' ? 0 : 1
-  const chosenQuant = quants[qIdx]
-
-  // Step 2: parameter size
-  const filtered = catalogue.filter((m) => m.quant === chosenQuant)
-  let recIdx = 0
-  for (let i = filtered.length - 1; i >= 0; i--) {
-    if (filtered[i].sizeGb * 1.3 <= freeGb) { recIdx = i; break }
-  }
-
-  console.log('')
-  console.log(`  Step 2: Parameter size (${chosenQuant})`)
-  console.log('  ──────────────────────────────────────')
-  console.log('')
-
-  filtered.forEach((m, i) => {
-    const num = String(i + 1).padStart(3)
-    const params = `${m.params.toFixed(1)}B`.padEnd(10)
-    const name = m.model.padEnd(48)
-    const size = `${m.sizeGb.toFixed(1)} GB`.padStart(10)
-    const fits = m.sizeGb * 1.3 <= freeGb ? ' ✓' : ' ✗'
-    const rec = i === recIdx ? '  ← recommended' : ''
-    console.log(`  ${num}  ${params} ${name} ${size}  ${fits}${rec}`)
-  })
-
-  console.log('')
-  const mAnswer = await ask(`  Pick model (1–${filtered.length}) [${recIdx + 1}]: `)
-  let mIdx = recIdx
-  if (mAnswer) {
-    const n = Number(mAnswer)
-    if (Number.isInteger(n) && n >= 1 && n <= filtered.length) mIdx = n - 1
-  }
-
-  const selected = filtered[mIdx]
-  console.log('')
-  line(info, `Selected: ${selected.model} (${selected.quant}, ${selected.params}B, ${selected.sizeGb} GB)`)
-
-  const confirm = await ask(`\n  Pull ${selected.model}? [Y/n] `)
-  if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
-    line(info, 'Cancelled. No model pulled.')
-    return null
-  }
-
-  return selected.model
 }
 
 /* ──────────────────────── version & info ─────────────────────────────── */
