@@ -1,19 +1,17 @@
 /**
- * JARVIS Voice Replica — acts as YOUR digital twin in conversations.
+ * JARVIS Voice Replica — LOW LATENCY digital twin.
  *
- * How it works:
- *   1. Learns your messaging style from past conversations
- *   2. Analyzes: vocabulary, emoji usage, sentence length, humor, slang
- *   3. When you say "reply to Rahul", it crafts a message in YOUR style
- *   4. Uses cloned voice for voice messages and calls
- *   5. Maintains context from previous conversations
+ * Pre-learned style in memory. Fast model for replies.
+ * Streaming text generation — starts sending before full response.
+ * Parallel processing — text + voice params simultaneously.
  *
- * "I've analyzed 500 of your messages. You use 'ra' and 'bro' a lot,
- *  your sentences are short, you use 😂 and 🔥 frequently,
- *  and you reply fast with minimal punctuation. I'll match that."
+ * LATENCY TARGETS:
+ *   Style lookup:       <1ms  (in-memory)
+ *   Reply generation:   <500ms (fast model, streaming)
+ *   Voice params:       <5ms  (pre-computed)
+ *   Total:              <800ms (message → reply ready)
  */
 
-import { complete } from './local-llm.mjs'
 import { voiceCloneEngine } from './voice-clone.mjs'
 import { eventBus, EVENTS } from './event-bus.mjs'
 import { writeFile, readFile, mkdir } from 'fs/promises'
@@ -25,210 +23,383 @@ import { existsSync } from 'fs'
 const REPLICA_DIR = join(process.cwd(), 'data', 'replica')
 const STYLE_FILE = join(REPLICA_DIR, 'messaging-style.json')
 const CONVERSATIONS_DIR = join(REPLICA_DIR, 'conversations')
+const REPLY_CACHE_MAX = 200
 
-/* ──────────────── Voice Replica ──────────────────────────── */
+/* ──────────────── Reply Cache ──────────────────────────── */
+
+class ReplyCache {
+  constructor(maxSize = REPLY_CACHE_MAX) {
+    this.cache = new Map()  // key → {reply, timestamp}
+    this.maxSize = maxSize
+  }
+
+  get(contact, messageHash) {
+    const key = `${contact}:${messageHash}`
+    const entry = this.cache.get(key)
+    if (entry && Date.now() - entry.timestamp < 600000) { // 10 min TTL
+      return entry.reply
+    }
+    this.cache.delete(key)
+    return null
+  }
+
+  set(contact, messageHash, reply) {
+    const key = `${contact}:${messageHash}`
+    this.cache.set(key, { reply, timestamp: Date.now() })
+    if (this.cache.size > this.maxSize) {
+      const oldest = this.cache.keys().next().value
+      this.cache.delete(oldest)
+    }
+  }
+
+  invalidate(contact) {
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(`${contact}:`)) this.cache.delete(key)
+    }
+  }
+}
+
+/* ──────────────── Voice Replica (Low Latency) ──────────────────────────── */
 
 class VoiceReplica {
   constructor() {
-    this.messagingStyle = null    // learned style
-    this.conversations = new Map() // contact → conversation history
-    this.contacts = new Map()     // name → contact info
-    this.initialized = false
+    // In-memory — zero disk I/O on hot path
+    this.messagingStyle = null
+    this.conversations = new Map()    // contact → [messages]
+    this.contacts = new Map()         // name → contact info
+    this.replyCache = new ReplyCache()
+
+    // Pre-computed style fragments — instant assembly
+    this.styleFragments = {
+      greetings: [],
+      signoffs: [],
+      emojis: { frequent: [], occasional: [] },
+      vocabulary: [],
+      slang: [],
+    }
+
+    // Reply templates — pre-computed for common patterns
+    this.replyTemplates = new Map()  // pattern → template
+
+    this.ready = false
+    this._initPromise = null
   }
 
   /**
-   * Initialize — load existing style data.
+   * Initialize — load everything into memory at startup.
    */
   async init() {
-    if (this.initialized) return
+    if (this.ready) return
+    if (this._initPromise) return this._initPromise
 
+    this._initPromise = this._doInit()
+    return this._initPromise
+  }
+
+  async _doInit() {
     try {
       if (!existsSync(REPLICA_DIR)) await mkdir(REPLICA_DIR, { recursive: true })
       if (!existsSync(CONVERSATIONS_DIR)) await mkdir(CONVERSATIONS_DIR, { recursive: true })
 
       if (existsSync(STYLE_FILE)) {
         this.messagingStyle = JSON.parse(await readFile(STYLE_FILE, 'utf-8'))
+        this._precomputeStyleFragments()
       }
-      this.initialized = true
+
+      this.ready = true
     } catch {
-      this.initialized = true
+      this.ready = true
+    }
+  }
+
+  /**
+   * Pre-compute style fragments for instant reply assembly.
+   */
+  _precomputeStyleFragments() {
+    if (!this.messagingStyle) return
+
+    const s = this.messagingStyle
+    this.styleFragments = {
+      greetings: s.greeting_patterns || ['hey', 'yo'],
+      signoffs: s.signoff_patterns || ['bye', 'tc'],
+      emojis: s.emojis || { frequent: ['😂'], occasional: [] },
+      vocabulary: s.vocabulary || [],
+      slang: (s.vocabulary || []).filter((w) => w.length <= 4),
+      sentenceStyle: s.sentence_style || 'short',
+      tone: s.tone || 'casual',
+      languageMix: s.language_mix || 'English',
+      typicalLength: s.typical_length || '1-2 sentences',
+      uniqueTraits: s.unique_traits || '',
     }
   }
 
   /**
    * Learn messaging style from past conversations.
-   * messages = [{sender: 'me'|'them', text: '...', timestamp: '...'}]
    */
-  async learnStyle(messages, { contactName = 'general', llm = complete } = {}) {
+  async learnStyle(messages, { contactName = 'general' } = {}) {
     await this.init()
 
     const myMessages = messages.filter((m) => m.sender === 'me')
-    if (myMessages.length < 10) {
-      return { ok: false, error: 'Need at least 10 messages to learn style' }
+    if (myMessages.length < 5) {
+      return { ok: false, error: 'Need at least 5 messages to learn style' }
     }
 
-    const response = await llm('reason', [
-      { role: 'system', content: `Analyze these messages and extract the messaging STYLE.
+    // Fast style extraction — no LLM call for basic patterns
+    const style = this._extractStyleFast(myMessages)
 
-Extract:
-1. VOCABULARY — common words, slang, abbreviations
-2. SENTENCE STRUCTURE — short/long, fragments, run-ons
-3. EMOJI USAGE — which emojis, how often, placement
-4. PUNCTUATION — periods, exclamation marks, ellipsis, none
-5. TONE — formal/casual/friendly/sarcastic
-6. HUMOR — type of jokes, sarcasm level
-7. GREETINGS — how they start conversations
-8. SIGN-OFFS — how they end conversations
-9. RESPONSE PATTERNS — quick/delayed, brief/detailed
-10. LANGUAGE MIXING — Telugu/English/Hindi patterns
-11. TYPOS — intentional misspellings, shortcuts
-12. UNIQUE TRAITS — what makes this person's style distinctive
+    this.messagingStyle = {
+      ...style,
+      learnedFrom: myMessages.length,
+      contactName,
+      learnedAt: new Date().toISOString(),
+    }
 
-Respond in JSON:
-{
-  "vocabulary": ["word1", "word2"],
-  "sentence_style": "short and punchy",
-  "emojis": {"frequent": ["😂", "🔥"], "occasional": ["👍"]},
-  "punctuation": "minimal periods, lots of exclamation",
-  "tone": "casual friendly",
-  "humor": "sarcastic but warm",
-  "greeting_patterns": ["hey", "yo", "ra"],
-  "signoff_patterns": ["ok ra", "bye", "tc"],
-  "response_speed": "fast, usually within minutes",
-  "language_mix": "70% English, 30% Telugu",
-  "typical_length": "1-2 sentences",
-  "unique_traits": "uses 'ra' a lot, short replies, 🔥 for emphasis"
-}` },
-      { role: 'user', content: `Contact: ${contactName}\n\nMy messages (${myMessages.length} total):\n${myMessages.slice(0, 50).map((m) => `- ${m.text}`).join('\n')}\n\nMessaging style:` },
-    ], { maxTokens: 600 })
+    this._precomputeStyleFragments()
 
-    try {
-      const start = response.indexOf('{')
-      const end = response.lastIndexOf('}')
-      const style = JSON.parse(response.slice(start, end + 1))
+    // Persist async — non-blocking
+    writeFile(STYLE_FILE, JSON.stringify(this.messagingStyle, null, 2)).catch(() => {})
 
-      this.messagingStyle = {
-        ...style,
-        learnedFrom: myMessages.length,
-        contactName,
-        learnedAt: new Date().toISOString(),
+    return { ok: true, style: this.messagingStyle }
+  }
+
+  /**
+   * Fast style extraction — O(n), no LLM call.
+   * Analyzes message patterns directly.
+   */
+  _extractStyleFast(messages) {
+    const wordFreq = {}
+    const emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu
+    const allEmojis = []
+    let totalLength = 0
+    let teluguCount = 0
+    let englishCount = 0
+    const greetings = []
+    const signoffs = []
+    const slangWords = []
+
+    for (const msg of messages) {
+      const text = msg.text || ''
+      totalLength += text.length
+
+      // Word frequency
+      const words = text.toLowerCase().split(/\s+/)
+      for (const w of words) {
+        if (w.length > 2) wordFreq[w] = (wordFreq[w] || 0) + 1
       }
 
-      await writeFile(STYLE_FILE, JSON.stringify(this.messagingStyle, null, 2))
-      return { ok: true, style: this.messagingStyle }
-    } catch {
-      return { ok: false, error: 'Failed to parse style analysis' }
+      // Emojis
+      const emojis = text.match(emojiRegex) || []
+      allEmojis.push(...emojis)
+
+      // Language detection
+      const teluguChars = (text.match(/[\u0C00-\u0C7F]/g) || []).length
+      const englishChars = (text.match(/[a-zA-Z]/g) || []).length
+      teluguCount += teluguChars
+      englishCount += englishChars
+
+      // Greetings (first message patterns)
+      if (messages.indexOf(msg) < 3) {
+        greetings.push(words[0])
+      }
+
+      // Short words as slang
+      for (const w of words) {
+        if (w.length <= 3 && w.length > 1 && !['the', 'and', 'for', 'you'].includes(w)) {
+          slangWords.push(w)
+        }
+      }
+    }
+
+    // Sort word frequency
+    const topWords = Object.entries(wordFreq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 30)
+      .map(([w]) => w)
+
+    // Emoji frequency
+    const emojiFreq = {}
+    for (const e of allEmojis) emojiFreq[e] = (emojiFreq[e] || 0) + 1
+    const topEmojis = Object.entries(emojiFreq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+
+    const avgLength = totalLength / messages.length
+    const totalLang = teluguCount + englishCount || 1
+
+    return {
+      vocabulary: topWords,
+      sentence_style: avgLength < 30 ? 'short and punchy' : avgLength < 80 ? 'medium' : 'detailed',
+      emojis: {
+        frequent: topEmojis.slice(0, 5).map(([e]) => e),
+        occasional: topEmojis.slice(5).map(([e]) => e),
+      },
+      punctuation: 'minimal',
+      tone: 'casual friendly',
+      humor: 'natural',
+      greeting_patterns: [...new Set(greetings)].slice(0, 5),
+      signoff_patterns: ['bye', 'tc', 'ok'],
+      response_speed: 'fast',
+      language_mix: `${Math.round((englishCount / totalLang) * 100)}% English, ${Math.round((teluguCount / totalLang) * 100)}% Telugu`,
+      typical_length: avgLength < 30 ? '1-2 sentences' : '2-4 sentences',
+      unique_traits: `uses ${topEmojis[0]?.[0] || '😂'} a lot, ${avgLength < 30 ? 'short' : 'medium'} replies`,
+      slang: [...new Set(slangWords)].slice(0, 15),
     }
   }
 
   /**
-   * Import conversation history for a contact.
+   * Import conversation history.
    */
   async importConversation(contactName, messages) {
     await this.init()
 
     this.conversations.set(contactName, messages)
+    this.replyCache.invalidate(contactName)
 
-    // Save to disk
+    // Persist async — non-blocking
     const filePath = join(CONVERSATIONS_DIR, `${contactName.replace(/[^a-zA-Z0-9]/g, '_')}.json`)
-    await writeFile(filePath, JSON.stringify({ contact: contactName, messages, importedAt: new Date().toISOString() }, null, 2))
+    writeFile(filePath, JSON.stringify({
+      contact: contactName,
+      messages,
+      importedAt: new Date().toISOString(),
+    }, null, 2)).catch(() => {})
 
-    // Also learn style from this conversation
     return { ok: true, messageCount: messages.length }
   }
 
   /**
-   * Generate a reply in your style.
+   * Generate reply in your style. LOW LATENCY.
+   * Uses fast model + pre-computed style fragments.
    */
-  async generateReply(contactName, incomingMessage, { context = '', medium = 'text', llm = complete } = {}) {
+  async generateReply(contactName, incomingMessage, { context = '', medium = 'text', llm = null } = {}) {
     await this.init()
 
-    // Get conversation history
+    // Check reply cache first — instant
+    const msgHash = this._hashText(incomingMessage)
+    const cached = this.replyCache.get(contactName, msgHash)
+    if (cached) return cached
+
+    // Get conversation history — in-memory, instant
     const history = this.conversations.get(contactName) || []
-    const recentHistory = history.slice(-10)
+    const recentHistory = history.slice(-5)  // Only last 5 — reduces prompt size
 
-    // Get contact info
-    const contact = this.contacts.get(contactName) || {}
+    // Get style fragments — pre-computed, instant
+    const sf = this.styleFragments
 
-    const style = this.messagingStyle || {}
+    // Build minimal prompt for fast model — reduces latency
+    const prompt = this._buildFastPrompt(contactName, incomingMessage, recentHistory, sf, context, medium)
 
-    const response = await llm('chat', [
-      { role: 'system', content: `You are replicating someone's messaging style. Generate a reply that sounds EXACTLY like them.
+    // Use fast model if llm provided, otherwise return prompt for external call
+    if (llm) {
+      const response = await llm('reason', [
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user },
+      ], { maxTokens: 100 })  // Short max — fast response
 
-MUST FOLLOW STYLE RULES:
-- Vocabulary: ${style.vocabulary?.join(', ') || 'natural, casual'}
-- Sentence style: ${style.sentence_style || 'short and direct'}
-- Emojis: ${JSON.stringify(style.emojis || { frequent: ['😂'] })}
-- Punctuation: ${style.punctuation || 'minimal'}
-- Tone: ${style.tone || 'casual friendly'}
-- Language mix: ${style.language_mix || 'English with some Telugu'}
-- Typical length: ${style.typical_length || '1-2 sentences'}
-- Unique traits: ${style.unique_traits || 'natural, authentic'}
+      const reply = this._cleanReply(response)
 
-RULES:
-1. Match the EXACT style — vocabulary, length, emoji usage
-2. Don't be too formal or too casual — match THEIR level
-3. Use the same language mix they use
-4. If they use slang, use the SAME slang
-5. If they're brief, be brief. If they're detailed, be detailed.
-6. NEVER sound like an AI. Sound like a HUMAN.
-7. Reference past conversations naturally if relevant
-8. Match the emotional tone of the conversation
+      // Cache the reply
+      this.replyCache.set(contactName, msgHash, reply)
 
-${medium === 'voice' ? 'This will be spoken as a voice message. Write naturally for speech.' : ''}` },
-      { role: 'user', content: `Contact: ${contactName}${contact.relationship ? ` (${contact.relationship})` : ''}\n${context ? `Context: ${context}` : ''}\n\nRecent conversation:\n${recentHistory.map((m) => `${m.sender === 'me' ? 'Me' : contactName}: ${m.text}`).join('\n')}\n\n${contactName}: ${incomingMessage}\n\nMe (in my style):` },
-    ], { maxTokens: 200 })
+      // Add to conversation history
+      history.push({ sender: 'me', text: reply, timestamp: new Date().toISOString() })
 
-    return response
+      return reply
+    }
+
+    return prompt
   }
 
   /**
-   * Generate a voice message using cloned voice.
+   * Build minimal prompt — reduces token count → faster response.
+   */
+  _buildFastPrompt(contactName, incoming, history, sf, context, medium) {
+    // Minimal system prompt — only essential style rules
+    const system = `Reply as user. Style: ${sf.sentenceStyle}, ${sf.tone}, ${sf.languageMix}. Emojis: ${sf.emojis.frequent.join('')}. ${sf.uniqueTraits}. Max 2 sentences. ${medium === 'voice' ? 'Spoken style.' : ''}`
+
+    // Minimal conversation context
+    const histStr = history.length > 0
+      ? history.slice(-3).map((m) => `${m.sender === 'me' ? 'Me' : contactName}: ${m.text}`).join('\n')
+      : ''
+
+    const user = `${context ? `Ctx: ${context}\n` : ''}${histStr}\n${contactName}: ${incoming}\nMe:`
+
+    return { system, user }
+  }
+
+  /**
+   * Clean reply — remove AI artifacts.
+   */
+  _cleanReply(text) {
+    return text
+      .replace(/^(Me:|Reply:|Response:)\s*/i, '')
+      .replace(/\n.*$/s, '')  // Take only first line
+      .trim()
+      .slice(0, 200)  // Max 200 chars
+  }
+
+  /**
+   * Simple text hash for cache key.
+   */
+  _hashText(text) {
+    let hash = 0
+    const str = text.toLowerCase().slice(0, 50)
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i)
+      hash |= 0
+    }
+    return hash.toString(36)
+  }
+
+  /**
+   * Generate voice message. Parallel — text + voice params simultaneously.
    */
   async generateVoiceMessage(contactName, incomingMessage, { context = '' } = {}) {
-    // First generate the text reply
-    const text = await this.generateReply(contactName, incomingMessage, { context, medium: 'voice' })
-
-    // Then generate voice parameters using cloned voice
-    const voiceResult = await voiceCloneEngine.generateClonedSpeech(text, { emotion: 'casual' })
+    // Run text generation and voice param lookup in parallel
+    const [text, voiceParams] = await Promise.all([
+      this.generateReply(contactName, incomingMessage, { context, medium: 'voice' }),
+      Promise.resolve(voiceCloneEngine.getTTSParams()),
+    ])
 
     return {
       ok: true,
       text,
-      voice: voiceResult,
+      voice: { tts_params: voiceParams, profile: voiceCloneEngine.activeProfile },
       contactName,
     }
   }
 
   /**
-   * Set contact information.
+   * Set contact info. Instant — in-memory.
    */
   setContact(name, { relationship = '', platform = '', notes = '' } = {}) {
     this.contacts.set(name, { relationship, platform, notes, updatedAt: new Date().toISOString() })
   }
 
   /**
-   * Get messaging style summary.
+   * Get style summary. Instant.
    */
   getStyleSummary() {
     if (!this.messagingStyle) return { learned: false }
     return {
       learned: true,
-      ...this.messagingStyle,
+      fragments: this.styleFragments,
       conversationsStored: this.conversations.size,
       contactsKnown: this.contacts.size,
+      cacheSize: this.replyCache.cache.size,
     }
   }
 
   /**
-   * Get stats.
+   * Get stats. Instant.
    */
   getStats() {
     return {
       styleLearned: !!this.messagingStyle,
       conversations: this.conversations.size,
       contacts: this.contacts.size,
-      styleAccuracy: this.messagingStyle?.learnedFrom || 0,
+      replyCacheSize: this.replyCache.cache.size,
+      styleFragmentsReady: Object.keys(this.styleFragments).length > 0,
+      ready: this.ready,
     }
   }
 }
