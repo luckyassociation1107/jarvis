@@ -173,7 +173,7 @@ limits, and to set the AI's share of free RAM. `GET /autopilot` is read-only;
 `POST /autopilot/config` saves a share/cap and re-plans live (the panel's APPLY
 and RESCAN buttons), and never downloads anything. The **INSTALL SELECTED STACK**
 button and the setup page both call `POST /autopilot/install`, and that call is
-the only thing that downloads model weights. Nothing downloads a tier you did
+the only thing that downloads the runtime or a model weight. Nothing downloads a tier you did
 not pick: existing packages, model tags, runtime and Whisper files are reused,
 and other RAM tiers and non-fitting best-effort weights are never bulk-fetched.
 Kokoro is fetched and cached by the browser on first use when the RAM plan
@@ -181,9 +181,10 @@ selects it. No desktop bundle or EXE is created.
 
 **Nothing in this repository installs a program for you.** Every entry point —
 `npm run setup`, `build.sh`, `build.ps1` — either hosts the setup page or points
-at it; the page links the official installer for your platform, and you run it.
-That includes Ollama, which is never installed silently and never with `sudo`
-on your behalf.
+at it. The one thing that is downloaded on your behalf is the Ollama *standalone
+binary archive*, into this project's own `models/runtime/`, when you press the
+page's button; nothing is installed system-wide and no `sudo` is ever used. A
+system Ollama remains your call, through the link the page still offers.
 
 ## Setup: the page does the installing
 
@@ -214,13 +215,20 @@ when the routes share it), the Whisper file, and the speech runtime. Progress
 streams step by step; if a step is skipped the page says why rather than
 pretending it succeeded.
 
-Ollama itself is a program, and the page does not install it silently. It links
-[yours](https://ollama.com/download) — `OllamaSetup.exe`, `Ollama.dmg`,
-`ollama-linux-amd64.tgz`, or the official `curl -fsSL https://ollama.com/install.sh | sh`
-one-liner on Linux — and offers a **Re-check** button that re-reads `runtime`
-instead of guessing. Install it, restart it, re-check, and the model downloads
-run. On a machine where a complete stack is already present the page says so and
-you can close it.
+**The runtime is part of that one click.** Ollama publishes standalone builds
+next to its installers, and a page can download and unpack an archive — so the
+bridge does exactly that: it fetches `ollama-linux-amd64.tgz`,
+`ollama-darwin.tgz` or `ollama-windows-amd64.zip` from the official release,
+unpacks it into `models/runtime/`, starts `ollama serve` out of it, and only then
+pulls the models. No installer runs, no administrator prompt appears, nothing is
+added to your PATH, and deleting `models/runtime/` removes the runtime
+completely. If a model server already answers on the model port, that step is
+one line of text and nothing is downloaded. If you would rather have a managed
+Ollama — the desktop app, the Windows installer, the system package — the page
+keeps its download link and a **Re-check** button, and `scripts/start.mjs` starts
+whichever one exists. `JARVIS_RUNTIME_DIR` and `JARVIS_RUNTIME_BASE` relocate that
+folder and point it at a mirror; `JARVIS_RUNTIME_MODELS` is where the portable
+runtime keeps its weights (`models/ollama` by default).
 
 `npm start` also opens that page automatically when the plan has no Ollama or a
 model slot that is not `ready`; pass `--no-open` to keep it shut. In the HUD the
@@ -298,6 +306,10 @@ Linux, quoting of typed text, capability gaps, app discovery and launch
 matching) and the capability block (what a headless, read-only Linux host says
 about itself, and what a write-enabled one says instead) without running a
 command or moving a pointer.
+`npm run test:runtime` covers the one-click runtime against a local mock release
+server: per-platform asset choice, download, unpack of both the tarball and the
+Windows zip, a second press skipping the download, the already-answering case,
+and honest failures for a bad download and an archive that will not unpack.
 `npm run smoke` exercises the bridge and tool loop, RAM-plan response shape and
 33-tier catalogue/statuses, the served `/install` setup page and its `runtime`
 contract, the terminal client answering through the same bridge in one-shot
@@ -371,11 +383,12 @@ AI session.
 **In one line:** the root setup script, a supported local model runtime when
 models fit, and a real browser for microphone/WebGL. Ollama is recommended.
 
-- **A model server.** [Ollama](https://ollama.com) is the default, and the
-  setup page links its official installer for your platform so *you* install it.
-  No build script installs it, silently or otherwise. llama.cpp, LM Studio and
-  vLLM remain available through their OpenAI-compatible endpoints; custom
-  endpoints are never overwritten.
+- **A model server.** [Ollama](https://ollama.com) is the default. The setup
+  page's one button downloads Ollama's standalone build into `models/runtime/`
+  and runs it — no installer, no admin — or links the official system installer
+  if you prefer a managed one. llama.cpp, LM Studio and vLLM remain available
+  through their OpenAI-compatible endpoints; custom endpoints are never
+  overwritten.
 - **Node.js 20 or newer** and the project npm packages. The root scripts check
   and bootstrap Node where supported, then install missing/stale packages from
   the lockfile.

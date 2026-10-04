@@ -227,7 +227,10 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
       const response = await fetch(`${BRIDGE_HTTP_URL}/autopilot/install`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: '{}',
+        // `runtime: true` is the difference between "download the models" and
+        // "make it work": if no model server is answering, the bridge fetches
+        // Ollama's standalone build into the project and starts it first.
+        body: JSON.stringify({ runtime: true }),
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(String(data.error ?? `Installer returned HTTP ${response.status}`))

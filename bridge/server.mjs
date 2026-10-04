@@ -25,6 +25,7 @@ import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, with
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
 import { availableRam, install as autopilotInstall, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
+import { ensureRuntime, runtimeStatus } from './portable-runtime.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -883,6 +884,10 @@ const handleRequest = async (req, res) => {
         diskFreeGb: diskFreeGb(),
         ollamaInstalled: Boolean(programPath('ollama')),
         downloadUrl: OLLAMA_DOWNLOAD[process.platform] ?? OLLAMA_DOWNLOAD.linux,
+        // The standalone build the page can fetch for a machine that has
+        // nothing yet: same binary, no installer, unpacked inside this repo.
+        // Read per request so a download that just finished shows up here.
+        portable: runtimeStatus(),
       },
     }))
   }
@@ -973,7 +978,7 @@ const handleRequest = async (req, res) => {
       return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
     }
     if (request === null || typeof request !== 'object' || Array.isArray(request)) request = {}
-    const unknown = Object.keys(request).filter((key) => key !== 'ramGb')
+    const unknown = Object.keys(request).filter((key) => key !== 'ramGb' && key !== 'runtime')
     if (unknown.length) {
       res.writeHead(400, { ...cors, 'content-type': 'application/json' })
       return res.end(JSON.stringify({ error: `Unknown option${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}` }))
@@ -1006,15 +1011,29 @@ const handleRequest = async (req, res) => {
     for (const [id, old] of AUTOPILOT_JOBS) {
       if (old.state !== 'running' && Date.now() - old.updatedAt > 30 * 60 * 1000) AUTOPILOT_JOBS.delete(id)
     }
-    void autopilotInstall({
-      dir: 'models',
-      planned,
-      onStep: (step) => {
-        job.progress = step
-        job.updatedAt = Date.now()
-        job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
-      },
-    }).then((result) => {
+    const onStep = (step) => {
+      job.progress = step
+      job.updatedAt = Date.now()
+      job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
+    }
+    void (async () => {
+      // One click means the runtime too. When the page asks for it, a machine
+      // with no Ollama at all gets the standalone build fetched into the repo
+      // and started before the first model pull — and a machine that already
+      // answers on the model port skips this in one line.
+      if (request.runtime === true) {
+        const ready = await ensureRuntime({ onStep })
+        if (!ready.ok) {
+          const error = ready.error ?? 'the model runtime could not be started'
+          job.error = error
+          job.state = 'failed'
+          job.updatedAt = Date.now()
+          return null
+        }
+      }
+      return autopilotInstall({ dir: 'models', planned, onStep })
+    })().then((result) => {
+      if (result === null) return
       job.result = result.log
       const failed = result.log.filter((item) => !item.ok && !item.skipped).length
       job.state = failed ? (result.log.some((item) => item.ok && !item.skipped) ? 'partial' : 'failed') : 'completed'

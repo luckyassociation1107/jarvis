@@ -253,6 +253,11 @@ assert.ok(setupPage.includes('ramGb: state.selected'), 'the one button installs 
 assert.ok(setupPage.includes('autopilot/install'), 'it drives the installer endpoints on the bridge that served it')
 assert.ok(!/<script[^>]+src=|<link[^>]+href="https?:/.test(setupPage), 'it loads nothing from the network — a setup page that needs a CDN is useless on a fresh machine')
 assert.ok(!setupPage.includes('undefined'), 'no field is rendered as undefined')
+// A page that is pure string assembly can ship a syntax error from one bad
+// quote and look perfect until the browser silently runs nothing.
+const setupScript = setupPage.match(/<script>([\s\S]*?)<\/script>/)
+assert.ok(setupScript, 'the page carries its script inline')
+assert.doesNotThrow(() => new Function(setupScript[1]), 'the setup page script parses')
 const linuxPage = installerPage({ platform: 'linux', port: 8787 })
 assert.ok(linuxPage.includes('install.sh'), 'the Linux page shows the official one-line installer')
 assert.ok(!linuxPage.includes('hud='), 'without a known HUD there is no dead link')

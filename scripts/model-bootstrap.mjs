@@ -9,6 +9,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { install, plan, planSummary } from '../bridge/autopilot.mjs'
+import { findRuntimeBinary, runtimePlan } from '../bridge/portable-runtime.mjs'
 import {
   canStartLocalOllama,
   configuredModelBaseUrl,
@@ -57,7 +58,8 @@ const automaticDownloadBytes = [...new Map(installableDownloadSlots.map(([, choi
 ])).values()].reduce((sum, bytes) => sum + bytes, 0)
 
 function hasOllamaCli() {
-  const binary = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
+  // The project's own downloaded runtime is an Ollama CLI too.
+  const binary = findRuntimeBinary(runtimePlan(), process.env) ?? (process.platform === 'win32' ? 'ollama.exe' : 'ollama')
   const result = spawnSync(binary, ['--version'], {
     encoding: 'utf8',
     windowsHide: true,

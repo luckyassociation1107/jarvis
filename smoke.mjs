@@ -265,8 +265,10 @@ const autopilotChecks = [
     return ['platform', 'arch', 'ollamaInstalled', 'downloadUrl'].every((key) => runtime[key] !== undefined)
       && (runtime.diskFreeGb === null || Number.isFinite(runtime.diskFreeGb))
       && Number.isFinite(runtime.totalRamGb)
+      && Boolean(runtime.portable?.asset) && typeof runtime.portable.present === 'boolean'
   })()],
-  ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('pick a stack and press the button') && setupPage.includes('autopilot/install')],
+  ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('autopilot/install')],
+  ['the one-click button asks the bridge for the runtime as well as the models', Boolean(setupPage) && setupPage.includes('runtime: true') && setupPage.includes('models/runtime')],
   ['the setup page offers the official runtime download for this platform', Boolean(setupPage) && setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
   ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {

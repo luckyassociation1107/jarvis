@@ -20,13 +20,16 @@ Node bridge (bridge/server.mjs)
 
 The default model endpoint is `http://localhost:11434/v1`. Ollama is the
 recommended runtime; llama.cpp, LM Studio and vLLM can use the OpenAI-compatible
-route. Ollama is installed by *you*, from the link the setup page gives you — no
-script here runs an installer, silently or with `sudo`. `npm run setup` hosts
-that page (`bridge/installer.mjs` serving `GET /install`) on the bridge's own
-port and opens it in your browser; if no bridge is running, it starts one for
-the setup session. `npm start` opens the same page when the plan has no Ollama
-or a model slot that is not ready, and starts an installed local Ollama CLI when
-one is available.
+route. The runtime is downloaded by the setup page's one button: Ollama's
+standalone build goes into `models/runtime/` inside this project and runs from
+there — one click, no installer, no admin, nothing on PATH
+(`bridge/portable-runtime.mjs`). A system Ollama, if you have one, is used
+instead whenever it is already answering. `npm run setup` hosts the page
+(`bridge/installer.mjs` serving `GET /install`) on the bridge's own port and
+opens it in your browser; if no bridge is running, it starts one for the setup
+session. `npm start` opens the same page when no runtime answers or a model slot
+is not ready, and starts whichever ollama binary exists — the project's own copy
+first.
 
 ## RAM planner and models
 
@@ -76,11 +79,15 @@ informational; it never installs every tier. `GET /autopilot` is read-only,
 `POST /autopilot/config` only saves the share/cap and re-plans, and
 `POST /autopilot/install` is the single user-triggered download action — the
 same endpoint behind both the panel's INSTALL SELECTED STACK button and the
-setup page. It downloads only the selected fitting Ollama models, Whisper model
-and speech runtime; existing assets are reused, and other tiers and over-budget
-best-effort models are skipped. Neither the endpoint nor any script runs a
-system installer for Ollama: the page links it and re-checks `runtime` when you
-say you installed it. `npm run doctor` is the read-only preflight.
+setup page. With `{ runtime: true }` (what the page sends) it first makes sure a
+model server is up: an existing one is left alone, the project's own downloaded
+runtime is started, or the standalone archive is fetched and unpacked into
+`models/runtime/`. It then downloads only the selected fitting Ollama models,
+the Whisper model and the speech runtime; existing assets are reused, and other
+tiers and over-budget best-effort models are skipped. No system installer is
+ever run and no `sudo` is ever used — the page keeps a link to the official
+installer for anyone who wants a managed Ollama instead. `npm run doctor` is the
+read-only preflight.
 
 ## A turn
 
@@ -153,14 +160,14 @@ npm run setup
 port 8787, or starts `bridge/server.mjs` for the session; it prints
 `http://localhost:8787/install?hud=…` and opens it in the default browser. That
 page is the installer: it reads `runtime` (platform, arch, RAM, free disk,
-whether Ollama is present), lists the stack rungs the RAM planner offers — the
-same catalogue as MODEL STACK — and downloads the stack you pick through
-`POST /autopilot/install`, streaming each step. It is served by the bridge
-itself, same-origin with those endpoints, so Node alone is enough. Ollama is a
-separate program: the page links the official installer for your platform and
-offers **Re-check**; it never installs it for you. The server-side pieces stay
-apart: `npm run doctor` reports, `npm run setup` hosts the page, `npm run
-models:install` is the scripted download path used by tests.
+whether Ollama is present, whether the project's own runtime is unpacked), lists
+the stack rungs the RAM planner offers — the same catalogue as MODEL STACK —
+and one button does the whole job: runtime first, then the stack you picked,
+streaming each step. It is served by the bridge itself, same-origin with those
+endpoints, so Node alone is enough. The system installer stays an alternative
+for anyone who wants a managed Ollama; it is never run for you. The server-side
+pieces stay apart: `npm run doctor` reports, `npm run setup` hosts the page,
+`npm run models:install` is the scripted download path used by tests.
 
 The platform scripts still exist and no longer install anything themselves:
 

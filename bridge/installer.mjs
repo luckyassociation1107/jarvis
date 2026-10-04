@@ -97,7 +97,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
 <body>
 <header>
   <div class="brand">J.A.R.V.I.S <span>· setup</span></div>
-  <div class="sub">Everything the local model needs, chosen here and downloaded by this bridge. Nothing is installed behind your back — pick a stack and press the button.</div>
+  <div class="sub">One button: the model runtime, then the stack you picked, downloaded by this bridge into this project's own folders. No installer, no administrator prompt, no system-wide changes.</div>
 </header>
 <main>
   <section class="card">
@@ -114,7 +114,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     <h2>3 · stack</h2>
     <div id="tiers" class="tiers"><span class="muted">loading the ladder…</span></div>
     <div class="actions">
-      <button id="install" class="primary" disabled>Download this stack</button>
+      <button id="install" class="primary" disabled>Install everything</button>
       <span id="pick" class="muted">no stack selected</span>
       <span style="flex:1"></span>
       <label class="muted" style="font-size:13px"><input type="checkbox" id="fitsOnly"> show only what this machine can run</label>
@@ -170,23 +170,30 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     var running = state.plan.ollama
     var slots = (state.plan.modelSlots || []).filter(function (s) { return s.model })
     var ready = slots.filter(function (s) { return s.state === 'ready' }).length
+    var portable = rt.portable || {}
     var html = '<div class="grid">'
       + stat('ollama', running ? 'running' : (rt.ollamaInstalled ? 'installed, not running' : 'not installed'), running ? 'ok' : 'bad')
+      + stat('project runtime', portable.present ? 'ready in models/runtime' : (portable.supported ? 'not downloaded yet' : 'not published for this platform'), portable.present ? 'ok' : '')
       + stat('models ready', ready + ' / ' + slots.length, ready === slots.length && slots.length ? 'ok' : 'bad')
       + '</div>'
       + (running && ready < slots.length
         ? '<p class="note">Selected stack still needs ' + (slots.length - ready) + ' model' + (slots.length - ready === 1 ? '' : 's') + '. Pick a stack below and download it in one click.</p>'
         : '')
     if (!running) {
-      html += '<p class="note">' + (rt.ollamaInstalled
-        ? 'Ollama is installed but not answering. Start it (<code>ollama serve</code>, or the desktop app) and press re-check.'
-        : 'JARVIS needs the Ollama runtime for local models. ' + ${JSON.stringify(runtimeLine)}) + '</p>'
-      if (!rt.ollamaInstalled) {
-        html += '<div class="actions"><a href="' + DOWNLOAD + '" target="_blank" rel="noreferrer"><button class="primary">Download Ollama for ' + OS + '</button></a>'
-        if (COMMAND) html += '<code>' + COMMAND + '</code>'
-        html += '</div>'
+      var portable = rt.portable || {}
+      var line
+      if (rt.ollamaInstalled) {
+        line = 'Ollama is installed but not answering. Press <b>Install everything</b> below and this page will start it for you; or start it yourself (<code>ollama serve</code>, or the desktop app) and press re-check.'
+      } else if (portable.present) {
+        line = 'The model runtime is already unpacked in this project (<code>' + (portable.path || '') + '</code>). Press <b>Install everything</b> below: it starts here, and the models follow.'
+      } else {
+        line = 'No model runtime yet. Press <b>Install everything</b> below and this page downloads the official standalone Ollama build (' + (portable.asset || 'the official archive') + ') into this project, starts it, then downloads the stack you picked. Nothing is installed system-wide and nothing is added to your PATH.'
       }
-      html += '<div class="actions"><button id="recheck">Re-check</button></div>'
+      html += '<p class="note">' + line + '</p>'
+      html += '<p class="note muted" style="font-size:13px">Already have Ollama, or want it managed by the system? ' + ${JSON.stringify(runtimeLine)} + '</p>'
+      html += '<div class="actions"><a href="' + DOWNLOAD + '" target="_blank" rel="noreferrer"><button>Download the ' + OS + ' installer instead</button></a>'
+      if (COMMAND) html += '<code>' + COMMAND + '</code>'
+      html += '<span style="flex:1"></span><button id="recheck">Re-check</button></div>'
     }
     el('runtime').innerHTML = html
     var again = el('recheck')
@@ -230,7 +237,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
       button.disabled = false
     }
     el('pick').textContent = tier
-      ? (tier.ramGb < 1 ? '500 MB' : tier.ramGb + ' GB') + ' stack · ' + gb(tier.totalDownloadGb || 0) + ' to download'
+      ? 'Install everything · ' + (tier.ramGb < 1 ? '500 MB' : tier.ramGb + ' GB') + ' stack · ' + gb(tier.totalDownloadGb || 0) + ' of models'
       : 'no stack selected'
   }
 
@@ -239,12 +246,17 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     if (step.phase === 'plan') label = 'planned · ' + (step.summary || '')
     else if (step.phase === 'pull') label = 'downloading ' + step.model + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
     else if (step.phase === 'whisper') label = 'downloading ' + step.file + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
+    else if (step.phase === 'runtime') label = 'runtime · ' + (step.status || 'ready')
+    else if (step.phase === 'runtime-download') label = 'runtime · ' + (step.status || 'downloading') + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
+    else if (step.phase === 'runtime-unpack') label = 'runtime · ' + (step.status || 'unpacking')
+    else if (step.phase === 'runtime-ready') label = 'runtime · ' + (step.status || 'ready')
     else if (step.phase === 'skip') label = 'skipped ' + (step.model || step.cap || '') + (step.status ? ' · ' + step.status : '')
     else if (step.phase === 'browser-voice') label = 'voice · ' + (step.status || step.model || 'browser')
     else if (step.phase === 'done') label = 'finished · ' + step.installed + ' installed, ' + (step.skipped || 0) + ' skipped, ' + (step.failed || 0) + ' failed'
     else if (step.phase === 'error') label = 'error · ' + (step.message || '')
     else label = step.phase
-    var cls = step.phase === 'done' ? 'done' : step.phase === 'error' ? 'fail' : step.phase === 'pull' || step.phase === 'whisper' ? 'now' : ''
+    var runtimePhase = step.phase && step.phase.indexOf('runtime') === 0
+    var cls = step.phase === 'done' ? 'done' : step.phase === 'error' ? 'fail' : (step.phase === 'pull' || step.phase === 'whisper' || step.phase === 'runtime-download') ? 'now' : runtimePhase && step.ok === false ? 'fail' : ''
     return '<div class="step ' + cls + '"><span class="mark">' + (step.phase === 'done' ? '✓' : step.phase === 'error' ? '✗' : '›') + '</span><span>' + label + '</span></div>'
   }
 
@@ -252,7 +264,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     var steps = (job.steps || []).slice(-60)
     el('steps').innerHTML = steps.map(stepLine).join('') || '<div class="step muted">starting…</div>'
     el('steps').scrollTop = el('steps').scrollHeight
-    var current = steps.filter(function (s) { return s.phase === 'pull' || s.phase === 'whisper' }).pop()
+    var current = steps.filter(function (s) { return s.phase === 'pull' || s.phase === 'whisper' || s.phase === 'runtime-download' }).pop()
     if (current && current.total) el('bar').style.width = Math.min(100, Math.round((current.completed / current.total) * 100)) + '%'
     else if (job.state === 'running') el('bar').style.width = '8%'
     if (job.state !== 'running') {
@@ -274,7 +286,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     fetch('autopilot/install', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ramGb: state.selected }),
+      body: JSON.stringify({ ramGb: state.selected, runtime: true }),
     }).then(function (r) { return r.json() }).then(function (res) {
       if (res.error) { el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + res.error + '</span></div>'; return }
       state.job = res.jobId
