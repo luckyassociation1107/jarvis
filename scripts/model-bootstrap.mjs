@@ -8,6 +8,7 @@
  * downloads.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import { install, plan, planSummary } from '../bridge/autopilot.mjs'
 import { findRuntimeBinary, runtimePlan } from '../bridge/portable-runtime.mjs'
 import {
@@ -24,7 +25,7 @@ import {
 const GB = 1024 ** 3
 const OLLAMA_URL = (process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '')
 const args = new Set(process.argv.slice(2))
-const knownArgs = new Set(['--install', '--plan-json', '--needs-local-ollama-install'])
+const knownArgs = new Set(['--install', '--plan-json', '--needs-local-ollama-install', '--confirm'])
 const unknownArgs = [...args].filter((argument) => !knownArgs.has(argument))
 if (unknownArgs.length) {
   console.error(`Unknown option${unknownArgs.length === 1 ? '' : 's'}: ${unknownArgs.join(', ')}`)
@@ -115,7 +116,11 @@ if (args.has('--plan-json')) {
 }
 
 if (!args.has('--install')) {
-  console.error('Usage: node scripts/model-bootstrap.mjs --install | --plan-json | --needs-local-ollama-install')
+  console.error('Usage: node scripts/model-bootstrap.mjs --install [--confirm] | --plan-json | --needs-local-ollama-install')
+  console.error('')
+  console.error('  --install          Install models from the current RAM plan (prompts for confirmation)')
+  console.error('  --confirm          Skip the confirmation prompt — pull immediately')
+  console.error('  --plan-json        Print the current plan as JSON')
   process.exit(2)
 }
 
@@ -211,6 +216,38 @@ process.once('SIGINT', () => {
 process.once('SIGTERM', () => {
   void stopTemporaryOllama().finally(() => process.exit(143))
 })
+
+function ask(question) {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(question, (answer) => {
+      rl.close()
+      resolve(answer.trim())
+    })
+  })
+}
+
+// ── User confirmation ──
+// Always show what will be pulled and wait for the user to agree.
+// --confirm is the explicit flag; the prompt is always shown unless
+// JARVIS_AUTO_INSTALL=1 is set (for CI / scripted flows).
+const autoInstall = args.has('--confirm') || process.env.JARVIS_AUTO_INSTALL === '1'
+
+if (!autoInstall && installableDownloadSlots.length) {
+  console.log('\nThe following models will be downloaded:')
+  for (const [cap, choice] of installableDownloadSlots) {
+    const name = choice.model ?? choice.file ?? cap
+    const size = choice.bytes ? ` (${(choice.bytes / GB).toFixed(1)} GB)` : ''
+    console.log(`  [${cap.toUpperCase()}] ${name}${size}`)
+  }
+  console.log(`\nTotal download: ${(automaticDownloadBytes / GB).toFixed(2)} GB`)
+  const answer = await ask('\nProceed with download? [Y/n] ')
+  if (answer && answer.toLowerCase() !== 'y' && answer !== '') {
+    console.log('Cancelled. No models downloaded.')
+    await stopTemporaryOllama()
+    process.exit(0)
+  }
+}
 
 try {
   await startTemporaryOllama()

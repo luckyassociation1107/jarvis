@@ -1,0 +1,147 @@
+{
+  "_comment": "JARVIS Model Configuration — optimized for i5-12400F + 16GB + No GPU",
+  "_hardware": {
+    "cpu": "Intel i5-12400F @ 2500MHz (6P cores, 12 threads, Alder Lake)",
+    "motherboard": "Gigabyte H610M K DDR4",
+    "ram": "16GB DDR4 (8GB typically free)",
+    "gpu": "NONE — i5-12400F is F-SKU (no iGPU), no discrete GPU",
+    "storage": "SSD (check C: drive)",
+    "os": "Windows 11 Pro Build 26200 (25H2)",
+    "tier": "medium-cpu",
+    "type": "Desktop"
+  },
+
+  "slots": {
+    "chat": {
+      "_purpose": "Uncensored multilingual chat — NO filters, NO refusals",
+      "primary": "dolphin3:8b",
+      "fallback": "huihui_ai/qwen3-abliterated:8b",
+      "quality": "dolphin3:8b",
+      "contextLength": 131072,
+      "maxTokens": 2048,
+      "temperature": 0.7,
+      "numThreads": 10,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "15-18 tok/s",
+      "uncensored": true,
+      "multilingual": true
+    },
+
+    "reason": {
+      "_purpose": "Complex reasoning — uncensored chain-of-thought",
+      "primary": "dolphin3:8b",
+      "fallback": "huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3",
+      "quality": "dolphin3:8b",
+      "contextLength": 131072,
+      "maxTokens": 2048,
+      "temperature": 0.3,
+      "numThreads": 10,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "15-18 tok/s",
+      "uncensored": true
+    },
+
+    "vision": {
+      "_purpose": "Multilingual vision — 32 language OCR, screen analysis, image understanding",
+      "primary": "qwen3-vl:4b",
+      "fallback": "minicpm-v:8b",
+      "contextLength": 262144,
+      "maxTokens": 1024,
+      "temperature": 0.5,
+      "numThreads": 10,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "15-20 tok/s",
+      "ocrLanguages": 32,
+      "multilingual": true
+    },
+
+    "coder": {
+      "_purpose": "Uncensored code generation — NO restrictions",
+      "primary": "huihui_ai/qwen2.5-coder-abliterate:7b",
+      "fallback": "qwen2.5-coder:7b",
+      "contextLength": 131072,
+      "maxTokens": 4096,
+      "temperature": 0.2,
+      "numThreads": 10,
+      "quantization": "Q4_K_M",
+      "expectedSpeed": "7-8 tok/s",
+      "uncensored": true
+    }
+  },
+
+  "install": {
+    "_instructions": "Run these commands to install uncensored models",
+    "quick": [
+      "ollama pull dolphin3:8b"
+    ],
+    "recommended": [
+      "ollama pull dolphin3:8b",
+      "ollama pull qwen3-vl:4b",
+      "ollama pull huihui_ai/qwen2.5-coder-abliterate:7b"
+    ],
+    "full": [
+      "ollama pull dolphin3:8b",
+      "ollama pull qwen3-vl:4b",
+      "ollama pull huihui_ai/qwen2.5-coder-abliterate:7b",
+      "ollama pull huihui_ai/deepseek-r1-abliterated:8b-0528-qwen3",
+      "ollama pull huihui_ai/qwen3-abliterated:8b"
+    ],
+    "_disk": "~13GB for recommended set",
+    "_ram": "~5GB per model loaded, one at a time"
+  },
+
+  "performance": {
+    "maxConcurrentInferences": 1,
+    "cacheEnabled": true,
+    "cacheSize": 100,
+    "maxHistoryMessages": 20,
+    "maxMemoryEntries": 500,
+    "backgroundProcessing": false,
+    "streamingEnabled": true,
+    "warmupOnStart": true
+  },
+
+  "modules": {
+    "eager": [
+      "agent", "workflow", "language", "commands", "memory",
+      "context", "emotion", "proactive", "local-llm",
+      "hardware-profile", "perf-optimizer", "local-llm-optimized"
+    ],
+    "lazy": [
+      "app-launcher", "vision-controller", "documents", "code-exec",
+      "digital-twin", "self-improve", "universal-translator",
+      "reasoning-engine", "wisdom", "personality", "empathy",
+      "predict-scheduler", "creative-writer"
+    ],
+    "deferred": [
+      "autonomous-coder", "research", "research-lab", "scientist",
+      "swarm", "multiverse", "world-sim", "simulation",
+      "music-studio", "holographic", "visual-storyteller",
+      "knowledge-graph", "hive-mind", "genetic", "quantum",
+      "replicator", "foresight", "memetic", "emergent",
+      "threat-model", "diplomacy", "wisdom-traditions",
+      "planetary", "economy", "education", "health", "ethics",
+      "society", "macro-memory", "orchestrator", "executive",
+      "operational", "resource-mgr", "proactive-v2"
+    ],
+    "disabled": [
+      "dream",
+      "time-travel",
+      "memory-palace"
+    ]
+  },
+
+  "ollama": {
+    "numParallel": 1,
+    "maxLoadedModels": 1,
+    "keepAlive": "5m",
+    "flashAttention": false,
+    "host": "127.0.0.1:11434",
+    "maxQueue": 10,
+    "numThreads": 10,
+    "numBatch": 256,
+    "mmap": true,
+    "mlock": false,
+    "_notes": "i5-12400F: 10 threads optimal, Q4_K_M quant, CPU-only, mmap=true for RAM efficiency"
+  }
+}
