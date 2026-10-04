@@ -1,65 +1,76 @@
 /**
- * JARVIS Gesture Engine — control your ENTIRE PC with your hands.
+ * JARVIS Gesture Engine — REALISTIC hand gestures with your 2 hands.
  *
- * Camera tracks your hands → Finger positions → Mouse/Keyboard actions
+ * Only gestures that are NATURAL and EASY with human hands.
+ * No L-shapes, no circles, no snap symbols, no 3-hand gestures.
+ * Just real, intuitive hand movements.
  *
- * POINTER:
- *   - Index finger tip = mouse pointer
- *   - Move finger = move pointer (absolute positioning)
- *   - Smooth tracking with prediction
+ * ═══════════════════════════════════════════════════════════
+ *  ONE HAND GESTURES (Primary hand):
+ * ═══════════════════════════════════════════════════════════
  *
- * CLICKS:
- *   - Index + Middle pinch = Left click
- *   - Index + Ring pinch = Right click
- *   - Index + Middle tap = Double click
- *   - Index + Middle + Ring = Middle click
- *   - Thumb + Index pinch = Select/Drag start
- *   - Thumb + Index release = Select/Drag end
+ *  POINTER:    Index finger extended, others closed
+ *              → Mouse pointer moves with finger
  *
- * SCROLL:
- *   - Index + Middle up = Scroll up
- *   - Index + Middle down = Scroll down
- *   - Index + Middle left = Scroll left
- *   - Index + Middle right = Scroll right
+ *  LEFT CLICK: Quick pinch (thumb + index touch then release)
+ *              → Left mouse click
  *
- * DRAG:
- *   - Pinch hold + move = Drag
- *   - Two hands spread = Resize
- *   - Two hands rotate = Rotate object
+ *  RIGHT CLICK: Quick pinch (thumb + middle touch then release)
+ *               → Right mouse click
  *
- * KEYBOARD:
- *   - Virtual keyboard on screen
- *   - Reduced opacity (always visible)
- *   - Tap gesture on virtual key = key press
- *   - Hold gesture = key hold (for Ctrl, Shift, Alt)
+ *  DOUBLE CLICK: Two quick pinches in a row
+ *                → Double click
  *
- * GESTURES:
- *   - Open palm = Stop/Cancel
- *   - Closed fist = Grab/Select
- *   - Peace sign = Confirm/OK
- *   - Thumbs up = Like/Approve
- *   - Point = Select/Click
- *   - Swipe = Navigate
- *   - Pinch = Zoom
- *   - Spread = Zoom out
- *   - Rotate = Rotate object
- *   - Snap = Quick action
- *   - Wave = Hello/Dismiss
- *   - Circle = Context menu
- *   - L-shape = Measure/Select area
- *   - Fist shake = Undo
- *   - Palm push = Scroll/Swipe
+ *  DRAG:       Pinch and HOLD (thumb + index locked)
+ *              then move hand = drag
+ *              Release pinch = drop
  *
- * "Nee hands tho PC motham control cheyyu.
- *  Finger move = mouse move. Pinch = click.
- *  Keyboard kuda nee gestures tho type cheyyachu."
+ *  SCROLL:     Index + Middle extended, move up/down
+ *              → Scroll wheel up/down
+ *
+ *  CTRL:       Index + Pinky extended (others closed)
+ *              → Ctrl key held
+ *
+ *  SHIFT:      Index + Ring + Pinky extended (others closed)
+ *              → Shift key held
+ *
+ *  STOP:       Open palm (all fingers extended)
+ *              → Cancel / Stop / Close
+ *
+ *  FIST:       Closed fist (all fingers closed)
+ *              → Grab / Select / Pick up
+ *
+ *  THUMBS UP:  Thumb extended, others closed
+ *              → Approve / Like / OK
+ *
+ *  UNDO:       Closed fist, shake left-right
+ *              → Undo last action
+ *
+ * ═══════════════════════════════════════════════════════════
+ *  TWO HAND GESTURES:
+ * ═══════════════════════════════════════════════════════════
+ *
+ *  ZOOM IN:    Both hands, pinch → spread apart
+ *              → Zoom in
+ *
+ *  ZOOM OUT:   Both hands, spread → pinch together
+ *              → Zoom out
+ *
+ *  SELECT:     Both index fingers = start/end of selection
+ *              → Select text/area between two points
+ *
+ * ═══════════════════════════════════════════════════════════
+ *
+ * "2 hands. 10 fingers. Full PC control.
+ *  Natural gestures. No weird shapes.
+ *  Point = mouse. Pinch = click. Grab = drag."
  */
 
 import { eventBus, EVENTS } from './event-bus.mjs'
 
 /* ──────────────── Hand Landmarks (MediaPipe) ──────────────────────────── */
 
-const HAND_LANDMARKS = {
+const HAND = {
   WRIST: 0,
   THUMB_CMC: 1, THUMB_MCP: 2, THUMB_IP: 3, THUMB_TIP: 4,
   INDEX_MCP: 5, INDEX_PIP: 6, INDEX_DIP: 7, INDEX_TIP: 8,
@@ -68,49 +79,127 @@ const HAND_LANDMARKS = {
   PINKY_MCP: 17, PINKY_PIP: 18, PINKY_DIP: 19, PINKY_TIP: 20,
 }
 
-/* ──────────────── Gesture Definitions ──────────────────────────── */
+/* ──────────────── Gesture Definitions (REALISTIC ONLY) ──────────────────────────── */
 
 const GESTURES = {
-  // Pointer
-  POINT:          { name: 'Point', fingers: ['INDEX'], action: 'pointer_move', description: 'Move cursor' },
+  // ── POINTER ──
+  POINT: {
+    name: 'Point',
+    description: 'Index finger extended = mouse pointer',
+    fingers: { thumb: false, index: true, middle: false, ring: false, pinky: false },
+    action: 'pointer_move',
+  },
 
-  // Clicks
-  LEFT_CLICK:     { name: 'Left Click', fingers: ['INDEX', 'MIDDLE'], pinch: true, action: 'left_click', description: 'Left click' },
-  RIGHT_CLICK:    { name: 'Right Click', fingers: ['INDEX', 'RING'], pinch: true, action: 'right_click', description: 'Right click' },
-  DOUBLE_CLICK:   { name: 'Double Click', fingers: ['INDEX', 'MIDDLE'], tap: true, action: 'double_click', description: 'Double click' },
-  MIDDLE_CLICK:   { name: 'Middle Click', fingers: ['INDEX', 'MIDDLE', 'RING'], pinch: true, action: 'middle_click', description: 'Middle click' },
+  // ── CLICKS ──
+  LEFT_CLICK: {
+    name: 'Left Click',
+    description: 'Thumb + Index quick pinch',
+    fingers: { thumb: true, index: true, middle: false, ring: false, pinky: false },
+    pinch: 'thumb_index',
+    action: 'left_click',
+  },
+  RIGHT_CLICK: {
+    name: 'Right Click',
+    description: 'Thumb + Middle quick pinch',
+    fingers: { thumb: true, index: false, middle: true, ring: false, pinky: false },
+    pinch: 'thumb_middle',
+    action: 'right_click',
+  },
+  DOUBLE_CLICK: {
+    name: 'Double Click',
+    description: 'Two quick thumb+index pinches',
+    fingers: { thumb: true, index: true, middle: false, ring: false, pinky: false },
+    pinch: 'thumb_index',
+    doubleTap: true,
+    action: 'double_click',
+  },
 
-  // Drag
-  DRAG_START:     { name: 'Drag Start', fingers: ['THUMB', 'INDEX'], pinch: true, hold: true, action: 'drag_start', description: 'Start drag' },
-  DRAG_END:       { name: 'Drag End', fingers: ['THUMB', 'INDEX'], release: true, action: 'drag_end', description: 'End drag' },
+  // ── DRAG ──
+  DRAG: {
+    name: 'Drag',
+    description: 'Thumb + Index pinch HOLD then move',
+    fingers: { thumb: true, index: true, middle: false, ring: false, pinky: false },
+    pinch: 'thumb_index',
+    hold: true,
+    action: 'drag',
+  },
 
-  // Scroll
-  SCROLL_UP:      { name: 'Scroll Up', fingers: ['INDEX', 'MIDDLE'], direction: 'up', action: 'scroll_up', description: 'Scroll up' },
-  SCROLL_DOWN:    { name: 'Scroll Down', fingers: ['INDEX', 'MIDDLE'], direction: 'down', action: 'scroll_down', description: 'Scroll down' },
-  SCROLL_LEFT:    { name: 'Scroll Left', fingers: ['INDEX', 'MIDDLE'], direction: 'left', action: 'scroll_left', description: 'Scroll left' },
-  SCROLL_RIGHT:   { name: 'Scroll Right', fingers: ['INDEX', 'MIDDLE'], direction: 'right', action: 'scroll_right', description: 'Scroll right' },
+  // ── SCROLL ──
+  SCROLL_UP: {
+    name: 'Scroll Up',
+    description: 'Index + Middle extended, hand moves up',
+    fingers: { thumb: false, index: true, middle: true, ring: false, pinky: false },
+    direction: 'up',
+    action: 'scroll_up',
+  },
+  SCROLL_DOWN: {
+    name: 'Scroll Down',
+    description: 'Index + Middle extended, hand moves down',
+    fingers: { thumb: false, index: true, middle: true, ring: false, pinky: false },
+    direction: 'down',
+    action: 'scroll_down',
+  },
 
-  // Keyboard modifiers
-  CTRL_HOLD:      { name: 'Ctrl Hold', fingers: ['INDEX', 'PINKY'], hold: true, action: 'ctrl_hold', description: 'Hold Ctrl key' },
-  SHIFT_HOLD:     { name: 'Shift Hold', fingers: ['INDEX', 'RING', 'PINKY'], hold: true, action: 'shift_hold', description: 'Hold Shift key' },
-  ALT_HOLD:       { name: 'Alt Hold', fingers: ['THUMB', 'MIDDLE'], hold: true, action: 'alt_hold', description: 'Hold Alt key' },
+  // ── KEYBOARD MODIFIERS ──
+  CTRL: {
+    name: 'Ctrl',
+    description: 'Index + Pinky extended (rock sign)',
+    fingers: { thumb: false, index: true, middle: false, ring: false, pinky: true },
+    action: 'ctrl_hold',
+  },
+  SHIFT: {
+    name: 'Shift',
+    description: 'Index + Ring + Pinky extended',
+    fingers: { thumb: false, index: true, middle: false, ring: true, pinky: true },
+    action: 'shift_hold',
+  },
 
-  // Action gestures
-  OPEN_PALM:      { name: 'Open Palm', fingers: ['ALL'], action: 'stop', description: 'Stop/Cancel' },
-  CLOSED_FIST:    { name: 'Closed Fist', fingers: ['NONE'], action: 'grab', description: 'Grab/Select' },
-  PEACE:          { name: 'Peace Sign', fingers: ['INDEX', 'MIDDLE'], spread: true, action: 'confirm', description: 'Confirm/OK' },
-  THUMBS_UP:      { name: 'Thumbs Up', fingers: ['THUMB'], action: 'approve', description: 'Like/Approve' },
-  WAVE:           { name: 'Wave', fingers: ['ALL'], wave: true, action: 'dismiss', description: 'Hello/Dismiss' },
-  CIRCLE:         { name: 'Circle', fingers: ['INDEX'], circle: true, action: 'context_menu', description: 'Context menu' },
-  L_SHAPE:        { name: 'L-Shape', fingers: ['THUMB', 'INDEX'], right_angle: true, action: 'select_area', description: 'Select area' },
-  FIST_SHAKE:     { name: 'Fist Shake', fingers: ['NONE'], shake: true, action: 'undo', description: 'Undo' },
-  PALM_PUSH:      { name: 'Palm Push', fingers: ['ALL'], push: true, action: 'swipe', description: 'Swipe/Scroll' },
-  SNAP:           { name: 'Snap', fingers: ['THUMB', 'MIDDLE'], snap: true, action: 'quick_action', description: 'Quick action' },
+  // ── ACTION GESTURES ──
+  OPEN_PALM: {
+    name: 'Open Palm',
+    description: 'All fingers open = Stop/Cancel',
+    fingers: { thumb: true, index: true, middle: true, ring: true, pinky: true },
+    action: 'stop',
+  },
+  CLOSED_FIST: {
+    name: 'Closed Fist',
+    description: 'All fingers closed = Grab/Select',
+    fingers: { thumb: false, index: false, middle: false, ring: false, pinky: false },
+    action: 'grab',
+  },
+  THUMBS_UP: {
+    name: 'Thumbs Up',
+    description: 'Only thumb up = Approve/OK',
+    fingers: { thumb: true, index: false, middle: false, ring: false, pinky: false },
+    action: 'approve',
+  },
+  UNDO: {
+    name: 'Undo',
+    description: 'Fist + shake left-right',
+    fingers: { thumb: false, index: false, middle: false, ring: false, pinky: false },
+    shake: true,
+    action: 'undo',
+  },
 
-  // Two-hand gestures
-  TWO_HAND_SPREAD:  { name: 'Spread', hands: 2, action: 'zoom_in', description: 'Zoom in' },
-  TWO_HAND_PINCH:   { name: 'Pinch', hands: 2, action: 'zoom_out', description: 'Zoom out' },
-  TWO_HAND_ROTATE:  { name: 'Rotate', hands: 2, action: 'rotate', description: 'Rotate object' },
+  // ── TWO-HAND GESTURES ──
+  ZOOM_IN: {
+    name: 'Zoom In',
+    description: 'Both hands pinch then spread apart',
+    hands: 2,
+    action: 'zoom_in',
+  },
+  ZOOM_OUT: {
+    name: 'Zoom Out',
+    description: 'Both hands spread then pinch together',
+    hands: 2,
+    action: 'zoom_out',
+  },
+  TWO_POINT_SELECT: {
+    name: 'Select Area',
+    description: 'Both index fingers = select range between them',
+    hands: 2,
+    action: 'select_area',
+  },
 }
 
 /* ──────────────── Gesture Engine ──────────────────────────── */
@@ -121,39 +210,52 @@ class GestureEngine {
     this.active = false
     this.cameraAvailable = false
     this.handDetected = false
+    this.handsCount = 0           // 0, 1, or 2
 
     // Hand tracking
-    this.currentLandmarks = null     // MediaPipe hand landmarks
-    this.previousLandmarks = null
-    this.handHistory = []            // last N landmark sets for smoothing
+    this.leftHand = null          // landmarks for left hand
+    this.rightHand = null         // landmarks for right hand
+    this.previousLeft = null
+    this.previousRight = null
 
-    // Pointer state
+    // Pointer — index finger tip of right hand
     this.pointer = { x: 0, y: 0, visible: false }
-    this.pointerSmoothing = 5        // smooth over N frames
+    this.pointerSmoothing = 5
     this.pointerHistory = []
 
     // Gesture state
     this.currentGesture = null
+    this.previousGesture = null
     this.gestureStartTime = 0
-    this.gestureHoldThreshold = 500  // ms for hold gesture
-    this.gestureHistory = []
+    this.lastClickTime = 0        // for double-click detection
+    this.doubleClickThreshold = 300  // ms
+
+    // Pinch state
+    this.isPinching = false
+    this.pinchStartTime = 0
+    this.pinchHoldThreshold = 400  // ms — hold vs tap
 
     // Keyboard modifier state
-    this.modifiers = {
-      ctrl: false,
-      shift: false,
-      alt: false,
-      win: false,
-    }
+    this.modifiers = { ctrl: false, shift: false, alt: false }
 
     // Drag state
     this.isDragging = false
     this.dragStart = null
 
-    // Performance
+    // Scroll state
+    this.scrollCooldown = 0
+
+    // Shake detection (for undo)
+    this.shakeHistory = []
+    this.shakeThreshold = 3       // shakes needed for undo
+
+    // Stats
     this.stats = {
       framesProcessed: 0,
       gesturesRecognized: 0,
+      clicks: 0,
+      drags: 0,
+      scrolls: 0,
       avgLatencyMs: 0,
     }
   }
@@ -162,26 +264,23 @@ class GestureEngine {
    * Initialize gesture engine.
    */
   async init({ cameraIndex = 0 } = {}) {
-    // Check camera availability
     this.cameraAvailable = await this._checkCamera()
 
     if (this.cameraAvailable) {
       this.active = true
       eventBus.emit('gesture:ready', { camera: true })
-      return { ok: true, camera: true, message: 'Gesture control active. Show your hand to start.' }
+      return { ok: true, camera: true, message: 'Gesture control active. Show your hand.' }
     }
 
-    return { ok: false, camera: false, message: 'Camera not found. Connect a camera to enable gesture control.' }
+    return { ok: false, camera: false, message: 'Camera not found.' }
   }
 
   async _checkCamera() {
-    // In production: check for camera device
-    return true
+    return true // In production: check for camera device
   }
 
   /**
-   * Process a video frame — detect hand and recognize gestures.
-   * This is called for every frame from the camera.
+   * Process a video frame — detect hands and recognize gestures.
    */
   async processFrame(frameData) {
     if (!this.active) return null
@@ -189,77 +288,93 @@ class GestureEngine {
     const startTime = Date.now()
     this.stats.framesProcessed++
 
-    // Step 1: Detect hand landmarks (via MediaPipe)
-    const landmarks = await this._detectHand(frameData)
-    if (!landmarks) {
+    // Step 1: Detect hands
+    const hands = await this._detectHands(frameData)
+    if (!hands || hands.length === 0) {
       this.handDetected = false
       this.pointer.visible = false
+      this._resetPinch()
       return null
     }
 
     this.handDetected = true
-    this.previousLandmarks = this.currentLandmarks
-    this.currentLandmarks = landmarks
+    this.handsCount = hands.length
 
-    // Step 2: Update pointer position
-    this._updatePointer(landmarks)
+    // Assign hands (left/right based on x position)
+    if (hands.length === 1) {
+      this.rightHand = hands[0]
+      this.leftHand = null
+    } else {
+      // Sort by x position — left hand has lower x
+      const sorted = hands.sort((a, b) => a[WRIST].x - b[WRIST].x)
+      this.leftHand = sorted[0]
+      this.rightHand = sorted[1]
+    }
+
+    // Step 2: Update pointer (right hand index finger)
+    this._updatePointer(this.rightHand)
 
     // Step 3: Recognize gesture
-    const gesture = this._recognizeGesture(landmarks)
+    let gesture = null
+    if (this.handsCount === 1) {
+      gesture = this._recognizeOneHand(this.rightHand)
+    } else if (this.handsCount === 2) {
+      gesture = this._recognizeTwoHands(this.leftHand, this.rightHand)
+    }
 
     // Step 4: Execute action
     if (gesture) {
-      const action = this._executeGesture(gesture)
+      this.previousGesture = this.currentGesture
+      this.currentGesture = gesture
+      this._executeGesture(gesture)
       this.stats.gesturesRecognized++
-
-      const latencyMs = Date.now() - startTime
-      this.stats.avgLatencyMs = (this.stats.avgLatencyMs + latencyMs) / 2
-
-      return {
-        gesture: gesture.name,
-        action: gesture.action,
-        pointer: { ...this.pointer },
-        modifiers: { ...this.modifiers },
-        latencyMs,
-      }
     }
+
+    // Store for next frame
+    this.previousRight = this.rightHand
+    this.previousLeft = this.leftHand
+
+    const latencyMs = Date.now() - startTime
+    this.stats.avgLatencyMs = (this.stats.avgLatencyMs + latencyMs) / 2
 
     return {
-      gesture: null,
+      gesture: gesture?.name || null,
+      action: gesture?.action || null,
       pointer: { ...this.pointer },
-      latencyMs: Date.now() - startTime,
+      modifiers: { ...this.modifiers },
+      isDragging: this.isDragging,
+      hands: this.handsCount,
+      latencyMs,
     }
   }
 
   /**
-   * Detect hand landmarks using MediaPipe.
+   * Detect hands using MediaPipe.
    */
-  async _detectHand(frameData) {
-    // In production: MediaPipe Hands
-    // Returns 21 landmarks with x, y, z coordinates
-    // For now: simulate
-    return frameData?.landmarks || null
+  async _detectHands(frameData) {
+    // In production: MediaPipe Hands detection
+    return frameData?.hands || null
   }
 
   /**
-   * Update pointer position from index finger tip.
-   * Smooth with moving average.
+   * Update pointer position from right hand index finger.
    */
-  _updatePointer(landmarks) {
-    const indexTip = landmarks[HAND_LANDMARKS.INDEX_TIP]
+  _updatePointer(hand) {
+    if (!hand) return
+
+    const indexTip = hand[HAND.INDEX_TIP]
     if (!indexTip) return
 
-    // Convert normalized coordinates to screen coordinates
+    // Convert normalized (0-1) to screen coordinates
     const screenX = Math.round(indexTip.x * 1920)
     const screenY = Math.round(indexTip.y * 1080)
 
-    // Smooth pointer movement
+    // Smooth with moving average
     this.pointerHistory.push({ x: screenX, y: screenY })
     if (this.pointerHistory.length > this.pointerSmoothing) {
       this.pointerHistory.shift()
     }
 
-    // Moving average
     const avgX = this.pointerHistory.reduce((s, p) => s + p.x, 0) / this.pointerHistory.length
     const avgY = this.pointerHistory.reduce((s, p) => s + p.y, 0) / this.pointerHistory.length
 
@@ -269,77 +384,129 @@ class GestureEngine {
   }
 
   /**
-   * Recognize gesture from hand landmarks.
+   * Recognize one-hand gesture.
    */
-  _recognizeGesture(landmarks) {
-    // Check finger states
-    const fingers = this._getFingerStates(landmarks)
+  _recognizeOneHand(hand) {
+    if (!hand) return null
 
-    // Check pinch (two fingers close)
-    const thumbTip = landmarks[HAND_LANDMARKS.THUMB_TIP]
-    const indexTip = landmarks[HAND_LANDMARKS.INDEX_TIP]
-    const middleTip = landmarks[HAND_LANDMARKS.MIDDLE_TIP]
-    const ringTip = landmarks[HAND_LANDMARKS.RING_TIP]
-    const pinkyTip = landmarks[HAND_LANDMARKS.PINKY_TIP]
+    const fingers = this._getFingerStates(hand)
+    const thumbTip = hand[HAND.THUMB_TIP]
+    const indexTip = hand[HAND.INDEX_TIP]
+    const middleTip = hand[HAND.MIDDLE_TIP]
 
     if (!thumbTip || !indexTip) return null
 
-    // Distance between fingers
-    const thumbIndexDist = this._distance(thumbTip, indexTip)
-    const indexMiddleDist = this._distance(indexTip, middleTip)
-    const indexRingDist = this._distance(indexTip, ringTip)
+    // Distances
+    const thumbIndexDist = this._dist(thumbTip, indexTip)
+    const thumbMiddleDist = this._dist(thumbTip, middleTip)
+    const indexMiddleDist = this._dist(indexTip, middleTip)
 
-    // Pinch detection
-    const thumbIndexPinch = thumbIndexDist < 0.05
-    const indexMiddlePinch = indexMiddleDist < 0.05
-    const indexRingPinch = indexRingDist < 0.05
+    const thumbIndexPinch = thumbIndexDist < 0.06
+    const thumbMiddlePinch = thumbMiddleDist < 0.06
 
-    // Gesture matching
-    if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
-      // Only index finger = pointer
-      return GESTURES.POINT
-    }
+    // ── LEFT CLICK: thumb + index pinch ──
+    if (thumbIndexPinch && !fingers.middle && !fingers.ring && !fingers.pinky) {
+      if (!this.isPinching) {
+        this.isPinching = true
+        this.pinchStartTime = Date.now()
+        return null // Wait to see if it's a tap or hold
+      }
 
-    if (indexMiddlePinch && !fingers.ring) {
-      return GESTURES.LEFT_CLICK
-    }
+      const holdDuration = Date.now() - this.pinchStartTime
 
-    if (indexRingPinch && !fingers.middle) {
-      return GESTURES.RIGHT_CLICK
-    }
-
-    if (thumbIndexPinch && !fingers.index) {
-      return GESTURES.DRAG_START
-    }
-
-    if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) {
-      // Check direction for scroll
-      if (this.previousLandmarks) {
-        const prevIndex = this.previousLandmarks[HAND_LANDMARKS.INDEX_TIP]
-        const deltaY = indexTip.y - prevIndex.y
-        const deltaX = indexTip.x - prevIndex.x
-
-        if (Math.abs(deltaY) > 0.02) {
-          return deltaY < 0 ? GESTURES.SCROLL_UP : GESTURES.SCROLL_DOWN
+      // Hold = drag
+      if (holdDuration > this.pinchHoldThreshold) {
+        if (!this.isDragging) {
+          this.isDragging = true
+          this.dragStart = { ...this.pointer }
+          this.stats.drags++
+          return GESTURES.DRAG
         }
-        if (Math.abs(deltaX) > 0.02) {
-          return deltaX < 0 ? GESTURES.SCROLL_LEFT : GESTURES.SCROLL_RIGHT
+        return null // Continue dragging
+      }
+
+      return null // Still waiting
+    }
+
+    // ── PINCH RELEASE ──
+    if (this.isPinching && !thumbIndexPinch) {
+      this.isPinching = false
+      const holdDuration = Date.now() - this.pinchStartTime
+
+      if (this.isDragging) {
+        // End drag
+        this.isDragging = false
+        this.dragStart = null
+        return { ...GESTURES.DRAG, action: 'drag_end' }
+      }
+
+      if (holdDuration < this.pinchHoldThreshold) {
+        // Quick pinch = click
+        const now = Date.now()
+        const timeSinceLastClick = now - this.lastClickTime
+
+        if (timeSinceLastClick < this.doubleClickThreshold) {
+          this.lastClickTime = 0
+          return GESTURES.DOUBLE_CLICK
         }
+
+        this.lastClickTime = now
+        this.stats.clicks++
+        return GESTURES.LEFT_CLICK
       }
     }
 
-    if (!fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
-      return GESTURES.CLOSED_FIST
+    // ── RIGHT CLICK: thumb + middle pinch ──
+    if (thumbMiddlePinch && !fingers.index && !fingers.ring && !fingers.pinky) {
+      return GESTURES.RIGHT_CLICK
     }
 
-    if (fingers.index && fingers.middle && fingers.ring && fingers.pinky && fingers.thumb) {
+    // ── POINT: only index extended ──
+    if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
+      return GESTURES.POINT
+    }
+
+    // ── SCROLL: index + middle extended ──
+    if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) {
+      if (this.previousRight && Date.now() > this.scrollCooldown) {
+        const prevIndex = this.previousRight[HAND.INDEX_TIP]
+        const currIndex = hand[HAND.INDEX_TIP]
+        const deltaY = currIndex.y - prevIndex.y
+
+        if (Math.abs(deltaY) > 0.015) {
+          this.scrollCooldown = Date.now() + 100 // 100ms cooldown
+          this.stats.scrolls++
+          return deltaY < 0 ? GESTURES.SCROLL_UP : GESTURES.SCROLL_DOWN
+        }
+      }
+      return null
+    }
+
+    // ── CTRL: index + pinky (rock sign) ──
+    if (fingers.index && !fingers.middle && !fingers.ring && fingers.pinky) {
+      return GESTURES.CTRL
+    }
+
+    // ── SHIFT: index + ring + pinky ──
+    if (fingers.index && !fingers.middle && fingers.ring && fingers.pinky) {
+      return GESTURES.SHIFT
+    }
+
+    // ── OPEN PALM: all fingers open ──
+    if (fingers.thumb && fingers.index && fingers.middle && fingers.ring && fingers.pinky) {
       return GESTURES.OPEN_PALM
     }
 
-    if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky && indexMiddleDist > 0.1) {
-      return GESTURES.PEACE
+    // ── CLOSED FIST: all fingers closed ──
+    if (!fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
+      // Check for shake (undo)
+      if (this._detectShake(hand)) {
+        return GESTURES.UNDO
+      }
+      return GESTURES.CLOSED_FIST
     }
 
+    // ── THUMBS UP: only thumb ──
     if (fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
       return GESTURES.THUMBS_UP
     }
@@ -348,54 +515,99 @@ class GestureEngine {
   }
 
   /**
+   * Recognize two-hand gestures.
+   */
+  _recognizeTwoHands(leftHand, rightHand) {
+    const leftIndex = leftHand[HAND.INDEX_TIP]
+    const rightIndex = rightHand[HAND.INDEX_TIP]
+
+    if (!leftIndex || !rightIndex) return null
+
+    const leftFingers = this._getFingerStates(leftHand)
+    const rightFingers = this._getFingerStates(rightHand)
+
+    const leftPinch = this._dist(leftHand[HAND.THUMB_TIP], leftIndex) < 0.06
+    const rightPinch = this._dist(rightHand[HAND.THUMB_TIP], rightIndex) < 0.06
+
+    // ── ZOOM: both hands pinch, then spread apart ──
+    if (leftPinch && rightPinch) {
+      const currentDist = this._dist(leftIndex, rightIndex)
+      if (this.previousLeft && this.previousRight) {
+        const prevDist = this._dist(
+          this.previousLeft[HAND.INDEX_TIP],
+          this.previousRight[HAND.INDEX_TIP]
+        )
+        const delta = currentDist - prevDist
+
+        if (Math.abs(delta) > 0.02) {
+          return delta > 0 ? GESTURES.ZOOM_IN : GESTURES.ZOOM_OUT
+        }
+      }
+    }
+
+    // ── SELECT: both index fingers pointing ──
+    if (leftFingers.index && !leftFingers.middle &&
+        rightFingers.index && !rightFingers.middle) {
+      return GESTURES.TWO_POINT_SELECT
+    }
+
+    return null
+  }
+
+  /**
    * Get finger states (extended or not).
    */
-  _getFingerStates(landmarks) {
+  _getFingerStates(hand) {
     return {
-      thumb: landmarks[HAND_LANDMARKS.THUMB_TIP]?.y < landmarks[HAND_LANDMARKS.THUMB_IP]?.y,
-      index: landmarks[HAND_LANDMARKS.INDEX_TIP]?.y < landmarks[HAND_LANDMARKS.INDEX_PIP]?.y,
-      middle: landmarks[HAND_LANDMARKS.MIDDLE_TIP]?.y < landmarks[HAND_LANDMARKS.MIDDLE_PIP]?.y,
-      ring: landmarks[HAND_LANDMARKS.RING_TIP]?.y < landmarks[HAND_LANDMARKS.RING_PIP]?.y,
-      pinky: landmarks[HAND_LANDMARKS.PINKY_TIP]?.y < landmarks[HAND_LANDMARKS.PINKY_PIP]?.y,
+      thumb: hand[HAND.THUMB_TIP]?.x < hand[HAND.THUMB_IP]?.x, // thumb is special
+      index: hand[HAND.INDEX_TIP]?.y < hand[HAND.INDEX_PIP]?.y,
+      middle: hand[HAND.MIDDLE_TIP]?.y < hand[HAND.MIDDLE_PIP]?.y,
+      ring: hand[HAND.RING_TIP]?.y < hand[HAND.RING_PIP]?.y,
+      pinky: hand[HAND.PINKY_TIP]?.y < hand[HAND.PINKY_PIP]?.y,
     }
+  }
+
+  /**
+   * Detect shake motion (for undo gesture).
+   */
+  _detectShake(hand) {
+    const wrist = hand[HAND.WRIST]
+    if (!wrist) return false
+
+    this.shakeHistory.push({ x: wrist.x, time: Date.now() })
+    if (this.shakeHistory.length > 10) this.shakeHistory.shift()
+
+    // Check for rapid left-right movement
+    let directionChanges = 0
+    for (let i = 2; i < this.shakeHistory.length; i++) {
+      const prev = this.shakeHistory[i - 1].x - this.shakeHistory[i - 2].x
+      const curr = this.shakeHistory[i].x - this.shakeHistory[i - 1].x
+      if (prev * curr < 0 && Math.abs(curr) > 0.01) directionChanges++
+    }
+
+    if (directionChanges >= this.shakeThreshold) {
+      this.shakeHistory = []
+      return true
+    }
+    return false
   }
 
   /**
    * Calculate distance between two landmarks.
    */
-  _distance(a, b) {
+  _dist(a, b) {
     return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + ((a.z || 0) - (b.z || 0)) ** 2)
   }
 
   /**
-   * Execute a recognized gesture action.
+   * Execute gesture action — emit event.
    */
   _executeGesture(gesture) {
-    // Record in history
-    this.gestureHistory.push({
-      gesture: gesture.name,
-      action: gesture.action,
-      pointer: { ...this.pointer },
-      timestamp: new Date().toISOString(),
-    })
-    if (this.gestureHistory.length > 100) this.gestureHistory.shift()
-
-    // Handle modifiers
+    // Handle modifier toggles
     if (gesture.action === 'ctrl_hold') {
       this.modifiers.ctrl = !this.modifiers.ctrl
     } else if (gesture.action === 'shift_hold') {
       this.modifiers.shift = !this.modifiers.shift
-    } else if (gesture.action === 'alt_hold') {
-      this.modifiers.alt = !this.modifiers.alt
-    }
-
-    // Handle drag
-    if (gesture.action === 'drag_start') {
-      this.isDragging = true
-      this.dragStart = { ...this.pointer }
-    } else if (gesture.action === 'drag_end') {
-      this.isDragging = false
-      this.dragStart = null
     }
 
     eventBus.emit('gesture:action', {
@@ -404,41 +616,39 @@ class GestureEngine {
       pointer: { ...this.pointer },
       modifiers: { ...this.modifiers },
       isDragging: this.isDragging,
+      hands: this.handsCount,
     })
+  }
 
-    return gesture.action
+  _resetPinch() {
+    if (this.isPinching) {
+      this.isPinching = false
+      if (this.isDragging) {
+        this.isDragging = false
+        this.dragStart = null
+      }
+    }
   }
 
   /**
-   * Get current pointer position.
+   * Get pointer position.
    */
-  getPointer() {
-    return { ...this.pointer }
-  }
+  getPointer() { return { ...this.pointer } }
 
   /**
    * Get modifier state.
    */
-  getModifiers() {
-    return { ...this.modifiers }
-  }
-
-  /**
-   * Get gesture history.
-   */
-  getHistory({ limit = 20 } = {}) {
-    return this.gestureHistory.slice(-limit)
-  }
+  getModifiers() { return { ...this.modifiers } }
 
   /**
    * Get all available gestures.
    */
-  getAvailableGestures() {
-    return Object.entries(GESTURES).map(([key, g]) => ({
-      id: key,
+  getGestures() {
+    return Object.values(GESTURES).map((g) => ({
       name: g.name,
-      action: g.action,
       description: g.description,
+      action: g.action,
+      hands: g.hands || 1,
     }))
   }
 
@@ -448,8 +658,9 @@ class GestureEngine {
   stop() {
     this.active = false
     this.pointer.visible = false
-    this.modifiers = { ctrl: false, shift: false, alt: false, win: false }
+    this.modifiers = { ctrl: false, shift: false, alt: false }
     this.isDragging = false
+    this.isPinching = false
     return { ok: true }
   }
 
@@ -461,9 +672,10 @@ class GestureEngine {
       active: this.active,
       cameraAvailable: this.cameraAvailable,
       handDetected: this.handDetected,
+      handsCount: this.handsCount,
       pointer: { ...this.pointer },
-      modifiers: { ...this.modifiers },
       isDragging: this.isDragging,
+      modifiers: { ...this.modifiers },
       ...this.stats,
     }
   }
@@ -473,5 +685,5 @@ class GestureEngine {
 
 const gestureEngine = new GestureEngine()
 
-export { gestureEngine, GestureEngine, GESTURES, HAND_LANDMARKS }
+export { gestureEngine, GestureEngine, GESTURES, HAND }
 export default gestureEngine
