@@ -48,17 +48,18 @@ export let AUTOPILOT_PLAN = AUTOPILOT
 const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
 
 /**
- * The model pipeline keeps separate chat, vision and reason routes so each
- * task is dispatched deliberately. RAM autopilot usually points all three at
- * one abliterated Qwen3.5 multimodal tag; the 32 GB profile uses a larger Q2_K
- * text/coding candidate and keeps images on the native Ollama Q8_0 vision tag.
+ * The model pipeline keeps separate chat, vision, reason and coder routes so
+ * each task is dispatched deliberately. The uncensored model stack uses:
+ *   dolphin3:8b for chat/reason (uncensored, multilingual, Llama 3.1 base)
+ *   qwen3-vl:4b for vision (32-language OCR, 256K context)
+ *   qwen2.5-coder-abliterate:7b for code (uncensored, top coding benchmarks)
  * Per-slot JARVIS_MODEL_* overrides can still route tasks to other local
- * servers/models. A shared tag can stay warm between routes; a different local
- * tag or Whisper releases it first to preserve the one-model memory ceiling.
+ * servers/models. Only ONE model loads at a time (16GB RAM, CPU-only).
  *
- *   chat    multilingual conversation and intent translation.
- *   vision  reads pixels; image questions never fall back to text-only guesses.
- *   reason  coding, tool use and technical questions.
+ *   chat    multilingual uncensored conversation (dolphin3:8b)
+ *   vision  reads pixels with 32-language OCR (qwen3-vl:4b)
+ *   reason  tool use and technical questions (dolphin3:8b)
+ *   coder   uncensored code generation (qwen2.5-coder-abliterate:7b)
  *
  * The local models are abliterated instruct builds, not base checkpoints; they
  * can follow instructions and emit tool calls. Set JARVIS_MODEL_NAME to pin
@@ -86,6 +87,10 @@ const SLOTS = {
   reason: {
     model: process.env.JARVIS_MODEL_REASON ?? (AUTOPILOT.choices.reason?.fits ? AUTOPILOT.choices.reason.model : null),
     url: process.env.JARVIS_MODEL_REASON_URL,
+  },
+  coder: {
+    model: process.env.JARVIS_MODEL_CODER ?? (AUTOPILOT.choices.coder?.fits ? AUTOPILOT.choices.coder.model : null) ?? process.env.JARVIS_MODEL_REASON ?? null,
+    url: process.env.JARVIS_MODEL_CODER_URL ?? process.env.JARVIS_MODEL_REASON_URL,
   },
 }
 
@@ -482,11 +487,13 @@ export function pickModel(messages) {
   if (hasImage(messages)) return 'vision'
   const text = lastUserText(messages)
   if (/\[VISION_MODEL_OBSERVATIONS\b/i.test(text)) {
-    if (/\[JARVIS_INTENT:\s*CODE\]/i.test(text) || TECHNICAL.test(text)) return 'reason'
+    if (/\[JARVIS_INTENT:\s*CODE\]/i.test(text) || TECHNICAL.test(text)) return 'coder'
     const withoutVisualNouns = text.replace(/\b(images?|pictures?|photos?|visual|vision)\b/gi, ' ')
     if (NEEDS_A_TOOL.test(withoutVisualNouns) || IS_JARVIS_ACTION.test(withoutVisualNouns) || IS_DEVICE_QUERY.test(withoutVisualNouns)) return 'reason'
     return 'chat'
   }
+  // Code-heavy tasks → dedicated coder model (uncensored, better at code)
+  if (TECHNICAL.test(text) && SLOTS.coder?.model) return 'coder'
   if (TECHNICAL.test(text)) return 'reason'
   if (NEEDS_A_TOOL.test(text)) return 'reason'
   if (IS_JARVIS_ACTION.test(text)) return 'reason'
