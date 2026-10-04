@@ -3,13 +3,16 @@
  * Auto-install Ollama via CLI — no browser needed.
  *
  * Supports Linux (x86_64, arm64) and macOS (arm64, x86_64).
- * Downloads the official binary, installs it to the right location,
- * starts the server, and verifies it is reachable.
+ * Downloads the official binary, installs it, starts the server,
+ * then shows the RAM-based model ladder and lets YOU pick which
+ * model to pull. Nothing is downloaded without your say-so.
  *
  * Usage:
- *   node scripts/install-ollama.mjs          # install + start + verify
- *   node scripts/install-ollama.mjs --check   # check only, do not install
- *   node scripts/install-ollama.mjs --start   # start if installed, install if not
+ *   node scripts/install-ollama.mjs            # install + pick model + pull
+ *   node scripts/install-ollama.mjs --check    # check only, do not install
+ *   node scripts/install-ollama.mjs --start    # start if installed, install if not
+ *   node scripts/install-ollama.mjs --pull     # skip install, just pick & pull a model
+ *   node scripts/install-ollama.mjs --auto     # auto-select largest fitting tier (no prompt)
  *
  * This is what `npm run install:ollama` runs.
  */
@@ -25,6 +28,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { homedir, platform, arch, totalmem } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createWriteStream } from 'node:fs'
@@ -35,9 +39,9 @@ import process from 'node:process'
 /* ────────────────────────────── constants ────────────────────────────── */
 
 const GB = 1024 ** 3
+const MB = 1024 ** 2
 const OLLAMA_DEFAULT_URL = process.env.JARVIS_OLLAMA_URL ?? 'http://localhost:11434'
 const INSTALL_DIR_LINUX = '/usr/local/bin'
-const INSTALL_DIR_MACOS = '/usr/local/bin'
 const OLLAMA_MODELS_DIR = resolve('models/ollama')
 
 /* ────────────────────────────── helpers ──────────────────────────────── */
@@ -63,17 +67,25 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+function ask(question) {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(question, (answer) => {
+      rl.close()
+      resolve(answer.trim())
+    })
+  })
+}
+
 const plat = platform()
 const cpu = arch()
 
 /* ──────────────────────────── detection ──────────────────────────────── */
 
 function isOllamaInstalled() {
-  // Check PATH first
   const pathBin = sh('which ollama')
   if (pathBin && existsSync(pathBin)) return { installed: true, path: pathBin }
 
-  // Check common install locations
   const locations = [
     '/usr/local/bin/ollama',
     join(homedir(), '.local/bin/ollama'),
@@ -95,25 +107,78 @@ async function isOllamaRunning(url = OLLAMA_DEFAULT_URL) {
 }
 
 function detectGpu() {
-  if (plat === 'darwin') return 'metal' // Apple Silicon / Intel Mac — Metal is built-in
-
-  // NVIDIA
+  if (plat === 'darwin') return 'metal'
   if (sh('nvidia-smi')) return 'nvidia'
-
-  // AMD ROCm
   if (sh('rocm-smi') || existsSync('/dev/kfd')) return 'rocm'
-
   return 'cpu'
+}
+
+/** How much free RAM, in bytes. */
+function availableRam() {
+  try {
+    const meminfo = require('node:fs').readFileSync('/proc/meminfo', 'utf8')
+    const match = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m)
+    if (match) return Number(match[1]) * 1024
+  } catch { /* macOS / no /proc */ }
+  // os.freemem() is the fallback
+  const { freemem } = require('node:os')
+  return freemem()
+}
+
+/* ──────────────────────── model ladder ───────────────────────────────── */
+
+/**
+ * The same model catalogue the web setup page uses, from the autopilot plan.
+ * We import it so the CLI and the page always agree on what is available.
+ */
+async function getModelTiers() {
+  // Dynamic import so this script works even without the full bridge built
+  try {
+    const { plan } = await import('../bridge/autopilot.mjs')
+    const p = plan()
+    const tiers = []
+    // Build a flat list from the ladder entries the planner considered
+    for (const [cap, choice] of Object.entries(p.choices)) {
+      if (!choice.model) continue
+      tiers.push({
+        cap,
+        model: choice.model,
+        fits: choice.fits,
+        bytes: choice.bytes ?? 0,
+        residentBytes: choice.residentBytes ?? 0,
+        quality: choice.quality ?? 0,
+        note: choice.note ?? '',
+      })
+    }
+    return { tiers, plan: p, ok: true }
+  } catch {
+    return { tiers: [], plan: null, ok: false }
+  }
+}
+
+/**
+ * Build a user-facing tier table from the autopilot's RAM-profile catalogue.
+ *
+ * The planner already computed which rungs fit. We present them as a numbered
+ * list so the user types one number and that model is pulled — no guessing,
+ * no hidden defaults.
+ */
+function buildTierTable(tiers, freeRam) {
+  const models = tiers
+    .filter((t) => t.cap === 'chat') // one entry per distinct model; chat covers the shared tag
+    .sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))
+
+  const seen = new Set()
+  return models.filter((m) => {
+    if (seen.has(m.model)) return false
+    seen.add(m.model)
+    return true
+  })
 }
 
 /* ────────────────────────── download URL ─────────────────────────────── */
 
-function installScriptUrl() {
-  return 'https://ollama.com/install.sh'
-}
-
 function binaryTarballUrl() {
-  // Direct binary download as fallback when the install script is unreachable
   if (plat === 'linux') {
     if (cpu === 'arm64') return 'https://ollama.com/download/ollama-linux-arm64.tgz'
     return 'https://ollama.com/download/ollama-linux-amd64.tgz'
@@ -127,17 +192,12 @@ function binaryTarballUrl() {
 
 /* ──────────────────────── install methods ────────────────────────────── */
 
-/**
- * Method 1: The official install script (preferred).
- * Works on Linux and macOS, handles everything: binary, systemd/launchd, etc.
- */
 async function installViaScript() {
   line(info, 'Downloading the official Ollama install script…')
 
-  // Download the script first so we can inspect it
   let script
   try {
-    const res = await fetch(installScriptUrl(), { signal: AbortSignal.timeout(30_000) })
+    const res = await fetch('https://ollama.com/install.sh', { signal: AbortSignal.timeout(30_000) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     script = await res.text()
   } catch (err) {
@@ -145,7 +205,6 @@ async function installViaScript() {
     return { ok: false, error: err.message, method: 'script' }
   }
 
-  // Write to temp file and execute
   const tmpScript = '/tmp/jarvis-ollama-install.sh'
   writeFileSync(tmpScript, script, { mode: 0o755 })
 
@@ -157,34 +216,21 @@ async function installViaScript() {
       env: { ...process.env },
     })
 
-    let stdout = ''
-    let stderr = ''
-
     child.stdout.on('data', (d) => {
-      const text = d.toString()
-      stdout += text
-      // Print progress lines
-      for (const l of text.split('\n')) {
+      for (const l of d.toString().split('\n')) {
         if (l.trim()) line(info, l.trim())
       }
     })
     child.stderr.on('data', (d) => {
-      const text = d.toString()
-      stderr += text
-      for (const l of text.split('\n')) {
+      for (const l of d.toString().split('\n')) {
         if (l.trim()) line(info, l.trim())
       }
     })
 
     child.once('close', (code) => {
       try { unlinkSync(tmpScript) } catch { /* ok */ }
-      if (code === 0) {
-        resolve({ ok: true, method: 'script' })
-      } else {
-        resolve({ ok: false, error: `installer exited with code ${code}: ${stderr.slice(0, 200)}`, method: 'script' })
-      }
+      resolve({ ok: code === 0, error: code !== 0 ? `installer exited with code ${code}` : null, method: 'script' })
     })
-
     child.once('error', (err) => {
       try { unlinkSync(tmpScript) } catch { /* ok */ }
       resolve({ ok: false, error: err.message, method: 'script' })
@@ -192,10 +238,6 @@ async function installViaScript() {
   })
 }
 
-/**
- * Method 2: Direct binary download (fallback).
- * Downloads the tarball, extracts ollama binary to /usr/local/bin.
- */
 async function installViaBinary() {
   const url = binaryTarballUrl()
   if (!url) return { ok: false, error: `no binary available for ${plat}/${cpu}`, method: 'binary' }
@@ -209,7 +251,6 @@ async function installViaBinary() {
     const res = await fetch(url, { signal: AbortSignal.timeout(5 * 60 * 1000) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
-    // Stream to file with progress
     const total = Number(res.headers.get('content-length') ?? 0)
     let downloaded = 0
     let lastPrint = 0
@@ -232,7 +273,6 @@ async function installViaBinary() {
     return { ok: false, error: `download failed: ${err.message}`, method: 'binary' }
   }
 
-  // Extract
   line(info, 'Extracting…')
   try {
     sh(`rm -rf ${tmpDir}`)
@@ -242,17 +282,10 @@ async function installViaBinary() {
     return { ok: false, error: `extraction failed: ${err.message}`, method: 'binary' }
   }
 
-  // Find the binary in extracted contents
-  const binCandidates = [
-    join(tmpDir, 'bin/ollama'),
-    join(tmpDir, 'ollama'),
-  ]
+  const binCandidates = [join(tmpDir, 'bin/ollama'), join(tmpDir, 'ollama')]
   const binPath = binCandidates.find((p) => existsSync(p))
-  if (!binPath) {
-    return { ok: false, error: 'ollama binary not found in the archive', method: 'binary' }
-  }
+  if (!binPath) return { ok: false, error: 'ollama binary not found in the archive', method: 'binary' }
 
-  // Install to /usr/local/bin (or ~/.local/bin if no sudo)
   const installDir = process.getuid?.() === 0 ? INSTALL_DIR_LINUX : join(homedir(), '.local/bin')
   const target = join(installDir, 'ollama')
 
@@ -261,8 +294,7 @@ async function installViaBinary() {
     copyFileSync(binPath, target)
     chmodSync(target, 0o755)
     line(tick, `Installed to ${target}`)
-  } catch (err) {
-    // Try with sudo
+  } catch {
     try {
       execSync(`sudo mkdir -p ${INSTALL_DIR_LINUX}`, { timeout: 10_000 })
       execSync(`sudo cp ${binPath} ${INSTALL_DIR_LINUX}/ollama`, { timeout: 10_000 })
@@ -273,26 +305,20 @@ async function installViaBinary() {
     }
   }
 
-  // Cleanup
   try { unlinkSync(tmpTgz) } catch { /* ok */ }
   try { sh(`rm -rf ${tmpDir}`) } catch { /* ok */ }
 
   return { ok: true, method: 'binary' }
 }
 
-/**
- * Install Ollama — tries the official script first, falls back to direct binary.
- */
 async function installOllama() {
   line(info, `Platform: ${plat} · Arch: ${cpu} · GPU hint: ${detectGpu()}`)
 
-  // Method 1: official install script
   const scriptResult = await installViaScript()
   if (scriptResult.ok) return scriptResult
 
   line(warn, `Install script failed (${scriptResult.error}). Trying direct binary download…`)
 
-  // Method 2: direct binary
   const binaryResult = await installViaBinary()
   return binaryResult
 }
@@ -308,7 +334,6 @@ async function startOllamaDaemon() {
 
   line(info, 'Starting Ollama…')
 
-  // Try systemd first (Linux)
   if (plat === 'linux') {
     const systemd = sh('systemctl is-active ollama 2>/dev/null')
     if (systemd === 'active') {
@@ -316,10 +341,8 @@ async function startOllamaDaemon() {
       return { ok: true, alreadyRunning: true }
     }
 
-    // Try starting via systemd
     const started = sh('sudo systemctl start ollama 2>&1')
     if (started !== null) {
-      // Wait for it to come up
       for (let i = 0; i < 15; i++) {
         await sleep(1000)
         if (await isOllamaRunning()) {
@@ -330,7 +353,6 @@ async function startOllamaDaemon() {
     }
   }
 
-  // Fallback: start directly
   const env = {
     ...process.env,
     OLLAMA_HOST: OLLAMA_DEFAULT_URL.replace(/^https?:\/\//, ''),
@@ -355,7 +377,6 @@ async function startOllamaDaemon() {
   })
   child.unref()
 
-  // Wait for it to answer
   for (let i = 0; i < 20; i++) {
     await sleep(1000)
     if (await isOllamaRunning()) {
@@ -365,6 +386,203 @@ async function startOllamaDaemon() {
   }
 
   return { ok: false, error: 'Ollama did not respond within 20 seconds' }
+}
+
+/* ────────────────────── model pull (user-driven) ─────────────────────── */
+
+async function pullModel(model) {
+  line(info, `Pulling ${model}…`)
+
+  const res = await fetch(`${OLLAMA_DEFAULT_URL}/api/pull`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: model, stream: true }),
+    signal: AbortSignal.timeout(60 * 60 * 1000),
+  })
+
+  if (!res.ok) {
+    line(fail, `Pull failed: HTTP ${res.status}`)
+    return false
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let lastStatus = ''
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const l of lines) {
+      if (!l.trim()) continue
+      try {
+        const evt = JSON.parse(l)
+        if (evt.error) {
+          line(fail, `Pull error: ${evt.error}`)
+          return false
+        }
+        const status = evt.status ?? ''
+        const pct = evt.total ? ` ${Math.round((evt.completed / evt.total) * 100)}%` : ''
+        const msg = `${status}${pct}`
+        if (msg !== lastStatus) {
+          lastStatus = msg
+          process.stdout.write(`\r  ↓  ${msg.padEnd(60)}`)
+        }
+      } catch { /* partial line */ }
+    }
+  }
+  console.log('') // newline after progress
+  line(tick, `${model} pulled successfully.`)
+  return true
+}
+
+async function promptModelChoice() {
+  console.log('')
+  console.log('  Choose a model to pull')
+  console.log('  ═══════════════════════')
+
+  // Get the RAM plan
+  const { tiers, plan: p, ok } = await getModelTiers()
+  const freeRam = availableRam()
+
+  if (!ok || !tiers.length) {
+    // Fallback: show the known abliterated catalogue directly
+    line(warn, 'Could not load the RAM plan. Showing the default model catalogue.')
+    console.log('')
+    return promptFromCatalogue()
+  }
+
+  // Show machine info
+  const totalRamGb = (totalmem() / GB).toFixed(1)
+  const freeRamGb = (freeRam / GB).toFixed(1)
+  const budgetGb = p ? (p.effectiveModelBytes / GB).toFixed(1) : '?'
+  line(info, `RAM: ${totalRamGb} GB total · ${freeRamGb} GB free · ${budgetGb} GB AI ceiling`)
+  line(info, `Plan: ${p ? `${(p.budget.share * 100).toFixed(0)}% of free RAM` : 'default'}`)
+  if (p?.budget.capGb) line(info, `Hard cap: ${p.budget.capGb} GB`)
+  console.log('')
+
+  // Build the table — unique models sorted by size, largest first
+  const uniqueModels = new Map()
+  for (const t of tiers) {
+    if (t.model && !uniqueModels.has(t.model)) {
+      uniqueModels.set(t.model, t)
+    }
+  }
+
+  const sorted = [...uniqueModels.values()].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))
+
+  if (!sorted.length) {
+    line(warn, 'No models found in the plan. Showing the default catalogue.')
+    console.log('')
+    return promptFromCatalogue()
+  }
+
+  // Show numbered list
+  console.log('  #   Model                                          Size       Fits')
+  console.log('  ─── ────────────────────────────────────────────── ────────── ────')
+
+  const recIdx = sorted.findIndex((m) => m.fits)
+  sorted.forEach((m, i) => {
+    const num = String(i + 1).padStart(3)
+    const name = (m.model ?? '').padEnd(48)
+    const size = m.bytes ? `${(m.bytes / GB).toFixed(1)} GB`.padStart(10) : '       ?  '
+    const fits = m.fits ? ' ✓' : ' ✗ (too large)'
+    const rec = i === recIdx ? '  ← recommended' : ''
+    console.log(`  ${num} ${name} ${size}${fits}${rec}`)
+  })
+
+  console.log('')
+  const rec = recIdx >= 0 ? recIdx + 1 : 1
+  const answer = await ask(`  Enter number (1–${sorted.length}) [${rec} = recommended]: `)
+
+  let chosen = rec // default to recommended
+  if (answer) {
+    const num = Number(answer)
+    if (Number.isInteger(num) && num >= 1 && num <= sorted.length) {
+      chosen = num
+    } else {
+      line(warn, `Invalid choice "${answer}". Using recommended (${rec}).`)
+    }
+  }
+
+  const selected = sorted[chosen - 1]
+  console.log('')
+  line(info, `Selected: ${selected.model}`)
+  line(info, `Size:     ${selected.bytes ? `${(selected.bytes / GB).toFixed(1)} GB` : 'unknown'}`)
+  line(info, `Fits:     ${selected.fits ? 'yes' : 'no — may fail on this machine'}`)
+
+  const confirm = await ask(`\n  Pull ${selected.model}? [Y/n] `)
+  if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
+    line(info, 'Cancelled. No model pulled.')
+    return null
+  }
+
+  return selected.model
+}
+
+/** Fallback catalogue when the autopilot plan cannot be loaded. */
+async function promptFromCatalogue() {
+  const catalogue = [
+    { model: 'huihui_ai/qwen3.5-abliterated:9b-q8_0', size: '11.0 GB', params: '9.65B Q8_0', note: 'best quality, needs ~12 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:9b',       size: ' 6.6 GB', params: '9.65B Q4_K_M', note: 'good quality, needs ~8 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:4B-q8_0',  size: ' 5.2 GB', params: '4.54B Q8_0', note: 'needs ~6 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:4b',       size: ' 3.3 GB', params: '4.54B Q4_K_M', note: 'balanced, needs ~4 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:2B-q8_0',  size: ' 2.7 GB', params: '2.27B Q8_0', note: 'lightweight, needs ~3 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:2b',       size: ' 1.9 GB', params: '2.27B Q4_K_M', note: 'small, needs ~2.5 GB RAM' },
+    { model: 'huihui_ai/qwen3.5-abliterated:0.8b',     size: ' 1.0 GB', params: '0.87B Q8_0', note: 'tiny, fits almost anywhere' },
+  ]
+
+  const freeRamGb = (availableRam() / GB).toFixed(1)
+  line(info, `Free RAM: ${freeRamGb} GB`)
+  console.log('')
+
+  console.log('  #   Model                                          Size       Note')
+  console.log('  ─── ────────────────────────────────────────────── ────────── ────────────────────')
+
+  // Pick recommended based on free RAM
+  let rec = catalogue.length // default: smallest
+  const freeGb = availableRam() / GB
+  for (let i = 0; i < catalogue.length; i++) {
+    const sizeGb = parseFloat(catalogue[i].size)
+    if (sizeGb <= freeGb * 0.85) { rec = i; break }
+  }
+
+  catalogue.forEach((m, i) => {
+    const num = String(i + 1).padStart(3)
+    const name = m.model.padEnd(48)
+    const size = m.size.padStart(10)
+    const note = m.note
+    const marker = i === rec ? '  ← recommended' : ''
+    console.log(`  ${num} ${name} ${size} ${note}${marker}`)
+  })
+
+  console.log('')
+  const answer = await ask(`  Enter number (1–${catalogue.length}) [${rec + 1} = recommended]: `)
+
+  let chosen = rec
+  if (answer) {
+    const num = Number(answer)
+    if (Number.isInteger(num) && num >= 1 && num <= catalogue.length) {
+      chosen = num - 1
+    } else {
+      line(warn, `Invalid choice "${answer}". Using recommended (${rec + 1}).`)
+    }
+  }
+
+  const selected = catalogue[chosen]
+  console.log('')
+  line(info, `Selected: ${selected.model} (${selected.params}, ${selected.size})`)
+
+  const confirm = await ask(`\n  Pull ${selected.model}? [Y/n] `)
+  if (confirm && confirm.toLowerCase() !== 'y' && confirm !== '') {
+    line(info, 'Cancelled. No model pulled.')
+    return null
+  }
+
+  return selected.model
 }
 
 /* ──────────────────────── version & info ─────────────────────────────── */
@@ -412,6 +630,8 @@ async function main() {
   const args = process.argv.slice(2)
   const checkOnly = args.includes('--check')
   const startOnly = args.includes('--start')
+  const pullOnly = args.includes('--pull')
+  const autoMode = args.includes('--auto')
   const quiet = args.includes('--quiet')
 
   if (!quiet) {
@@ -420,7 +640,6 @@ async function main() {
     console.log('  ═══════════════════════════════')
   }
 
-  // Not supported on Windows (that uses the portable-runtime.mjs zip flow)
   if (plat === 'win32') {
     line(fail, 'This script is for Linux and macOS. On Windows, use `npm run setup` instead.')
     process.exit(1)
@@ -435,11 +654,34 @@ async function main() {
     process.exit(installed && running ? 0 : 1)
   }
 
-  // ── already good ──
+  // ── pull only (Ollama must be running) ──
+  if (pullOnly) {
+    if (!running) {
+      line(fail, 'Ollama is not running. Start it first: ollama serve')
+      process.exit(1)
+    }
+    await printStatus()
+    const model = autoMode ? null : await promptModelChoice()
+    if (model) {
+      const ok = await pullModel(model)
+      process.exit(ok ? 0 : 1)
+    }
+    process.exit(0)
+  }
+
+  // ── installed and running ──
   if (installed && running) {
     if (!quiet) {
       line(tick, `Ollama is already installed (${binPath}) and running at ${OLLAMA_DEFAULT_URL}`)
       await printStatus()
+    }
+
+    // Always ask to pull a model, even when already installed
+    if (!quiet) {
+      const model = autoMode ? null : await promptModelChoice()
+      if (model) {
+        await pullModel(model)
+      }
     }
     process.exit(0)
   }
@@ -449,18 +691,23 @@ async function main() {
     line(info, `Ollama is installed (${binPath}) but not running.`)
     if (startOnly || !checkOnly) {
       const result = await startOllamaDaemon()
-      if (result.ok) {
-        await printStatus()
-        process.exit(0)
-      } else {
+      if (!result.ok) {
         line(fail, `Could not start Ollama: ${result.error}`)
         process.exit(1)
       }
+      await printStatus()
+
+      // Always ask to pull a model
+      const model = autoMode ? null : await promptModelChoice()
+      if (model) {
+        await pullModel(model)
+      }
+      process.exit(0)
     }
     process.exit(1)
   }
 
-  // ── not installed ──
+  // ── not installed — install first ──
   if (!installed) {
     line(info, 'Ollama is not installed. Installing now…')
     line(info, 'This may ask for your password (sudo) on Linux.')
@@ -482,22 +729,38 @@ async function main() {
   line(info, 'Starting Ollama…')
   const startResult = await startOllamaDaemon()
 
-  if (startResult.ok) {
-    console.log('')
-    line(tick, 'Ollama is ready!')
-    await printStatus()
-    console.log('  Next steps:')
-    console.log('    npm run setup          # pick and download a model stack')
-    console.log('    npm start              # launch JARVIS')
-    console.log('')
-    process.exit(0)
-  } else {
+  if (!startResult.ok) {
     console.log('')
     line(warn, `Ollama installed but could not auto-start: ${startResult.error}`)
     line(info, 'Start it manually:  ollama serve')
-    line(info, 'Then run:           npm run setup')
+    line(info, 'Then run:           npm run install:ollama -- --pull')
     process.exit(1)
   }
+
+  console.log('')
+  line(tick, 'Ollama is ready!')
+  await printStatus()
+
+  // Always let the user choose which model to pull
+  const model = autoMode ? null : await promptModelChoice()
+  if (model) {
+    const ok = await pullModel(model)
+    if (ok) {
+      console.log('')
+      line(tick, 'Setup complete!')
+      console.log('')
+      console.log('  Next step:')
+      console.log('    npm start              # launch JARVIS')
+      console.log('')
+    }
+    process.exit(ok ? 0 : 1)
+  }
+
+  console.log('  You can pull a model later:')
+  console.log('    npm run install:ollama -- --pull')
+  console.log('    ollama pull <model-name>')
+  console.log('')
+  process.exit(0)
 }
 
 main().catch((err) => {

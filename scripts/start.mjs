@@ -11,6 +11,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import process from 'node:process'
 import { openBrowser } from './open-browser.mjs'
 import { plan as planRam } from '../bridge/autopilot.mjs'
@@ -239,6 +240,9 @@ async function offerSetup() {
  * does: the chosen size and the model names are printed before anything is
  * downloaded, each step is reported as it happens, and a failure names itself
  * instead of leaving a half-installed stack and a cheerful message.
+ *
+ * The user is always shown what will be downloaded and asked to confirm,
+ * unless JARVIS_AUTO_INSTALL=1 is set (for CI / scripted flows).
  */
 async function installEverything(plan, bridgePort, hud) {
   // The same rung the setup page preselects: the largest tier this machine's
@@ -247,8 +251,41 @@ async function installEverything(plan, bridgePort, hud) {
   const tiers = (plan.tiers ?? []).filter((tier) => Number(tier.ramGb) > 0)
   const fitting = tiers.filter((tier) => tier.ramGb <= totalRamGb).sort((a, b) => b.ramGb - a.ramGb)[0]
   const ramGb = fitting?.ramGb ?? tiers[0]?.ramGb ?? 0.5
-  console.log(`\n  Installing the model stack this machine fits: ${ramGb < 1 ? '500 MB' : `${ramGb} GB`} · ${gb(fitting?.totalDownloadGb ?? 0)} of models`)
-  console.log('  Runtime first, then the chat/vision/coding weights. Ctrl-C stops it all.\n')
+
+  // Show the user exactly what will be installed
+  console.log(`\n  Recommended model stack: ${ramGb < 1 ? '500 MB' : `${ramGb} GB`} · ${gb(fitting?.totalDownloadGb ?? 0)} of models`)
+
+  // List the models in the chosen tier
+  if (fitting?.slots) {
+    console.log('  Models:')
+    const seen = new Set()
+    for (const [cap, slot] of Object.entries(fitting.slots)) {
+      const name = slot.model ?? slot.file
+      if (!name || seen.has(name)) continue
+      seen.add(name)
+      console.log(`    [${cap.toUpperCase()}] ${name}`)
+    }
+  }
+
+  console.log('  Runtime first, then the chat/vision/coding weights. Ctrl-C stops it all.')
+
+  // Always ask for confirmation unless JARVIS_AUTO_INSTALL=1
+  if (process.env.JARVIS_AUTO_INSTALL !== '1') {
+    const answer = await new Promise((resolve) => {
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      rl.question('\n  Proceed with installation? [Y/n] ', (a) => {
+        rl.close()
+        resolve(a.trim())
+      })
+    })
+    if (answer && answer.toLowerCase() !== 'y' && answer !== '') {
+      console.log('\n  Cancelled. No models downloaded.')
+      console.log(`  Open the setup page to choose manually: http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`)
+      return
+    }
+  }
+
+  console.log('')
 
   let job
   try {
