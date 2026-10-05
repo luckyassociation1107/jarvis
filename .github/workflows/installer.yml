@@ -200,12 +200,25 @@ jobs:
           npm run test:live 2>&1 | tee live.log || {
             node scripts/ci-report.mjs 'live model self-test' live.log; exit 1; }
 
+      # The three models the catalogue opens on are checked from the CLI the
+      # same way a person would: pull each tag, read it back, prompt it. This
+      # step is what makes "mandatory" mean downloaded and answering, not
+      # merely listed.
+      - name: Pull and prompt the three mandatory models from the CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run check:models 2>&1 | tee check-models.log || {
+            node scripts/ci-report.mjs 'mandatory tiny models' check-models.log; exit 1; }
+
       - name: Upload the transcript
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: JARVIS-live-model-report
-          path: models/live-test-report.txt
+          path: |
+            models/live-test-report.txt
+            models/check-models-report.txt
           if-no-files-found: ignore
           retention-days: 14
 
@@ -220,6 +233,9 @@ jobs:
         run: |
           if [ -f models/live-test-report.txt ]; then
             node scripts/ci-report.mjs --level notice 'live model self-test result' models/live-test-report.txt
+          fi
+          if [ -f models/check-models-report.txt ]; then
+            node scripts/ci-report.mjs --level notice 'mandatory tiny models result' models/check-models-report.txt
           fi
 
   installer:

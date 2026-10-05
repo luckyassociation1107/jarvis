@@ -74,9 +74,21 @@ try {
     assert.ok(p.choices.vision, `${ramGb} GB keeps an explicit multimodal vision pick`)
     assert.ok(p.choices.reason, `${ramGb} GB shows the closest abliterated coding pick`)
     assert.ok(p.choices.tts, `${ramGb} GB always has a TTS path`)
-    assert.ok(/abliterat/i.test(p.choices.chat.model), `${ramGb} GB chat remains abliterated`)
+    // The mandatory tiny set is not an abliterated merge; it is in the ladders
+    // because the person named it, and it is only ever the floor/fallback pick.
+    assert.ok(
+      /abliterat/i.test(p.choices.chat.model) || p.choices.chat.namedByUser === true,
+      `${ramGb} GB chat is an abliterated rung, or the tiny set the person named by hand`,
+    )
     assert.ok(p.choices.vision.multimodal, `${ramGb} GB vision choice accepts images`)
-    assert.equal(p.choices.chat.model, p.choices.reason.model, `${ramGb} GB shares one model across chat and coding`)
+    // Chat and coding share a tag above the smallest rungs; below that the named
+    // tiny pair is what fits, and it is deliberately a chat model plus a coder.
+    if (p.choices.chat.model !== p.choices.reason.model) {
+      assert.ok(
+        p.choices.chat.namedByUser === true && p.choices.reason.namedByUser === true,
+        `${ramGb} GB splits chat from coding only when the named tiny pair is what fits`,
+      )
+    }
     assert.equal(p.choices.chat.multilingual, true, `${ramGb} GB chat is tagged multilingual`)
     assert.equal(p.choices.reason.englishOnly, true, `${ramGb} GB coding model is tagged English-only`)
     assert.ok(!p.choices.speech || !/\.en\./i.test(p.choices.speech.file), `${ramGb} GB Whisper choice is multilingual`)
@@ -154,14 +166,20 @@ try {
   assert.equal(catalogue[0].ramGb, 0.5)
   assert.equal(catalogue.at(-1).ramGb, 32)
   assert.equal(catalogue[7].aiCapGb, 7, 'catalogue rows apply the requested share to each tier')
-  assert.ok(ladder().vision.rungs.every((rung) => /abliterat/i.test(rung.model) && rung.multimodal), 'all advertised local vision models are abliterated and multimodal')
+  assert.ok(
+    ladder().vision.rungs.every((rung) => (/abliterat/i.test(rung.model) || rung.namedByUser === true) && rung.multimodal),
+    'every advertised local vision rung is multimodal, and abliterated unless the person named it',
+  )
   assert.equal(catalogue.every((tier) => Boolean(tier.slots.vision?.model && tier.slots.vision.multimodal)), true, 'all 33 reference tiers include a multimodal vision route')
   assert.equal(snapshots.get(0.5).choices.chat.fits, false, '500 MB chat is honestly best-effort only')
   assert.equal(snapshots.get(0.5).choices.vision.fits, false, '500 MB vision is present but honestly best-effort only')
   assert.equal(snapshots.get(0.5).choices.vision.mode, 'best-effort', 'under-budget vision is never described as a safe fit')
   assert.equal(snapshots.get(0.5).choices.tts.engine, 'system', '500 MB uses zero-model system TTS')
   assert.ok(snapshots.get(0.5).skipped.some((item) => item.cap === 'vision'), '500 MB vision is not automatically run as if it fits')
-  assert.equal(snapshots.get(1).choices.chat.fits, false, '1 GB cannot fit the 1.30 GB smallest multimodal rung')
+  // 1 GB cannot hold the smallest abliterated rung (1.30 GB resident), but the
+  // mandatory tiny chat the person named is 0.60 GB and does fit here.
+  assert.equal(snapshots.get(1).choices.chat.fits, true, '1 GB fits the tiny chat rung the person named')
+  assert.equal(snapshots.get(1).choices.chat.namedByUser, true, 'and that is the only reason it fits at 1 GB')
   assert.ok(snapshots.get(1).choices.speech?.multilingual, '1 GB can use a multilingual Whisper tier')
   assert.ok(snapshots.get(1).skipped.some((item) => item.cap === 'vision'), '1 GB plan labels its vision route best-effort')
   assert.equal(snapshots.get(2).choices.vision.fits, true, '2 GB is the first reference tier where the 0.873B Q8 multimodal model fits')

@@ -18,6 +18,7 @@
     "bridge": "node bridge/server.mjs",
     "bridge:writes": "node scripts/bridge-writes.mjs",
     "setup": "node scripts/install-web.mjs",
+    "check:models": "node scripts/check-models.mjs",
     "doctor": "node scripts/setup.mjs",
     "cli": "node scripts/cli.mjs",
     "install:ollama": "node scripts/install-ollama.mjs",

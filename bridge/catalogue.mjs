@@ -107,6 +107,9 @@ export function catalogue(options = {}) {
           quality: rung.quality ?? null,
           multimodal: rung.multimodal === true,
           multilingual: rung.multilingual === true,
+          // True for the mandatory tiny set: rows the person asked for by name
+          // rather than rungs the planner chose.
+          namedByUser: rung.namedByUser === true,
           note: rung.note ?? null,
           fitsRam,
           fitsDisk,

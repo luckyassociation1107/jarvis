@@ -109,6 +109,35 @@ choice on the next turn, so nothing has to be restarted. On an install that
 predates the catalogue, the window opens by itself once after upgrading, even
 if the older "setup offered" flag is set.
 
+### The three models that are always there
+
+The catalogue opens with the same three small models ticked on every machine,
+so a first run is about 1.08 GB and seconds of pulling:
+
+| Job | Model | Parameters | Quant | Size |
+| --- | --- | --- | --- | --- |
+| Chat | `qwen2.5:0.5b` | 0.494B | Q4_K_M | 398 MB |
+| Coder & reasoning | `qwen2.5-coder:0.5b` | 0.494B | Q4_K_M | 398 MB |
+| Vision | `ahmadwaqar/smolvlm2-256m-video:q8_0` | 0.256B | Q8_0 | 279 MB |
+
+They are the smallest rung of each column, they are the defaults, and the app
+pulls them through the `ollama` CLI. The two Qwen ones are plain instruct builds
+rather than abliterated merges — they are in the catalogue because they were
+asked for by name, which the rows say out loud, and the abliterated rungs of
+each column stay one click away above them.
+
+### Checking the three from a terminal
+
+`npm run check:models` installs the runtime if the machine has none, pulls the
+three tags with the `ollama` CLI itself, reads them back from `/api/tags` with
+their on-disk sizes, then prompts each model with something only that model can
+answer: the chat model has to echo `JARVIS-OK`, the coder has to return code,
+and the vision model has to name the colour of a square the script draws and
+encodes itself. It writes `models/check-models-report.txt` and exits non-zero if
+any of the three is missing or silent. `--check` reports what is already
+installed without pulling anything; `--pull-only` stops after the downloads.
+The same command runs in CI after the live model self-test.
+
 ---
 
 ## Where everything lives

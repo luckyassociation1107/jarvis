@@ -567,14 +567,17 @@ export async function ensureRuntime({
   // what CI wants: no admin, no system PATH, no version drift between runs.
   installMode = env.JARVIS_OLLAMA_INSTALL ?? 'auto',
 } = {}) {
+  // A server that already answers settles the question on every platform: there
+  // is nothing to install, so a Linux or macOS machine running its own Ollama
+  // must not be told "Windows only" for a runtime it does not need.
+  if (await apiUp(url, { fetchImpl })) {
+    onStep({ phase: 'runtime', status: `a model server already answers at ${url}; nothing to start`, ok: true, skipped: true })
+    return { ok: true, skipped: true, url }
+  }
   if (!platformSupported(platform, arch)) {
     const error = `Windows only: JARVIS cannot install the model runtime on ${platform}/${arch}; install Ollama from https://ollama.com/download and press re-check`
     onStep({ phase: 'runtime', status: error, ok: false })
     return { ok: false, error }
-  }
-  if (await apiUp(url, { fetchImpl })) {
-    onStep({ phase: 'runtime', status: `a model server already answers at ${url}; nothing to start`, ok: true, skipped: true })
-    return { ok: true, skipped: true, url }
   }
 
   // ── Linux / macOS: use the CLI installer script ──

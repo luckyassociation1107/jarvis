@@ -72,6 +72,55 @@ const ACTIVE_WHISPER_FILE = '.whisper-active'
  * official 125B Q4_K_M remain on high-memory rungs only when their resident
  * estimates fit.
  */
+/**
+ * The three models the person asked for by name — the mandatory tiny set.
+ *
+ * They sit at the small end of their ladders, which is what makes them the
+ * cheapest rows of the catalogue: it lists smallest download first, so this is
+ * what the setup window opens on and a first run is 1.08 GB — minutes, not
+ * hours. `plan()` walks the other way (largest rung that fits), so on a big
+ * machine the planner never reaches these three; they are here because they were
+ * asked for by name, not because the planner judged them best.
+ *
+ * They are *not* abliterated merges, and `assertModelPolicy` would refuse them
+ * for that reason alone; each carries `namedByUser`, so the exception is stated
+ * in the catalogue and visible in the code, not smuggled in through a regex.
+ */
+export const NAMED_TINY = Object.freeze({
+  chat: {
+    model: 'qwen2.5:0.5b',
+    quant: 'Q4_K_M',
+    parametersB: 0.494,
+    bytes: 398e6,
+    residentBytes: 0.6 * GB,
+    quality: 1,
+    multilingual: true,
+    namedByUser: true,
+    note: 'Qwen2.5 0.5B instruct — 29 languages, tool-capable, 398 MB. A plain instruct build rather than an abliterated merge; named for the mandatory tiny install.',
+  },
+  coder: {
+    model: 'qwen2.5-coder:0.5b',
+    quant: 'Q4_K_M',
+    parametersB: 0.494,
+    bytes: 398e6,
+    residentBytes: 0.6 * GB,
+    quality: 1,
+    namedByUser: true,
+    note: 'Qwen2.5-Coder 0.5B instruct — code generation, code reasoning, code repair, 398 MB, tool-capable. Named for the mandatory tiny install.',
+  },
+  vision: {
+    model: 'ahmadwaqar/smolvlm2-256m-video:q8_0',
+    quant: 'Q8_0',
+    parametersB: 0.256,
+    bytes: 279e6,
+    residentBytes: 1.2 * GB,
+    quality: 1,
+    multimodal: true,
+    namedByUser: true,
+    note: 'SmolVLM2 256M video/image (SigLIP + SmolLM2), Q8_0, 279 MB download · ~1.2 GB with the vision encoder resident. Reads images, screenshots and video frames; named for the mandatory tiny install.',
+  },
+})
+
 const NATIVE_MULTIMODAL = [
   // Ollama's official 122B tag is a 125B-parameter Q4_K_M multimodal model.
   // Its 81 GB download / 96 GB resident estimate stays out of normal machines;
@@ -107,16 +156,21 @@ const HIGH_PARAMETER_TEXT = [
 ]
 
 /**
- * Every rung this project knows, per pipeline slot.
+ * Every rung this project knows, per pipeline slot, ordered largest first —
+ * which is the order `selectRung()` reads: the largest rung whose resident
+ * estimate fits the allocation. The mandatory tiny set is last on purpose, one
+ * step below the smallest abliterated rung, so the planner only falls to it when
+ * nothing bigger can run.
  *
  * Exported because `bridge/catalogue.mjs` shows these rows to the person choosing
  * instead of letting the planner choose for them: one source of truth, so the
- * numbers in the shop window and the numbers in the plan cannot drift apart.
+ * numbers in the shop window and the numbers in the plan cannot drift apart. The
+ * catalogue sorts by download size, so the tiny rows are what it opens on.
  */
 export const LADDERS = {
-  chat: HIGH_PARAMETER_TEXT,
-  vision: NATIVE_MULTIMODAL,
-  reason: HIGH_PARAMETER_TEXT,
+  chat: [...HIGH_PARAMETER_TEXT, NAMED_TINY.chat],
+  vision: [...NATIVE_MULTIMODAL, NAMED_TINY.vision],
+  reason: [...HIGH_PARAMETER_TEXT, NAMED_TINY.coder],
 
   speech: [
     { kind: 'whisper', file: 'ggml-large-v3-turbo-q5_0.bin', quant: 'Q5_0', bytes: 550 * MB, residentBytes: 1.35 * GB, quality: 5, multilingual: true },
@@ -143,7 +197,11 @@ function assertModelPolicy() {
   const problems = []
   for (const cap of ['chat', 'reason', 'vision']) {
     for (const rung of LADDERS[cap]) {
-      if (!/abliterat/i.test(rung.model ?? '')) problems.push(`${cap}: ${rung.model}`)
+      // Abliterated merges are the rule this project ships. The named tiny
+      // models are the exception someone asked for by name, and they say so on
+      // the rung itself (`namedByUser`), so the catalogue shows the trade
+      // instead of a list nobody can see.
+      if (!/abliterat/i.test(rung.model ?? '') && rung.namedByUser !== true) problems.push(`${cap}: ${rung.model}`)
       if (cap === 'vision' && rung.multimodal !== true) problems.push(`vision model is not multimodal: ${rung.model}`)
     }
   }
@@ -781,6 +839,9 @@ export function ladder() {
         parametersB: rung.parametersB ?? undefined,
         multimodal: rung.multimodal ?? undefined,
         multilingual: rung.multilingual ?? undefined,
+        // Carried through so both the shop window and the tests can tell a rung
+        // the planner judged from one the person named by hand.
+        namedByUser: rung.namedByUser === true ? true : undefined,
         note: rung.note ?? undefined,
       })),
     },
@@ -809,6 +870,9 @@ export function tierProfiles(options = {}) {
         engine: rung.engine ?? null,
         dtype: rung.dtype ?? null,
         multimodal: rung.multimodal ?? false,
+        // True when this row is one the person named rather than one the
+        // planner judged best — the tiny set at the bottom of each ladder.
+        namedByUser: rung.namedByUser === true,
       },
     ]))
     return {

@@ -248,15 +248,18 @@ const tierCatalogOkay = Array.isArray(autopilotData.tiers)
   && autopilotData.tiers.every((tier) => {
     const slots = tier.slots
     if (!slots?.chat?.model || !slots?.reason?.model || !slots?.vision?.model) return false
-    // Chat and coding always share a tag; vision shares it too whenever the
-    // allocation fits one multimodal model, and splits only when a larger
-    // text rung means vision must stay on its own native multimodal tag.
-    const routeModelsOkay = slots.chat.model === slots.reason.model
+    // Chat and coding share a tag whenever a shared rung fits; vision shares it
+    // too whenever the allocation fits one multimodal model, and splits only
+    // when a larger text rung means vision must stay on its own native
+    // multimodal tag. The one exception is the bottom tier, where only the two
+    // named tiny rungs fit — and those are deliberately a chat model and a coder.
+    const namedTinySplit = slots.chat.namedByUser === true && slots.reason.namedByUser === true
+    const routeModelsOkay = slots.chat.model === slots.reason.model || namedTinySplit
     return Object.values(slots).every((slot) => validTierStates.has(slot.state) && slot.fits === (slot.state === 'fits'))
       && routeModelsOkay
       && slots.vision.multimodal === true
       && ['fits', 'best-effort'].includes(slots.vision.state)
-      && /abliterat/i.test(slots.vision.model)
+      && (/abliterat/i.test(slots.vision.model) || slots.vision.namedByUser === true)
   })
 const setupPage = await fetch(`http://localhost:${PORT}/install`).then((r) => (r.ok ? r.text() : null)).catch(() => null)
 const runtimeData = await fetch(`http://localhost:${PORT}/autopilot/runtime`).then((r) => r.json()).catch(() => null)

@@ -369,24 +369,42 @@ npm run setup
 npm start
 ```
 
-### Configure Uncensored Models
+### Choose the models (the setup page)
+
+There is no automatic stack: the setup page shows the whole catalogue — every
+model this project knows, with its download size, resident size, parameters and
+quantization, and whether this machine's free RAM and disk can hold it — and you
+pick one for each of three jobs: **chat** (abliterated, multilingual), **vision**
+(reads screenshots and images) and **coder & reasoning** (abliterated, argues
+with itself, builds whole projects). Filters narrow by size, parameters and
+quantization. Only the three you choose are downloaded.
+
+The page opens with the three mandatory small models ticked, so a first run is
+minutes rather than hours:
+
+| Job | Model | Size |
+| --- | --- | --- |
+| Chat | `qwen2.5:0.5b` | 398 MB |
+| Coder & reasoning | `qwen2.5-coder:0.5b` | 398 MB |
+| Vision | `ahmadwaqar/smolvlm2-256m-video:q8_0` | 279 MB |
+
+Ollama itself is installed for you: on Windows the page downloads the official
+installer over the CLI and runs it silently (`OllamaSetup.exe /VERYSILENT`), and
+falls back to the standalone build inside the app folder; on Linux and macOS it
+runs the official CLI installer. Nothing is fetched from a browser download
+page, and the setup page is reopened any time from the tray
+(**Model setup…**) or the **OPEN MODEL SETUP** button on the **MODEL STACK**
+panel.
+
+To pull and prompt the three mandatory models from a terminal — the same check
+CI runs — use:
 
 ```powershell
-# Copy the uncensored config
-copy .env.uncensored .env
-
-# Install Ollama (if not installed)
-# The setup page handles this, or:
-# https://ollama.com/download
-
-# Install models (~13GB total)
-ollama pull dolphin3:8b
-ollama pull qwen3-vl:4b
-ollama pull huihui_ai/qwen2.5-coder-abliterate:7b
-
-# Start JARVIS
-npm start
+npm run check:models
 ```
+
+`npm run setup` opens the same page in a browser. `npm start` asks for the
+choices if they are missing instead of picking a stack on its own.
 
 ### Hardware-Specific Optimization
 
