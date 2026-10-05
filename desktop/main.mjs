@@ -72,6 +72,15 @@ const HIDDEN_START = process.argv.includes('--hidden')
 // writes toggle, for whoever wants the acting tools without clicking.
 const WRITES_FLAG = process.argv.includes('--allow-writes')
 const SELF_TEST = process.argv.includes('--self-test') || process.env.JARVIS_SELF_TEST === '1'
+/**
+ * How long the packaged self-test may run before it gives up.
+ *
+ * It is a sequence of loopback calls that each have their own timeout, so this
+ * should never fire — which is exactly why it is here. CI learns the difference
+ * between "the app is broken" and "the job is hung" from the exit code, and a
+ * hung job is the one failure a self-test cannot report about itself.
+ */
+const SELF_TEST_TIMEOUT_MS = Number(process.env.JARVIS_SELF_TEST_TIMEOUT_MS ?? 150_000)
 const BRIDGE_PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 const HUD_PORT = Number(process.env.JARVIS_HUD_PORT ?? 4173)
 
@@ -202,12 +211,28 @@ function log(line) {
   } catch { /* logging must never be the reason startup fails */ }
 }
 
-process.on('uncaughtException', (error) => {
-  log(`uncaught exception: ${error?.stack ?? error}`)
-})
-process.on('unhandledRejection', (error) => {
-  log(`unhandled rejection: ${error?.stack ?? error}`)
-})
+/**
+ * An exception is logged, not fatal, for a user: a failed turn is not a reason
+ * to close the window they are looking at. The self-test has nobody to click
+ * anything, so there a logged exception has to also end the process — otherwise
+ * the app keeps running with its work abandoned and the CI step waits for the
+ * job's timeout instead of reporting a red build.
+ */
+function reportFatal(kind, error) {
+  log(`${kind}: ${error?.stack ?? error}`)
+  if (SELF_TEST) app.exit(3)
+}
+
+process.on('uncaughtException', (error) => reportFatal('uncaught exception', error))
+process.on('unhandledRejection', (error) => reportFatal('unhandled rejection', error))
+
+if (SELF_TEST) {
+  const watchdog = setTimeout(() => {
+    log(`self-test timed out after ${Math.round(SELF_TEST_TIMEOUT_MS / 1000)}s`)
+    app.exit(2)
+  }, SELF_TEST_TIMEOUT_MS)
+  watchdog.unref?.()
+}
 
 /* ---------------------------------------------------------------- supervision */
 
@@ -663,7 +688,8 @@ async function runSelfTest() {
   record('the built interface is present', existsSync(join(HUD_FILES, 'index.html')), HUD_FILES)
 
   hud = await startHud()
-  record('the interface server answers', (await fetch(`${hudOrigin()}/`)).ok, hudOrigin())
+  const served = await fetch(`${hudOrigin()}/`, { signal: AbortSignal.timeout(8000) }).catch((error) => ({ ok: false, error }))
+  record('the interface server answers', Boolean(served.ok), served.error ? `${hudOrigin()} — ${served.error.message}` : hudOrigin())
 
   // Percent-encoded, because `new URL()` collapses a literal `..` before the
   // request is ever sent — the naive spelling tests nothing but the 404 page.
@@ -691,13 +717,14 @@ async function runSelfTest() {
 
 async function main() {
   if (!existsSync(join(HUD_FILES, 'index.html'))) {
-    dialog.showErrorBox(
-      `${APP_NAME} is not complete`,
-      `The interface files are missing from:\n${HUD_FILES}\n\n` +
-        (PACKAGED
-          ? 'Reinstall the application — the installer did not finish copying its files.'
-          : 'Run `npm run build` first, then start the desktop shell again.'),
-    )
+    // `dialog.showErrorBox` blocks until it is dismissed. That is right for a
+    // person and fatal for the self-test, which would sit behind the dialog
+    // until the CI job times out instead of reporting the missing folder.
+    const advice = PACKAGED
+      ? 'Reinstall the application — the installer did not finish copying its files.'
+      : 'Run `npm run build` first, then start the desktop shell again.'
+    log(`${APP_NAME} is not complete: ${HUD_FILES} has no index.html. ${advice}`)
+    if (!SELF_TEST) dialog.showErrorBox(`${APP_NAME} is not complete`, `The interface files are missing from:\n${HUD_FILES}\n\n${advice}`)
     app.exit(1)
     return
   }

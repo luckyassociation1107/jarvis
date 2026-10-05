@@ -81,6 +81,7 @@ jobs:
   verify:
     name: Verify (web build + desktop self-test)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -135,6 +136,7 @@ jobs:
     name: Windows installer
     needs: verify
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -208,24 +210,58 @@ jobs:
             exit 1
           }
 
+      # The real proof: the packaged application, launched from the unpacked
+      # build, must serve its interface, start the bridge out of the asar
+      # archive, and accept the handshake. A `Start-Process -Wait` would also
+      # wait for the bridge the app starts, so a failure that leaves a child
+      # alive would hang the job instead of failing it — hence the polling
+      # loop, the deadline, and the tree kill at the end.
       - name: Run the packaged application in self-test mode
         shell: pwsh
+        timeout-minutes: 10
         run: |
+          # The data folder (and therefore the log) lives outside the install,
+          # under the runner's local app data, so it survives a reinstall.
+          $log = Join-Path $env:LOCALAPPDATA 'JARVIS/logs/desktop.log'
           try {
             $exe = Get-ChildItem release/win-unpacked -Filter '*.exe' |
               Where-Object { $_.Name -notlike 'Uninstall*' } |
               Select-Object -First 1
             if (-not $exe) { throw 'no packaged executable found' }
             Write-Host "running $($exe.FullName) --self-test"
-            $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru -Wait
-            # The data folder (and therefore the log) lives outside the install,
-            # under the runner's local app data, so it survives a reinstall.
-            $log = Join-Path $env:LOCALAPPDATA 'JARVIS/logs/desktop.log'
+
+            $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru
+            $deadline = (Get-Date).AddMinutes(6)
+            $seen = 0
+            while (-not $process.HasExited -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 10
+              $process.Refresh()
+              # Print each new line as it appears: a self-test that fails after
+              # ninety seconds should be readable as it goes, not only at the end.
+              if (Test-Path $log) {
+                $lines = @(Get-Content $log)
+                if ($lines.Count -gt $seen) {
+                  $lines[$seen..($lines.Count - 1)] | ForEach-Object { Write-Host $_ }
+                  $seen = $lines.Count
+                }
+              }
+            }
+
+            if (-not $process.HasExited) {
+              Write-Host "::error::the packaged self-test did not exit within six minutes"
+              if (Test-Path $log) { node scripts/ci-report.mjs 'packaged self-test did not finish' $log }
+              & taskkill /PID $process.Id /T /F | Out-Null
+              exit 1
+            }
+
             if (Test-Path $log) {
               Write-Host '--- packaged self-test log ---'
               Get-Content $log | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
             }
-            if ($process.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit $($process.ExitCode))" }
+            if ($process.ExitCode -ne 0) {
+              if (Test-Path $log) { node scripts/ci-report.mjs "packaged self-test exit $($process.ExitCode)" $log }
+              throw "the packaged app failed its self-test (exit $($process.ExitCode))"
+            }
             Write-Host 'packaged self-test passed'
           } catch {
             Write-Host "::error::packaged self-test failed: $($_.Exception.Message)"
