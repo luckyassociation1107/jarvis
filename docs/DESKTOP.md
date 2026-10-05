@@ -23,10 +23,10 @@ in git.
 **Download it:**
 
 1. Open the repository's **Actions** tab.
-2. Run **Build Windows installer** (it also runs by itself on pushes to `main`
-   and pull requests that touch the app).
+2. Run **Build Windows installer** (it also runs on pushes to any branch and
+   on pull requests that touch the app).
 3. Open the newest green run and download the artifact
-   **`JARVIS-Windows-installer`**. Inside is `JARVIS-Setup-1.0.0-x64.exe`.
+   **`JARVIS-Windows-Installer`**. Inside is `JARVIS-Setup-1.0.0-x64.exe`.
 
 **Or, on a version tag** (`git tag v1.0.0 && git push --tags`), the workflow
 attaches the same file to the GitHub release, so users can download it without
