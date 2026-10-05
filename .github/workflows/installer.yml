@@ -206,6 +206,12 @@ jobs:
       # merely listed.
       - name: Pull and prompt the three mandatory models from the CLI
         shell: bash
+        # Portable, not the default "auto": on a Windows runner "auto" would
+        # download the system installer and start a second Ollama beside the one
+        # this job already unpacked and cached. The check tests the same code
+        # either way; this keeps it on the runtime the job already has.
+        env:
+          JARVIS_OLLAMA_INSTALL: portable
         run: |
           set -o pipefail
           npm run check:models 2>&1 | tee check-models.log || {
