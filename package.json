@@ -35,6 +35,7 @@
     "test:desktop": "node desktop/selftest.mjs",
     "predist": "npm run build",
     "dist": "electron-builder --win nsis --x64",
+    "build:desktop": "npm run dist",
     "predist:dir": "npm run build",
     "dist:dir": "electron-builder --win dir --x64"
   },

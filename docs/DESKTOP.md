@@ -185,6 +185,27 @@ old one and your models stay where they are.
 
 ---
 
+## Why this pipeline, and not the other two that were tried
+
+This branch's history contains two earlier attempts at the same goal, both of
+which were removed once this one worked. Recording why, so nobody has to
+re-derive it from a diff:
+
+| Attempt | Why it is not the one |
+| --- | --- |
+| `.github/workflows/build-exe.yml` + `installer/jarvis.iss` — download a portable Node.js, copy `dist`, `bridge` and `scripts` by hand, `npm install --production` inside the copy, compile with Inno Setup | Ships a second Node runtime inside the app (~300 MB, ~10 minutes per build), a `.bat` launcher rather than an application, and a shortcut that opens a browser tab. It is the right starting point for a *fully offline, everything-included* distribution — this is deliberately not that |
+| Squirrel / electron-updater | Needs an update server and a signed feed to be honest about updates. This app has no auto-update: each release is a new installer |
+| A single self-contained `.exe` (pkg/nexe-style) | The interface is a WebGL page and the brain is a long-lived process that starts a model server. A single-file binary would have to explode itself into a temp folder at every launch, and gains nothing over an installer that writes to a real folder once |
+
+The pipeline that survives earns its place the same way the rest of this
+repository does: it does the honest thing and shows its work. `installer.yml`
+verifies the build on Linux, then on Windows packages it, then **runs the
+packaged application** and fails the run if it cannot serve the interface, start
+the bridge, or accept its own window's WebSocket origin. Nothing is published
+until that passes.
+
+---
+
 ## The icon
 
 `desktop/icon.png` (512×512, transparent corners) is the master;
