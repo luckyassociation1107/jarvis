@@ -268,7 +268,12 @@ jobs:
             exit 1
           }
 
+      # `always()` on purpose: the installer is the deliverable, and it exists
+      # before the self-test runs. A red run should still hand a maintainer the
+      # .exe it built — that is the difference between "the packaged app is
+      # broken" and "the packaged app is broken and I cannot look at it".
       - name: Upload the installer
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: JARVIS-Windows-Installer

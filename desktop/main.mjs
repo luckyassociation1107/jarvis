@@ -78,9 +78,12 @@ const SELF_TEST = process.argv.includes('--self-test') || process.env.JARVIS_SEL
  * It is a sequence of loopback calls that each have their own timeout, so this
  * should never fire — which is exactly why it is here. CI learns the difference
  * between "the app is broken" and "the job is hung" from the exit code, and a
- * hung job is the one failure a self-test cannot report about itself.
+ * hung job is the one failure a self-test cannot report about itself. The
+ * budget has to clear the slowest legitimate run (a 30 s wait for Electron plus
+ * a 120 s wait for the bridge), because a watchdog that fires first reports
+ * "timed out" where the interesting answer is which check never finished.
  */
-const SELF_TEST_TIMEOUT_MS = Number(process.env.JARVIS_SELF_TEST_TIMEOUT_MS ?? 150_000)
+const SELF_TEST_TIMEOUT_MS = Number(process.env.JARVIS_SELF_TEST_TIMEOUT_MS ?? 240_000)
 const BRIDGE_PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 const HUD_PORT = Number(process.env.JARVIS_HUD_PORT ?? 4173)
 
@@ -227,12 +230,28 @@ process.on('uncaughtException', (error) => reportFatal('uncaught exception', err
 process.on('unhandledRejection', (error) => reportFatal('unhandled rejection', error))
 
 if (SELF_TEST) {
+  // A build runner has no GPU, and on some images no interactive desktop
+  // either. Chromium's attempt to initialise one of those can leave
+  // `app.whenReady()` pending forever: no error, no exit code, just a job that
+  // runs until it is cancelled. The self-test only needs the interface to be
+  // *served* — nothing is painted — so it starts without acceleration and
+  // without the sandbox. An installed app, where a person is looking at the
+  // window, keeps both.
+  app.disableHardwareAcceleration()
+  for (const flag of ['disable-gpu', 'disable-gpu-compositing', 'disable-software-rasterizer', 'no-sandbox']) {
+    app.commandLine.appendSwitch(flag)
+  }
+
   const watchdog = setTimeout(() => {
     log(`self-test timed out after ${Math.round(SELF_TEST_TIMEOUT_MS / 1000)}s`)
     app.exit(2)
   }, SELF_TEST_TIMEOUT_MS)
   watchdog.unref?.()
 }
+
+// The first line of every log. When a shell fails to come up, the question is
+// always "how far did it get", and a log that starts mid-sentence cannot say.
+log(`shell starting — ${PACKAGED ? 'installed' : 'source checkout'}, version ${app.getVersion()}, data ${DATA_DIR}`)
 
 /* ---------------------------------------------------------------- supervision */
 
@@ -829,6 +848,7 @@ if (!app.requestSingleInstanceLock()) {
   // evidence. So it is bounded, and the answer is written down — everything the
   // self-test exercises is loopback, and a HUD server and a utility-process
   // bridge do not need a display to answer on 127.0.0.1.
+  log('waiting for Electron to finish starting')
   const ready = await Promise.race([
     app.whenReady().then(() => true).catch(() => false),
     new Promise((done) => {
@@ -836,7 +856,9 @@ if (!app.requestSingleInstanceLock()) {
       timer.unref?.()
     }),
   ])
-  log(ready ? 'electron is ready' : 'electron did not finish starting within 30s; continuing')
+  log(ready
+    ? (SELF_TEST ? 'electron is ready; running the self-test' : 'electron is ready; opening the window')
+    : 'electron did not finish starting within 30s; continuing without it')
 
   try {
     await main()

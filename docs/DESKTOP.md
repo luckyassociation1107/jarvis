@@ -241,7 +241,7 @@ self-test in CI exists precisely to catch this before you do.
 **What exit codes does `JARVIS.exe --self-test` use?**
 `0` all checks passed, `1` a check failed (the last line of
 `%LOCALAPPDATA%\JARVIS\logs\desktop.log` names it), `2` the run exceeded its
-watchdog (`JARVIS_SELF_TEST_TIMEOUT_MS`, 150 s by default) and `3` an exception
+watchdog (`JARVIS_SELF_TEST_TIMEOUT_MS`, 240 s by default) and `3` an exception
 escaped — the app logs and exits instead of showing a dialog, because a dialog
 in CI sits there until the job times out. The workflow gives the whole run six
 minutes, prints the log as it grows, and kills what is left over.
