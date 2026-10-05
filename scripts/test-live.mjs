@@ -228,6 +228,12 @@ const CHECKS = [
 
 heading('')
 heading('Asking the model through the bridge\'s own client')
+// The app's own turns allow 700 tokens (`bridge/local-llm.mjs`), because a
+// Qwen3.5 model writes down its thinking before it answers and the thinking
+// counts. A budget in this range asks the same question the app asks; a smaller
+// one would fail every model that reasons, and a larger one would hide a model
+// that never reaches an answer.
+const ANSWERS_MAX_TOKENS = 512
 const answers = []
 for (const check of CHECKS) {
   const started = Date.now()
@@ -236,7 +242,7 @@ for (const check of CHECKS) {
   try {
     text = await complete('chat', [{ role: 'user', content: check.prompt }], {
       temperature: 0,
-      maxTokens: 96,
+      maxTokens: ANSWERS_MAX_TOKENS,
       timeoutMs: 300_000,
     })
   } catch (problem) {
@@ -245,7 +251,15 @@ for (const check of CHECKS) {
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   const trimmed = (text ?? '').trim()
   const pass = !error && check.ok(trimmed)
-  answers.push({ ...check, text: trimmed, error, pass, seconds })
+  let diagnostic = ''
+  if (!pass && !error && !trimmed) {
+    // An empty answer is the one failure that needs explaining: the runtime
+    // answered, so either the budget ran out inside the thinking or the model
+    // never reaches a spoken answer at all.
+    diagnostic = await explainEmptyAnswer(check.prompt)
+    step(`      ${diagnostic}`)
+  }
+  answers.push({ ...check, text: trimmed, error, pass, seconds, diagnostic })
   step(`${pass ? 'PASS' : 'FAIL'}  ${check.name.padEnd(13)} ${String(seconds).padStart(5)} s  ${error ? `error: ${error}` : `→ ${oneLine(trimmed)}`}`)
 }
 
@@ -271,7 +285,8 @@ const report = [
   ...answers.flatMap((answer) => [
     `[${answer.pass ? 'PASS' : 'FAIL'}] ${answer.name} (${answer.seconds} s)`,
     `  prompt: ${answer.prompt}`,
-    `  answer: ${answer.error ? `error: ${answer.error}` : answer.text.replace(/\n/g, '\n          ')}`,
+    `  answer: ${answer.error ? `error: ${answer.error}` : answer.text.replace(/\n/g, '\n          ') || '(no content)'}`,
+    ...(answer.diagnostic ? [`  ${answer.diagnostic}`] : []),
     '',
   ]),
   passed === answers.length
@@ -291,6 +306,42 @@ try {
 finish(passed === answers.length ? 0 : 1)
 
 /* --------------------------------------------------------------------- helpers */
+
+/**
+ * Why did that come back empty?
+ *
+ * One extra request, straight at the OpenAI-compatible endpoint, big enough
+ * that a thinking model can finish — and then say what came back: the finish
+ * reason, which fields the message carried, and how much of the budget went
+ * into thinking. It costs one call only when something already failed.
+ */
+async function explainEmptyAnswer(prompt) {
+  const model = currentPlan.choices.chat?.model ?? modelTags[0]
+  try {
+    const response = await fetch(`${process.env.JARVIS_MODEL_BASE_URL ?? `${RUNTIME_URL}/v1`}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer jarvis-local' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        max_tokens: 1024,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(300_000),
+    })
+    const data = await response.json().catch(() => null)
+    const choice = data?.choices?.[0]
+    const message = choice?.message ?? {}
+    const reasoning = message.reasoning_content ?? message.reasoning ?? ''
+    const retry = (message.content ?? '').trim()
+    return `empty with ${ANSWERS_MAX_TOKENS} tokens: finish_reason=${choice?.finish_reason ?? 'none'}, `
+      + `message fields=[${Object.keys(message).join(',')}], thinking=${String(reasoning).length} chars`
+      + (retry ? `; with 1024 tokens it answers: ${oneLine(retry)}` : '; with 1024 tokens it still answers nothing')
+  } catch (problem) {
+    return `empty with ${ANSWERS_MAX_TOKENS} tokens; the diagnostic request failed: ${problem?.message ?? problem}`
+  }
+}
 
 async function runtimeTags() {
   try {
