@@ -233,14 +233,23 @@ heading('Asking the model through the bridge\'s own client')
 // counts. A budget in this range asks the same question the app asks; a smaller
 // one would fail every model that reasons, and a larger one would hide a model
 // that never reaches an answer.
-const ANSWERS_MAX_TOKENS = 512
+const ANSWERS_MAX_TOKENS = 128
+// `bridge/local-llm.mjs` sends a turn as the user typed it, and a Qwen3.5 model
+// asked that way writes down its thinking first — the thinking is part of the
+// same token budget, and on a question it finds hard a 2B model will spend the
+// whole budget there and never say anything. The first live run showed exactly
+// that: three prompts answered, and the Telugu one came back with 0 characters
+// of content, 3367 characters of reasoning and `finish_reason=length` at 1024
+// tokens. So the prompts here carry the family's own hint, `/no_think`, which is
+// what asks these weights for an answer instead of a monologue.
+const NO_THINK = ' /no_think'
 const answers = []
 for (const check of CHECKS) {
   const started = Date.now()
   let text = ''
   let error = null
   try {
-    text = await complete('chat', [{ role: 'user', content: check.prompt }], {
+    text = await complete('chat', [{ role: 'user', content: check.prompt + NO_THINK }], {
       temperature: 0,
       maxTokens: ANSWERS_MAX_TOKENS,
       timeoutMs: 300_000,
@@ -323,7 +332,7 @@ async function explainEmptyAnswer(prompt) {
       headers: { 'content-type': 'application/json', authorization: 'Bearer jarvis-local' },
       body: JSON.stringify({
         model,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: prompt + NO_THINK }],
         temperature: 0,
         max_tokens: 1024,
         stream: false,
