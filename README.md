@@ -469,3 +469,16 @@ build.ps1                Build and launch script
 ## License
 
 MIT.
+### Windows installer from GitHub Actions
+
+Open **Actions → Windows installer → Run workflow** on this branch. When the run
+finishes, download the **JARVIS-Windows-Installer** artifact and extract it to
+get `JARVIS-Setup-1.0.0-x64.exe`. Run it on Windows 10/11 x64. A `v*` tag also
+triggers the build. The installer is unsigned, so Windows SmartScreen may warn.
+
+The EXE installs the desktop UI and Node bridge (no separate Node/npm install).
+It does **not** bundle Ollama or multi-GB models: use the app's setup page to
+choose/download them on first use. Downloads and settings live in the user's
+JARVIS application-data folder and remain across app updates. Internet access
+is needed for model downloads. This is separate from the browser-only
+`START.cmd` and GitHub Pages workflow.

@@ -35,3 +35,5 @@ public/mediapipe/
 # Tooling dirs that are local-only
 .claude/
 .arena/
+
+/release/
