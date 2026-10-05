@@ -22,7 +22,7 @@ No Node, no terminal, no build step: download one installer, and the app
 downloads its own model runtime and model stack on first launch.
 
 1. Open the **Actions** tab → **Build Windows installer** → newest green run.
-2. Download the **`JARVIS-Windows-installer`** artifact.
+2. Download the **`JARVIS-Windows-Installer`** artifact.
 3. Run `JARVIS-Setup-<version>-x64.exe`.
 
 That is it. The installer is per-user (no administrator prompt), creates a
@@ -345,9 +345,16 @@ JARVIS is not a single chatbot. It is an **organization** of AI agents:
 
 ### Windows desktop installer (.exe)
 
-The **Windows installer** GitHub Actions workflow builds `JARVIS-Setup-<version>-x64.exe`. Open **Actions → Windows installer**, select a successful run, and download the `JARVIS-Windows-Installer` artifact; extract the artifact ZIP to get the EXE. Branch pushes and manual workflow runs create an artifact. A `v*` tag matching the `package.json` version creates a GitHub Release with the installer attached.
+A Windows installer is built by GitHub Actions: **Actions → Build Windows
+installer**, then download the `JARVIS-Windows-Installer` artifact and run
+`JARVIS-Setup-<version>-x64.exe`. A `v*` tag matching `package.json` also
+attaches it to a GitHub Release. Nothing needs Node.js or npm on the machine
+that installs it, and the setup page downloads the model runtime and weights on
+first launch into `%LOCALAPPDATA%\JARVIS`, where they survive app updates.
+The installer is unsigned, so SmartScreen may ask to be overridden once.
 
-Run the installer on Windows 10/11 x64. It installs a desktop JARVIS app with a Start Menu shortcut and uninstaller, without a separate Node.js/npm install. The installer is unsigned, so SmartScreen may show an unknown-publisher warning. Ollama and the multi-gigabyte AI models are not bundled; choose/download them from JARVIS's in-app MODEL STACK panel. Model files and settings are stored under `%LOCALAPPDATA%\JARVIS` and are kept across app updates. Internet is required for the runtime/model downloads.
+See **[Install it like an application](#install-it-like-an-application-windows-exe)**
+above and **[docs/DESKTOP.md](docs/DESKTOP.md)** for the rest.
 
 ### Quick Start (Windows)
 

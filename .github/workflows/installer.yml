@@ -10,25 +10,30 @@
 #                  plain Node. No Electron, no display, no model server needed.
 #   2. `installer` — Windows. Builds the same interface, runs the self-test
 #                  again, packages with electron-builder, then launches the
-#                  *packaged application* in self-test mode — asar archives,
-#                  utility processes and the origin handshake are all verified
-#                  against the real build before anything is published.
+#                  *packaged application* in self-test mode. Asar archives,
+#                  utility processes, the static server and the origin handshake
+#                  are all verified against the real build before anything is
+#                  published — a build whose window opens and whose bridge
+#                  refuses its socket fails the run instead of reaching a user.
 #
 # What comes out: an NSIS setup .exe (per-user install, no admin prompt, desktop
-# and Start Menu shortcuts, uninstaller in Add/Remove Programs). On a version
-# tag it is attached to a GitHub release; on any other run it is an artifact of
-# the workflow run.
+# and Start Menu shortcuts, uninstaller in Add/Remove Programs).
+#
+# It runs on every push to any branch, so a branch under review can produce a
+# downloadable installer without merging first; `paths` keeps that to changes
+# that can actually affect the build. A `v*` tag additionally checks that the
+# tag matches `package.json`, then attaches the installer to a GitHub release.
 #
 # The app is not code-signed: there is no certificate in this repository, so
-# Windows SmartScreen will show "unknown publisher" the first time. Signing is a
-# `win.certificateFile` entry away for anyone who has a certificate; see
-# docs/DESKTOP.md.
+# Windows SmartScreen shows "unknown publisher" the first time. Signing is a
+# `win.certificateFile` entry away for anyone who has one; see docs/DESKTOP.md.
 
 name: Build Windows installer
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
+    tags: ['v*']
     paths:
       - 'desktop/**'
       - 'bridge/**'
@@ -40,7 +45,6 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/installer.yml'
-    tags: ['v*']
   pull_request:
     paths:
       - 'desktop/**'
@@ -94,8 +98,6 @@ jobs:
     name: Windows installer
     needs: verify
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -113,6 +115,19 @@ jobs:
       - name: Desktop packaging self-test
         run: npm run test:desktop
 
+      # A release tag that disagrees with package.json produces an installer
+      # whose version is not the version in its own name. Cheaper to refuse it.
+      - name: Validate a release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $package = Get-Content 'package.json' -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tagVersion -ne $version) {
+            throw "Release tag '$env:GITHUB_REF_NAME' must match package.json version v$version."
+          }
+
       - name: Package the installer
         env:
           # No certificate in this repository, and electron-builder should not go
@@ -124,10 +139,15 @@ jobs:
         shell: pwsh
         run: |
           $setup = Get-ChildItem release -Filter 'JARVIS-Setup-*.exe' | Select-Object -First 1
-          if (-not $setup) { throw 'electron-builder produced no installer' }
+          if (-not $setup) {
+            Write-Host 'Files found in the release directory:'
+            if (Test-Path 'release') { Get-ChildItem 'release' -Recurse | Select-Object FullName }
+            throw 'electron-builder produced no installer'
+          }
           $mb = [math]::Round($setup.Length / 1MB, 1)
           Write-Host "installer: $($setup.Name) ($mb MB)"
           if ($setup.Length -lt 40MB) { throw "the installer is only $mb MB — the app files did not get packed" }
+          Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
 
       - name: Run the packaged application in self-test mode
         shell: pwsh
@@ -138,7 +158,9 @@ jobs:
           if (-not $exe) { throw 'no packaged executable found' }
           Write-Host "running $($exe.FullName) --self-test"
           $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru -Wait
-          $log = Join-Path (Split-Path $exe.FullName) 'data/logs/desktop.log'
+          # The data folder (and therefore the log) lives outside the install,
+          # under the runner's local app data, so it survives a reinstall.
+          $log = Join-Path $env:LOCALAPPDATA 'JARVIS/logs/desktop.log'
           if (Test-Path $log) {
             Write-Host '--- packaged self-test log ---'
             Get-Content $log | Select-Object -Last 60
@@ -149,26 +171,42 @@ jobs:
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: JARVIS-Windows-installer
+          name: JARVIS-Windows-Installer
           path: |
             release/JARVIS-Setup-*.exe
             release/*.blockmap
+          # The .exe is already compressed; re-compressing it wastes minutes.
+          compression-level: 0
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach the installer to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+  publish-release:
+    name: Attach the installer to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: installer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: JARVIS-Windows-Installer
+          path: release-assets
+
+      - name: Publish the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/JARVIS-Setup-*.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Windows installer attached below.
+
+            Windows may show a SmartScreen warning the first time: the build is
+            not code-signed. Click **More info** → **Run anyway**.
+
+            The installer does not bundle Ollama or the model weights. The app
+            downloads them on first launch, from the same one-click setup page
+            `npm start` uses, into `%LOCALAPPDATA%\JARVIS`.
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = '${{ github.ref_name }}'
-          gh release view $tag --repo '${{ github.repository }}' 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo '${{ github.repository }}' `
-              --title "J.A.R.V.I.S. $tag" `
-              --generate-notes `
-              --notes "Windows installer attached below. Windows may show a SmartScreen warning: the build is not code-signed. Click 'More info' → 'Run anyway'."
-          }
-          $assets = (Get-ChildItem release -Filter 'JARVIS-Setup-*.exe').FullName
-          gh release upload $tag $assets --repo '${{ github.repository }}' --clobber
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

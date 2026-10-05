@@ -99,22 +99,26 @@ The setup window is always reachable afterwards from the tray
 | What | Where |
 | --- | --- |
 | The app | `%LOCALAPPDATA%\Programs\JARVIS` (per-user install) |
-| Models, runtime, memory, screenshots | `<install folder>\data\models` |
-| Settings | `<install folder>\data\desktop-settings.json` |
-| Logs (everything the brain printed) | `<install folder>\data\logs\desktop.log` |
+| Models, runtime, memory, screenshots | `%LOCALAPPDATA%\JARVIS\models` |
+| Settings | `%LOCALAPPDATA%\JARVIS\desktop-settings.json` |
+| Logs (everything the brain printed) | `%LOCALAPPDATA%\JARVIS\logs\desktop.log` |
 
-If the install folder is not writable — a machine-wide install into
-`Program Files` by a non-administrator, say — the app falls back to
-`%LOCALAPPDATA%\JARVIS` for the same `data` tree, and says so in the log.
+The install folder and the data folder are separate, on purpose. An upgrade can
+replace or move the install folder, and a machine-wide install under
+`Program Files` is not writable by a normal account at all — neither is a
+reason to make someone download eight gigabytes again. The install folder
+(`<install folder>\data`) is only the fallback, for the improbable case where
+local app data cannot be written.
 
 In a source checkout, `npm run desktop` uses the repository itself as the data
 folder, so it shares `models/` with `npm start` instead of downloading
 everything twice.
 
-Everything is one folder on purpose. Removing the app and the models means
-uninstalling it and deleting the install folder — the uninstaller deliberately
-leaves your models and your memory alone, because "uninstall" should not
-silently mean "download 8 GB again".
+Everything the app creates is under the one data folder. Uninstalling removes
+the application and leaves that folder alone — the uninstaller deliberately
+does not delete your models and your memory, because "uninstall" should not
+silently mean "download 8 GB again". Delete `%LOCALAPPDATA%\JARVIS` by hand to
+reclaim the space.
 
 ---
 
@@ -194,6 +198,7 @@ re-derive it from a diff:
 | Attempt | Why it is not the one |
 | --- | --- |
 | `.github/workflows/build-exe.yml` + `installer/jarvis.iss` — download a portable Node.js, copy `dist`, `bridge` and `scripts` by hand, `npm install --production` inside the copy, compile with Inno Setup | Ships a second Node runtime inside the app (~300 MB, ~10 minutes per build), a `.bat` launcher rather than an application, and a shortcut that opens a browser tab. It is the right starting point for a *fully offline, everything-included* distribution — this is deliberately not that |
+| `.github/workflows/windows-installer.yml` + `desktop/main.cjs` — an earlier, shorter Electron shell with its own workflow | The right idea, missing most of what makes it an application rather than a window: no tray, no supervision, no self-test, no permission policy beyond `media`, no code-signing path, and two workflows claiming to build the same artifact |
 | Squirrel / electron-updater | Needs an update server and a signed feed to be honest about updates. This app has no auto-update: each release is a new installer |
 | A single self-contained `.exe` (pkg/nexe-style) | The interface is a WebGL page and the brain is a long-lived process that starts a model server. A single-file binary would have to explode itself into a temp folder at every launch, and gains nothing over an installer that writes to a real folder once |
 
@@ -238,8 +243,9 @@ See *Voice* above: the local speech stack has to be installed for speech input
 inside the app window.
 
 **Something is wrong and I want to know what.**
-`data\logs\desktop.log` has the whole startup, every model the bridge tried to
-reach, and every reason it gave. The tray opens it directly.
+`%LOCALAPPDATA%\JARVIS\logs\desktop.log` has the whole startup, every model
+the bridge tried to reach, and every reason it gave. The tray opens it
+directly.
 
 **I want to run it from source, like a developer.**
 

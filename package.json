@@ -46,6 +46,7 @@
     "directories": {
       "output": "release"
     },
+    "asar": true,
     "files": [
       "desktop/**/*",
       "bridge/**/*",

@@ -96,22 +96,33 @@ function writableDir(candidate) {
   }
 }
 
-function pickRoot(first) {
-  // Next to the exe when the install directory is writable (the usual
-  // per-user NSIS install), otherwise the local app data folder. A registry
-  // entry pointing at a Program Files path that Windows will not let us write
-  // is the failure this avoids, silently, at the moment it would have happened.
-  if (writableDir(first)) return first
-  const fallback = join(process.env.LOCALAPPDATA ?? app.getPath('appData'), APP_FOLDER)
-  writableDir(fallback)
-  return fallback
+function firstWritable(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate && writableDir(candidate)) return candidate
+  }
+  // Nothing is writable, which means every later step fails anyway; hand back
+  // the first candidate so the error names the folder we actually wanted.
+  return candidates.find(Boolean)
 }
+
+/**
+ * Where models, memory, screenshots and settings live.
+ *
+ * `%LOCALAPPDATA%\JARVIS`, deliberately not the install folder. Two things
+ * happen to install folders that must not cost the user a fresh multi-gigabyte
+ * download: an upgrade can replace or move them, and a machine-wide install
+ * under `Program Files` cannot be written to at all by a normal account. User
+ * data has to survive both, so it lives with the rest of the user's data. The
+ * install folder is only a fallback, for the case where local app data itself
+ * is not writable.
+ */
+const LOCAL_DATA = join(process.env.LOCALAPPDATA ?? app.getPath('appData'), APP_FOLDER)
 
 // In a source checkout the working tree already holds `models/`, pulled by
 // whoever ran `npm start`, and the bridge resolves everything relative to its
 // working directory — so in development the working directory is the repository
 // and models are shared with `npm start` instead of downloaded twice.
-const DATA_DIR = PACKAGED ? pickRoot(join(INSTALL_ROOT, 'data')) : APP_ROOT
+const DATA_DIR = PACKAGED ? firstWritable(LOCAL_DATA, join(INSTALL_ROOT, 'data')) : APP_ROOT
 /**
  * Where the shell's own files live: settings, logs, Chromium's cache.
  *
