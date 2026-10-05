@@ -76,9 +76,7 @@
       "dist/**",
       "models.json",
       "models.uncensored.json",
-      "package.json",
-      "node_modules/**",
-      "!node_modules/.cache/**"
+      "package.json"
     ],
     "win": {
       "target": [

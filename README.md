@@ -301,6 +301,12 @@ JARVIS is not a single chatbot. It is an **organization** of AI agents:
 
 ## Setup
 
+### Windows desktop installer (.exe)
+
+The **Windows installer** GitHub Actions workflow builds `JARVIS-Setup-<version>-x64.exe`. Open **Actions → Windows installer**, select a successful run, and download the `JARVIS-Windows-Installer` artifact; extract the artifact ZIP to get the EXE. Branch pushes and manual workflow runs create an artifact. A `v*` tag matching the `package.json` version creates a GitHub Release with the installer attached.
+
+Run the installer on Windows 10/11 x64. It installs a desktop JARVIS app with a Start Menu shortcut and uninstaller, without a separate Node.js/npm install. The installer is unsigned, so SmartScreen may show an unknown-publisher warning. Ollama and the multi-gigabyte AI models are not bundled; choose/download them from JARVIS's in-app MODEL STACK panel. Model files and settings are stored under `%LOCALAPPDATA%\JARVIS` and are kept across app updates. Internet is required for the runtime/model downloads.
+
 ### Quick Start (Windows)
 
 ```powershell
@@ -469,16 +475,3 @@ build.ps1                Build and launch script
 ## License
 
 MIT.
-### Windows installer from GitHub Actions
-
-Open **Actions → Windows installer → Run workflow** on this branch. When the run
-finishes, download the **JARVIS-Windows-Installer** artifact and extract it to
-get `JARVIS-Setup-1.0.0-x64.exe`. Run it on Windows 10/11 x64. A `v*` tag also
-triggers the build. The installer is unsigned, so Windows SmartScreen may warn.
-
-The EXE installs the desktop UI and Node bridge (no separate Node/npm install).
-It does **not** bundle Ollama or multi-GB models: use the app's setup page to
-choose/download them on first use. Downloads and settings live in the user's
-JARVIS application-data folder and remain across app updates. Internet access
-is needed for model downloads. This is separate from the browser-only
-`START.cmd` and GitHub Pages workflow.

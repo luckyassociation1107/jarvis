@@ -1,5 +1,5 @@
-# JARVIS web-only setup, production build, and local run.
-# No desktop app, installer, or EXE bundle is produced.
+# JARVIS browser-only setup, production build, and local run.
+# The desktop Windows installer is built separately by GitHub Actions.
 [CmdletBinding()]
 param(
   [switch]$NoLaunch,
@@ -54,7 +54,7 @@ try {
   Write-Host ''
   Write-Host 'J.A.R.V.I.S. — web setup, build, and run' -ForegroundColor Cyan
   Write-Host '======================================='
-  Write-Host 'This builds the browser UI only; no desktop app or EXE is created.'
+  Write-Host 'This prepares and runs the browser app; the desktop Setup EXE is built by GitHub Actions.'
 
   $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
   $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
