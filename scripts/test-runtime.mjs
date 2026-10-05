@@ -37,6 +37,7 @@ import {
   downloadArchive,
   ensureRuntime,
   extractArchive,
+  installOllamaCli,
   fetchRelease,
   findRuntimeBinary,
   pickAsset,
@@ -423,14 +424,68 @@ assert.equal(
 )
 assert.equal(findRuntimeBinary({ ...plan, path: join(root, 'absent', 'ollama.exe') }, { ...env, PATH: join(root, 'nothing') }), null, 'and with neither, the answer is null rather than a broken path')
 
-const nonWindows = await ensureRuntime({ platform: 'linux', arch: 'x64', env, url: modelUrl, onStep: () => {} })
-assert.equal(nonWindows.ok, false, 'on a machine that is not Windows the installer refuses rather than pretending')
-assert.match(nonWindows.error, /Windows only/, 'and says exactly that, with the download link a person would need')
+// A platform with no installer of its own is refused rather than guessed at —
+// but the refusal hands over the command that would work, for both platforms.
+const unsupported = await ensureRuntime({ platform: 'freebsd', arch: 'x64', env, url: modelUrl, onStep: () => {} })
+assert.equal(unsupported.ok, false, 'a platform the project cannot set up is refused rather than pretended about')
+assert.match(unsupported.error, /irm https:\/\/ollama\.com\/install\.ps1 \| iex/, 'and Windows is handed its one-liner')
+assert.match(unsupported.error, /curl -fsSL https:\/\/ollama\.com\/install\.sh \| sh/, 'and Linux/macOS are handed theirs')
 
 const started = spawnSync(process.execPath, ['-e', 'process.exit(0)'])
 assert.equal(started.status, 0, 'sanity')
 assert.equal(typeof startRuntime, 'function', 'startRuntime is exported for hosts that manage the process themselves')
 assert.equal(stopRuntime(), false, 'stopping a runtime that was never started is a no-op, not a crash')
+
+// --- the official one-liners are what actually runs --------------------------
+// A fake shell on PATH, so the exact command line is captured rather than
+// assumed: on Windows it has to be `irm https://ollama.com/install.ps1 | iex`,
+// everywhere else `curl -fsSL https://ollama.com/install.sh | sh`. Those are
+// Ollama's own instructions, and they are the whole install path now — no
+// browser, no download page, nothing for a person to fetch by hand.
+{
+  const shells = join(root, 'fake-shells')
+  mkdirSync(shells, { recursive: true })
+  const capture = join(root, 'captured-commands.txt')
+  const fake = (name, label) => {
+    const file = join(shells, name)
+    writeFileSync(file, `#!/bin/sh\necho "${label} $*" >> "$JARVIS_TEST_CAPTURE"\nexit 0\n`)
+    chmodSync(file, 0o755)
+    return file
+  }
+  const powershell = fake('powershell.exe', 'powershell')
+  fake('curl', 'curl')
+  const cliEnv = {
+    ...process.env,
+    PATH: `${shells}:${process.env.PATH}`,
+    JARVIS_TEST_CAPTURE: capture,
+    JARVIS_POWERSHELL: powershell,
+  }
+
+  const winSteps = []
+  const win = await installOllamaCli({ platform: 'win32', env: cliEnv, onStep: (step) => winSteps.push(step.status) })
+  assert.equal(win.ok, true, 'Windows installs through install.ps1 and reports success when the script does')
+  assert.equal(win.method, 'install.ps1', 'and it says which route worked')
+  const unixSteps = []
+  const unix = await installOllamaCli({ platform: 'linux', env: cliEnv, onStep: (step) => unixSteps.push(step.status) })
+  assert.equal(unix.ok, true, 'Linux and macOS install through install.sh')
+  assert.equal(unix.method, 'curl | sh', 'through curl, not a file somebody has to download')
+
+  const calls = readFileSync(capture, 'utf8').trim().split('\n')
+  assert.ok(
+    calls.some((call) => call.includes('irm https://ollama.com/install.ps1 | iex')),
+    'the Windows command is exactly the one-liner Ollama documents',
+  )
+  assert.ok(
+    calls.some((call) => call.includes('curl -fsSL https://ollama.com/install.sh')),
+    'curl is handed the documented flags and URL',
+  )
+  assert.ok(
+    winSteps.some((step) => step.includes('irm https://ollama.com/install.ps1 | iex'))
+      && unixSteps.some((step) => step.includes('curl -fsSL https://ollama.com/install.sh | sh')),
+    'and the log says both one-liners out loud, the pipe included',
+  )
+  console.log('PASS  Ollama installs with its own one-liners over the CLI — irm https://ollama.com/install.ps1 | iex, curl -fsSL https://ollama.com/install.sh | sh')
+}
 
 assetServer.close()
 apiServer.close()

@@ -55,6 +55,9 @@ export const DEFAULT_RELEASE_BASE = 'https://github.com/ollama/ollama/releases/l
 
 /** The official Windows installer. Downloaded and run by the app, never a browser. */
 export const OLLAMA_SETUP_URL = 'https://ollama.com/download/OllamaSetup.exe'
+/** Ollama's own installers. Both are CLI-only: no download page, no browser. */
+export const OLLAMA_INSTALL_PS1 = 'https://ollama.com/install.ps1'
+export const OLLAMA_INSTALL_SH = 'https://ollama.com/install.sh'
 
 export function releaseApi(env = process.env) {
   return String(env.JARVIS_RUNTIME_API ?? DEFAULT_RELEASE_API)
@@ -574,15 +577,16 @@ export async function ensureRuntime({
     onStep({ phase: 'runtime', status: `a model server already answers at ${url}; nothing to start`, ok: true, skipped: true })
     return { ok: true, skipped: true, url }
   }
-  if (!platformSupported(platform, arch)) {
-    const error = `Windows only: JARVIS cannot install the model runtime on ${platform}/${arch}; install Ollama from https://ollama.com/download and press re-check`
-    onStep({ phase: 'runtime', status: error, ok: false })
-    return { ok: false, error }
-  }
-
-  // ── Linux / macOS: use the CLI installer script ──
+  // ── Linux / macOS: Ollama's own installer, over the CLI ──
+  // Before the portable build is even considered: these platforms have an
+  // official script that needs no zip, no download page and no browser.
   if (platform === 'linux' || platform === 'darwin') {
     return ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir, onStep, fetchImpl })
+  }
+  if (!platformSupported(platform, arch)) {
+    const error = `JARVIS cannot install the model runtime on ${platform}/${arch} by itself; run Ollama's own installer (Windows: irm ${OLLAMA_INSTALL_PS1} | iex; Linux and macOS: curl -fsSL ${OLLAMA_INSTALL_SH} | sh) and press re-check`
+    onStep({ phase: 'runtime', status: error, ok: false })
+    return { ok: false, error }
   }
 
   // ── Windows: the silent system install first, the standalone build after ──
@@ -644,17 +648,120 @@ export async function ensureRuntime({
 }
 
 /**
- * Windows: run the official installer silently, with nobody watching.
+ * Install Ollama the way Ollama says to: their own script, run over the CLI.
  *
- * Three things this is not. It is not a browser download — the file is fetched
- * over HTTPS by the app, so a machine with no browser open, or no browser at
- * all, still gets a runtime. It is not a wizard — Inno Setup's `/VERYSILENT`
- * answers every page, and the install is per-user, so it does not need an
- * administrator. And it is not trusted blindly: the installer's own exit code
- * is the answer, and if it says no, the caller falls back to the standalone
- * build rather than leaving the person with nothing.
+ *   Windows            irm https://ollama.com/install.ps1 | iex
+ *   Linux and macOS    curl -fsSL https://ollama.com/install.sh | sh
+ *
+ * Neither needs a browser and neither needs a person: the Windows script also
+ * verifies that OllamaSetup.exe is signed by Ollama Inc. before it runs it
+ * silently, so the checks we would have written ourselves come with it. When the
+ * shell has no PowerShell or no curl, the same script is fetched over HTTPS by
+ * Node and handed to the shell — the same file by a different road — and the
+ * caller still has the standalone build to fall back on.
+ */
+export async function installOllamaCli({
+  platform = process.platform,
+  onStep = () => {},
+  env = process.env,
+  timeout = 30 * 60 * 1000,
+  fetchImpl = fetch,
+} = {}) {
+  if (platform === 'win32') {
+    const powershell = env.JARVIS_POWERSHELL || 'powershell.exe'
+    onStep({ phase: 'runtime-install', status: `running the official installer (irm ${OLLAMA_INSTALL_PS1} | iex)` })
+    const result = await runCommand(
+      powershell,
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `$ProgressPreference = 'SilentlyContinue'; irm ${OLLAMA_INSTALL_PS1} | iex`],
+      { onStep, env, timeout },
+    )
+    return { ...result, method: result.ok ? 'install.ps1' : null }
+  }
+
+  onStep({ phase: 'runtime-install', status: `running the official installer (curl -fsSL ${OLLAMA_INSTALL_SH} | sh)` })
+  const direct = await runCommand('sh', ['-c', `curl -fsSL ${OLLAMA_INSTALL_SH} | sh`], { onStep, env, timeout })
+  if (direct.ok) return { ...direct, method: 'curl | sh' }
+
+  onStep({ phase: 'runtime-install', status: `${direct.error ?? 'curl could not run'}; fetching the script with Node instead` })
+  try {
+    const response = await fetchImpl(OLLAMA_INSTALL_SH, { signal: AbortSignal.timeout(60_000) })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const script = await response.text()
+    const file = join(tmpdir(), 'jarvis-ollama-install.sh')
+    writeFileSync(file, script, { mode: 0o755 })
+    const fetched = await runCommand('sh', [file], { onStep, env, timeout })
+    try { unlinkSync(file) } catch { /* already gone */ }
+    return { ...fetched, method: fetched.ok ? 'install.sh' : null }
+  } catch (error) {
+    return { ok: false, code: null, method: null, error: `could not run the official installer: ${error?.message ?? error}` }
+  }
+}
+
+/** Run a command, stream its output as install steps, resolve with its exit code. */
+function runCommand(command, argv, { onStep = () => {}, env = process.env, timeout = 30 * 60 * 1000 } = {}) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(command, argv, { stdio: ['ignore', 'pipe', 'pipe'], env, windowsHide: true })
+    } catch (error) {
+      resolve({ ok: false, code: null, error: `${command} could not be started: ${error.message}` })
+      return
+    }
+    const lines = []
+    const push = (chunk) => {
+      for (const raw of String(chunk).split(/\r?\n/)) {
+        const text = raw.trim()
+        if (!text) continue
+        lines.push(text)
+        onStep({ phase: 'runtime-install', status: text.slice(0, 200) })
+      }
+    }
+    child.stdout?.on('data', push)
+    child.stderr?.on('data', push)
+    const timer = setTimeout(() => { try { child.kill() } catch { /* already gone */ } }, timeout)
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      resolve({ ok: false, code: null, error: `${command} failed: ${error.message}` })
+    })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      const last = lines.at(-1)
+      resolve({
+        ok: code === 0,
+        code,
+        error: code === 0 ? null : `${command} exited with code ${code}${last ? `: ${last}` : ''}`,
+      })
+    })
+  })
+}
+
+/**
+ * Windows: the official script first, the installer file second.
+ *
+ * The one-liner above is what a person would type, and it verifies the
+ * installer's signature before it runs it. This is the fallback for a machine
+ * where PowerShell itself is locked down: the same OllamaSetup.exe, fetched over
+ * HTTPS by the app and run with Inno Setup's `/VERYSILENT`, per-user, no
+ * administrator, no wizard. The installer's own exit code is the answer, and if
+ * it says no the caller falls back to the standalone build rather than leaving
+ * the person with nothing.
  */
 async function installOllamaSystem({ onStep = () => {}, env = process.env, fetchImpl = fetch } = {}) {
+  const script = await installOllamaCli({ platform: 'win32', onStep, env, fetchImpl })
+  if (script.ok) {
+    const bin = findInstalledOllama(env)
+    if (bin) {
+      onStep({ phase: 'runtime-ready', status: `Ollama installed at ${bin} (official install.ps1)`, ok: true })
+      return { ok: true, bin, version: null, mode: 'system', method: 'install.ps1' }
+    }
+    onStep({ phase: 'runtime', status: 'the official script finished but no ollama.exe was found; fetching the installer directly' })
+  } else {
+    onStep({
+      phase: 'runtime',
+      status: `the official install.ps1 route did not work (${script.error}); downloading ${OLLAMA_SETUP_URL} and running it silently instead`,
+    })
+  }
+
   const dir = join(tmpdir(), 'jarvis-ollama-setup')
   const setup = join(dir, 'OllamaSetup.exe')
   try {
@@ -722,9 +829,9 @@ async function ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir,
     return { ...started, bin: existingBin }
   }
 
-  // Method 1: Official install script
-  onStep({ phase: 'runtime-download', status: 'downloading the official Ollama install script' })
-  const scriptResult = await installUnixViaScript({ onStep, env })
+  // Method 1: the official CLI installer, exactly as Ollama documents it
+  onStep({ phase: 'runtime-download', status: 'running the official Ollama installer over the CLI' })
+  const scriptResult = await installOllamaCli({ platform, onStep, env, fetchImpl })
   if (scriptResult.ok) {
     const bin = findUnixBinary()
     if (bin) {
@@ -743,7 +850,7 @@ async function ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir,
     return { ...started, bin: binResult.bin }
   }
 
-  const error = 'Could not install Ollama automatically. Install it manually: curl -fsSL https://ollama.com/install.sh | sh'
+  const error = `Could not install Ollama automatically. Install it manually: curl -fsSL ${OLLAMA_INSTALL_SH} | sh`
   onStep({ phase: 'runtime', status: error, ok: false })
   return { ok: false, error }
 }
@@ -764,49 +871,6 @@ function findUnixBinary() {
   } catch { /* not found */ }
 
   return null
-}
-
-async function installUnixViaScript({ onStep, env }) {
-  const scriptUrl = 'https://ollama.com/install.sh'
-
-  let script
-  try {
-    const response = await fetch(scriptUrl, { signal: AbortSignal.timeout(30_000) })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    script = await response.text()
-  } catch (err) {
-    return { ok: false, error: `could not download install script: ${err.message}` }
-  }
-
-  const tmpScript = '/tmp/jarvis-ollama-install.sh'
-  writeFileSync(tmpScript, script, { mode: 0o755 })
-
-  return new Promise((resolve) => {
-    const child = spawn('sh', [tmpScript], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...env },
-    })
-
-    child.stdout?.on('data', (d) => {
-      for (const l of d.toString().split('\n')) {
-        if (l.trim()) onStep({ phase: 'runtime', status: l.trim() })
-      }
-    })
-    child.stderr?.on('data', (d) => {
-      for (const l of d.toString().split('\n')) {
-        if (l.trim()) onStep({ phase: 'runtime', status: l.trim() })
-      }
-    })
-
-    child.once('close', (code) => {
-      try { unlinkSync(tmpScript) } catch { /* ok */ }
-      resolve({ ok: code === 0, error: code !== 0 ? `installer exited with code ${code}` : null })
-    })
-    child.once('error', (err) => {
-      try { unlinkSync(tmpScript) } catch { /* ok */ }
-      resolve({ ok: false, error: err.message })
-    })
-  })
 }
 
 async function installUnixViaTarball({ platform, arch, variant, onStep, fetchImpl, env }) {

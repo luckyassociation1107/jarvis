@@ -228,8 +228,11 @@ const setupScript = setupPage.match(/<script>([\s\S]*?)<\/script>/)
 assert.ok(setupScript, 'the page carries its script inline')
 assert.doesNotThrow(() => new Function(setupScript[1]), 'the setup page script parses')
 const foreignPage = installerPage({ platform: 'linux', port: 8787 })
-assert.ok(!foreignPage.includes('install.sh'), 'there is no Linux one-liner on the page any more')
-assert.ok(foreignPage.includes('install:ollama'), 'a Linux host is pointed at the CLI path instead of a Windows installer')
+assert.ok(
+  foreignPage.includes('curl -fsSL https://ollama.com/install.sh | sh'),
+  'a Linux host is told the exact one-liner that installs the runtime for it, not handed a Windows installer',
+)
+assert.ok(foreignPage.includes('install:ollama'), 'and the local CLI wrapper is named as well')
 const otherOs = installerPage({ platform: 'freebsd', port: 8787 })
 assert.ok(otherOs.includes('This page sets up freebsd'), 'a host the project cannot unpack on is told so plainly')
 assert.ok(!foreignPage.includes('hud='), 'without a known HUD there is no dead link')

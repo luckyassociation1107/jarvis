@@ -92,12 +92,14 @@ in the workflow, and the warning goes away for your users too.
    parameters and quantization; the three small rungs are ticked to start with,
    so a first run is minutes. Whatever the RAM allows, the choice is yours:
    nothing is downloaded until you press the button.
-3. The runtime is not a browser problem either. On Windows the page downloads
-   the official Ollama installer itself and runs it silently
-   (`OllamaSetup.exe /VERYSILENT`) — no download page, no wizard, no
-   administrator prompt on a normal account — and falls back to the standalone
-   build inside the app's own folder on a machine that blocks installers. On
-   Linux and macOS it runs the official CLI installer.
+3. The runtime is not a browser problem either. Ollama is installed with
+   Ollama's own one-liner, over the CLI — `irm https://ollama.com/install.ps1 |
+   iex` on Windows, `curl -fsSL https://ollama.com/install.sh | sh` everywhere
+   else. No download page, no wizard, no file to fetch by hand; the Windows
+   script verifies the installer's Ollama Inc. signature and then runs it
+   silently (`OllamaSetup.exe /VERYSILENT`, per-user, no administrator prompt on
+   a normal account). On a machine where PowerShell or an installer is blocked,
+   the standalone build inside the app's own folder is unpacked instead.
 4. When the three models are in, the runtime is started and the interface
    starts answering. No restart needed; the HUD reconnects on its own.
 

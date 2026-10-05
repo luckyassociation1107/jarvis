@@ -3,7 +3,8 @@
  * Auto-install Ollama via CLI — no browser needed.
  *
  * Supports Linux (x86_64, arm64) and macOS (arm64, x86_64).
- * Downloads the official binary, installs it, starts the server,
+ * Installs it with Ollama's own script over the CLI (no browser, no download
+ * page), starts the server,
  * then shows the RAM-based model ladder and lets YOU pick which
  * model to pull. Nothing is downloaded without your say-so.
  *
@@ -23,18 +24,20 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createInterface } from 'node:readline'
-import { homedir, platform, arch, totalmem } from 'node:os'
+import { freemem, homedir, platform, arch, totalmem } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createWriteStream } from 'node:fs'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import process from 'node:process'
+import { installOllamaCli } from '../bridge/portable-runtime.mjs'
 
 /* ────────────────────────────── constants ────────────────────────────── */
 
@@ -116,13 +119,34 @@ function detectGpu() {
 /** How much free RAM, in bytes. */
 function availableRam() {
   try {
-    const meminfo = require('node:fs').readFileSync('/proc/meminfo', 'utf8')
+    const meminfo = readFileSync('/proc/meminfo', 'utf8')
     const match = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m)
     if (match) return Number(match[1]) * 1024
   } catch { /* macOS / no /proc */ }
-  // os.freemem() is the fallback
-  const { freemem } = require('node:os')
   return freemem()
+}
+
+/**
+ * Install Ollama with Ollama's own script, over the CLI.
+ *
+ *   Windows            irm https://ollama.com/install.ps1 | iex
+ *   Linux and macOS    curl -fsSL https://ollama.com/install.sh | sh
+ *
+ * No browser is opened and no file is handed to the person to download: the
+ * script is the installation, and on Windows it also verifies the installer's
+ * signature before running it silently. Progress is printed as it arrives.
+ */
+async function installOllama() {
+  const result = await installOllamaCli({
+    platform: plat,
+    env: process.env,
+    onStep: (step) => { if (step?.status) line(info, step.status) },
+  })
+  return {
+    ok: Boolean(result.ok),
+    method: result.method ?? (result.ok ? 'official installer' : null),
+    error: result.error ?? (result.ok ? null : 'the official installer did not finish'),
+  }
 }
 
 /* ──────────────────────── model ladder ───────────────────────────────── */
@@ -467,7 +491,9 @@ async function main() {
     if (!result.ok) {
       console.log('')
       line(fail, `Installation failed: ${result.error}`)
-      line(info, 'Try manually: curl -fsSL https://ollama.com/install.sh | sh')
+      line(info, plat === 'win32'
+        ? 'Try manually: irm https://ollama.com/install.ps1 | iex'
+        : 'Try manually: curl -fsSL https://ollama.com/install.sh | sh')
       process.exit(1)
     }
 

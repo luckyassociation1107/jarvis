@@ -388,11 +388,13 @@ minutes rather than hours:
 | Coder & reasoning | `qwen2.5-coder:0.5b` | 398 MB |
 | Vision | `ahmadwaqar/smolvlm2-256m-video:q8_0` | 279 MB |
 
-Ollama itself is installed for you: on Windows the page downloads the official
-installer over the CLI and runs it silently (`OllamaSetup.exe /VERYSILENT`), and
-falls back to the standalone build inside the app folder; on Linux and macOS it
-runs the official CLI installer. Nothing is fetched from a browser download
-page, and the setup page is reopened any time from the tray
+Ollama itself is installed for you, with Ollama's own one-liner over the CLI:
+`irm https://ollama.com/install.ps1 | iex` on Windows (the script checks the
+installer's signature, then runs it silently — `OllamaSetup.exe /VERYSILENT`),
+`curl -fsSL https://ollama.com/install.sh | sh` on Linux and macOS, and the
+standalone build inside the app folder if an installer is blocked. Nothing is
+fetched from a browser download page, and the setup page is reopened any time
+from the tray
 (**Model setup…**) or the **OPEN MODEL SETUP** button on the **MODEL STACK**
 panel.
 

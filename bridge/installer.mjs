@@ -9,11 +9,12 @@
  * quantization, and with the ones this machine cannot hold marked rather than
  * hidden. The three the person ticked are the three that get downloaded.
  *
- * The runtime is not a browser problem either: on Windows the official installer
- * is fetched and run silently from here, and everywhere else the official CLI
- * script is. Nobody is sent to a download page, and nothing is installed
- * system-wide on a machine where the installer cannot run — the standalone build
- * inside the project is the fallback.
+ * The runtime is not a browser problem either: Ollama is installed with Ollama's
+ * own one-liner, over the CLI — `irm https://ollama.com/install.ps1 | iex` on
+ * Windows and `curl -fsSL https://ollama.com/install.sh | sh` everywhere else.
+ * Nobody is sent to a download page, and nothing is installed system-wide on a
+ * machine where the script is blocked — the standalone build inside the project
+ * is the fallback.
  *
  * It is served by the bridge rather than by Vite or a public site because it has
  * to talk to the bridge's own install endpoints, and because it must work on a
@@ -37,12 +38,11 @@ const PLATFORM_NAME = { win32: 'Windows', linux: 'Linux', darwin: 'macOS' }
  * @param {{ platform?: string, port?: number, hudUrl?: string }} options
  */
 export function installerPage({ platform = process.platform, port = 8787, hudUrl = null } = {}) {
-  const download = OLLAMA_DOWNLOAD[platform] ?? OLLAMA_DOWNLOAD.linux
   const osName = PLATFORM_NAME[platform] ?? platform
   const runtimeLine = platform === 'win32'
-    ? 'Press <b>Install everything</b> below and this page does the whole runtime by itself: it downloads the official Ollama installer and runs it silently (<code>OllamaSetup.exe /VERYSILENT</code>) — no browser, no wizard, no download page. Then it starts Ollama and pulls the three models you chose. On a machine that blocks installers, the standalone build inside this project is unpacked instead.'
+    ? 'Press <b>Install everything</b> below and this page installs the runtime with Ollama\'s own one-liner, over the CLI: <code>irm https://ollama.com/install.ps1 | iex</code>. That script verifies the installer is signed by Ollama Inc. and runs it silently (<code>OllamaSetup.exe /VERYSILENT</code>, per-user, no administrator) — no browser, no wizard, no download page. Then it starts Ollama and pulls the three models you chose. On a machine that blocks PowerShell or installers, the standalone build inside this project is unpacked instead.'
     : platform === 'linux' || platform === 'darwin'
-      ? 'Press <b>Install everything</b> below and this page runs the official Ollama CLI installer for you, then pulls the three models you chose. Prefer to do it yourself? <code>npm run install:ollama</code>, then press re-check.'
+      ? 'Press <b>Install everything</b> below and this page installs the runtime with Ollama\'s own one-liner, over the CLI: <code>curl -fsSL https://ollama.com/install.sh | sh</code>. Then it pulls the three models you chose. Prefer to do it yourself? <code>npm run install:ollama</code>, then press re-check.'
       : `This page sets up ${osName}; this host is ${platform}, so the project runtime cannot be unpacked here. Every other part still runs.`
 
   return `<!doctype html>
@@ -116,7 +116,7 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
 <body>
 <header>
   <div class="brand">J.A.R.V.I.S <span>· setup</span></div>
-  <div class="sub">Pick one model for each of three jobs. This page installs the model runtime for you — on Windows by running the official installer silently — and then downloads exactly the three models you chose. Nothing is downloaded until you press the button.</div>
+  <div class="sub">Pick one model for each of three jobs. This page installs the model runtime with Ollama's own CLI one-liner, then downloads exactly the three models you chose. Nothing is downloaded until you press the button.</div>
 </header>
 <main>
   <section class="card">
