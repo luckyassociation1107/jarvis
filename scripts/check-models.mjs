@@ -162,8 +162,30 @@ try {
   checks.push({ name: `coder · ${coderTag}`, ok: /def |lambda|return/i.test(coderAnswer), evidence: `"${oneLine(coderAnswer)}"` })
 
   const visionTag = MANDATORY.find((model) => model.slot === 'vision').tag
-  const visionAnswer = await ask(visionTag, 'What colour is the square in this image? Reply with one word.', { images: [redSquarePng().toString('base64')] })
-  checks.push({ name: `vision · ${visionTag}`, ok: /red|crimson|scarlet/i.test(visionAnswer), evidence: `"${oneLine(visionAnswer)}"` })
+  // Two solid-colour images, each asked about twice: once as a plain caption and
+  // once as a forced choice. A model that never looks at the pixels has to end
+  // up naming both colours by luck, and a model that does look has the easiest
+  // possible question in front of it. Every answer goes in the evidence, so a
+  // failure shows what the model actually said.
+  const colours = { red: [0xd3, 0x1f, 0x1f], blue: [0x1b, 0x3f, 0xc9] }
+  const names = (colour, reply) => {
+    const other = colour === 'red' ? 'blue' : 'red'
+    return new RegExp(colour, 'i').test(reply) && !new RegExp(other, 'i').test(reply)
+  }
+  const visionAnswers = []
+  const missed = []
+  for (const colour of ['red', 'blue']) {
+    const other = colour === 'red' ? 'blue' : 'red'
+    const image = solidPng(colours[colour]).toString('base64')
+    let reply = await ask(visionTag, 'Describe this image in one word.', { images: [image] })
+    if (!names(colour, reply)) {
+      visionAnswers.push(`${colour} image → captioned "${oneLine(reply)}"`)
+      reply = await ask(visionTag, `Is the colour of this image ${colour} or ${other}? Reply with one word.`, { images: [image] })
+      if (!names(colour, reply)) missed.push(colour)
+    }
+    visionAnswers.push(`${colour} image → "${oneLine(reply)}"`)
+  }
+  checks.push({ name: `vision · ${visionTag}`, ok: missed.length === 0, evidence: visionAnswers.join(' · ') })
 
   /* ── report ── */
   say('')
@@ -194,23 +216,25 @@ try {
 /* ------------------------------------------------------------------ artefacts */
 
 /**
- * A red square on white, as bytes.
+ * One solid colour, as PNG bytes.
  *
  * The vision check has to hand the model something to look at, and a generated
  * PNG is better than a fixture: it is exact, tiny, and there is no file in the
- * repository whose absence can turn a real failure into a confusing one.
+ * repository whose absence can turn a real failure into a confusing one. A
+ * field of one saturated colour is the easiest image there is to name, which is
+ * the point — the question is whether the model looks at all, not whether a
+ * 256M model can describe a scene.
  */
-function redSquarePng(size = 64) {
+function solidPng([red, green, blue], size = 64) {
   const raw = Buffer.alloc(size * (1 + size * 3))
   for (let y = 0; y < size; y += 1) {
     const row = y * (1 + size * 3)
     raw[row] = 0
     for (let x = 0; x < size; x += 1) {
       const at = row + 1 + x * 3
-      const inside = x > size * 0.25 && x < size * 0.75 && y > size * 0.25 && y < size * 0.75
-      raw[at] = inside ? 0xd3 : 0xff
-      raw[at + 1] = inside ? 0x1f : 0xff
-      raw[at + 2] = inside ? 0x1f : 0xff
+      raw[at] = red
+      raw[at + 1] = green
+      raw[at + 2] = blue
     }
   }
   const chunk = (type, data) => {
