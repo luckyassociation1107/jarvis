@@ -35,9 +35,12 @@
  *   JARVIS_MODEL_BASE_URL / JARVIS_OLLAMA_URL   point at an already-running
  *                        runtime instead of the one this test would start.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const args = new Set(process.argv.slice(2))
 const PLAN_ONLY = args.has('--plan')
@@ -79,6 +82,8 @@ const {
 
 const GB = 1024 ** 3
 const said = []
+let bridgeChild = null
+let bridgeSocket = null
 const step = (line) => {
   console.log(`  ${line}`)
   said.push(`  ${line}`)
@@ -279,14 +284,34 @@ for (const check of CHECKS) {
   step(`${label}  ${check.name.padEnd(13)} ${String(seconds).padStart(5)} s  ${error ? `error: ${error}` : `→ ${oneLine(trimmed)}`}`)
 }
 
+/* --------------------------------------------------------- the AI does the work */
+
+// The prompts above go through `bridge/local-llm.mjs`, the client the bridge
+// uses. This goes through the *bridge itself*: a real socket, a real session,
+// the seven in-process tool servers, and — if the model is willing — a real
+// command executed on the machine, verified by its side effect on disk rather
+// than by anything the model says about itself.
+heading('')
+heading('Asking the AI to do work through the real bridge')
+const work = await runBridgeStage()
+for (const check of work.checks) {
+  const label = check.ok ? 'PASS' : check.optional ? 'INFO' : 'FAIL'
+  step(`${label}  ${check.name.padEnd(13)} ${check.evidence}`)
+}
+
+const requiredBridge = work.checks.filter((check) => !check.optional)
+const passedBridge = requiredBridge.filter((check) => check.ok).length
+
 const required = answers.filter((answer) => !answer.optional)
 const passed = required.filter((answer) => answer.pass).length
 const bonus = answers.filter((answer) => answer.optional && answer.pass).length
 const model = modelTags.join(', ')
-const verdict = passed === required.length ? 'the AI is working' : 'the AI is NOT working'
+const working = passed === required.length && passedBridge === requiredBridge.length
+const verdict = working ? 'the AI is working' : 'the AI is NOT working'
 heading('')
-heading(`RESULT: ${verdict} — ${model} answered ${passed}/${required.length} required prompts`
-  + (answers.length > required.length ? ` (${bonus}/${answers.length - required.length} informational)` : ''))
+heading(`RESULT: ${verdict} — ${model} answered ${passed}/${required.length} required prompts, `
+  + `${passedBridge}/${requiredBridge.length} required bridge checks`
+  + (answers.length > required.length ? ` (${bonus}/${answers.length - required.length} informational prompts)` : ''))
 
 /* --------------------------------------------------------------------- report */
 
@@ -307,9 +332,13 @@ const report = [
     ...(answer.diagnostic ? [`  ${answer.diagnostic}`] : []),
     '',
   ]),
-  passed === required.length
-    ? `RESULT: the AI is working (${passed}/${required.length}${answers.length > required.length ? `, ${bonus}/${answers.length - required.length} informational` : ''})`
-    : `RESULT: the AI is NOT working (${passed}/${required.length})`,
+  'Through the real bridge (socket, session, tool servers):',
+  ...work.checks.map((check) => `  [${check.ok ? 'PASS' : check.optional ? 'INFO' : 'FAIL'}] ${check.name} — ${check.evidence}`),
+  ...(work.noteLines.length ? ['', ...work.noteLines] : []),
+  '',
+  working
+    ? `RESULT: the AI is working (${passed}/${required.length} prompts, ${passedBridge}/${requiredBridge.length} bridge checks)`
+    : `RESULT: the AI is NOT working (${passed}/${required.length} prompts, ${passedBridge}/${requiredBridge.length} bridge checks)`,
   '',
 ].join('\n')
 
@@ -321,7 +350,187 @@ try {
   step(`report: could not be written (${error?.message ?? error}) — the log above has everything`)
 }
 
-finish(passed === required.length ? 0 : 1)
+finish(working ? 0 : 1)
+
+/* ------------------------------------------------------------ the bridge stage */
+
+/**
+ * Drive the bridge the way the interface does, with the model that was just
+ * installed.
+ *
+ * Three turns:
+ *   1. a greeting — proves the socket, the session and the answer path work;
+ *   2. a question about something said in turn 1 — proves the session keeps
+ *      context, which is what makes it an assistant rather than a search box;
+ *   3. a job — the model is asked to call `run_command` and write a file, and
+ *      the file on disk is the evidence. A 2B model asked to act often narrates
+ *      instead, so this one is informational: the report says what it did, and
+ *      the verdict does not pretend a small model's tool discipline is wiring.
+ *
+ * The bridge is started with writes enabled and its command root set to the
+ * folder this test watches, so a command that runs is a command that can be
+ * proved to have run.
+ */
+async function runBridgeStage() {
+  const checks = []
+  const noteLines = []
+  const workDir = join(process.cwd(), 'models', 'live-bridge')
+  try {
+    const { WebSocket } = await import('ws')
+    mkdirSync(workDir, { recursive: true })
+    const port = await freePort()
+    const log = []
+    // Pin the bridge to the very weights this run pulled and just prompted, by
+    // name and by URL. Left to plan for itself it would usually agree, and
+    // "usually" is not a thing to build a verdict on.
+    const slot = (name) => (currentPlan.choices[name]?.fits ? currentPlan.choices[name].model : null) ?? modelTags[0]
+    const chatTag = slot('chat')
+    bridgeChild = spawn(process.execPath, [fileURLToPath(new URL('../bridge/server.mjs', import.meta.url))], {
+      cwd: workDir,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        JARVIS_BRIDGE_PORT: String(port),
+        JARVIS_ALLOW_NO_ORIGIN: '1',
+        JARVIS_ALLOW_WRITES: '1',
+        JARVIS_SHELL_ROOTS: workDir,
+        JARVIS_OLLAMA_URL: RUNTIME_URL,
+        JARVIS_MODEL_BASE_URL: `${RUNTIME_URL}/v1`,
+        JARVIS_MODEL_CHAT: chatTag,
+        JARVIS_MODEL_REASON: slot('reason'),
+        JARVIS_MODEL_VISION: slot('vision'),
+        JARVIS_MODEL_CHAT_URL: `${RUNTIME_URL}/v1`,
+        JARVIS_MODEL_REASON_URL: `${RUNTIME_URL}/v1`,
+        JARVIS_MODEL_VISION_URL: `${RUNTIME_URL}/v1`,
+        JARVIS_NO_BROWSER: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    bridgeChild.stdout.on('data', (chunk) => log.push(`[bridge] ${String(chunk).trimEnd()}`))
+    bridgeChild.stderr.on('data', (chunk) => log.push(`[bridge] ${String(chunk).trimEnd()}`))
+
+    const healthDeadline = Date.now() + 90_000
+    let healthy = false
+    while (Date.now() < healthDeadline && !healthy) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
+        healthy = response.ok
+      } catch { /* still starting: seven MCP servers join first */ }
+      if (!healthy) await sleep(700)
+    }
+    if (!healthy) {
+      checks.push({ name: 'the bridge answers /health', ok: false, evidence: `not within 90 s — ${log.slice(-3).join(' | ') || 'no output'}` })
+      return { checks, noteLines }
+    }
+
+    bridgeSocket = new WebSocket(`ws://127.0.0.1:${port}`)
+    const frames = []
+    bridgeSocket.on('message', (raw) => {
+      try { frames.push(JSON.parse(raw.toString())) } catch { /* not for us */ }
+    })
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the bridge did not accept a socket within 20 s')), 20_000)
+      bridgeSocket.once('open', () => { clearTimeout(timer); resolve() })
+      bridgeSocket.once('error', (error) => { clearTimeout(timer); reject(error) })
+    })
+    const ready = await waitForFrame(frames, (frame) => frame.type === 'ready' && Array.isArray(frame.servers) && frame.servers.length >= 7, 60_000)
+    checks.push({
+      name: 'tools joined',
+      ok: Boolean(ready),
+      evidence: ready ? `${ready.servers.length} servers: ${ready.servers.join(', ')}` : 'no ready frame listing seven servers',
+    })
+
+    let askId = 0
+    const ask = async (text, timeoutMs = 240_000) => {
+      const id = `live${++askId}`
+      const start = frames.length
+      bridgeSocket.send(JSON.stringify({ type: 'ask', id, text }))
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const mine = frames.slice(start).filter((frame) => frame.ask === id || frame.id === id)
+        const done = mine.find((frame) => frame.type === 'done')
+        const failed = mine.find((frame) => frame.type === 'error')
+        if (done) return { text: done.text ?? '', tools: mine.filter((frame) => frame.type === 'tool').map((frame) => frame.name), frames: mine }
+        if (failed) return { error: failed.message ?? 'the bridge reported an error', tools: [], frames: mine }
+        await sleep(400)
+      }
+      return { error: `no answer within ${Math.round(timeoutMs / 1000)} s`, tools: [], frames: frames.slice(start) }
+    }
+
+    const greeting = await ask('Say hello in one short sentence.')
+    const greetingText = (greeting.text ?? '').trim()
+    checks.push({
+      name: 'conversation',
+      ok: Boolean(greetingText) && !greeting.error,
+      evidence: greeting.error ? greeting.error : `the bridge answered over its own socket: "${oneLine(greetingText)}"`,
+    })
+
+    // The codeword is given and then asked back. Without the second turn this
+    // only proves the model can talk; with it, it proves the *session* carries
+    // what the user said, which is the difference between an assistant and a
+    // one-shot endpoint.
+    const told = await ask('Remember this codeword: BANANA. Reply with the single word OK.')
+    const recall = await ask('What codeword did I ask you to remember? Reply with the word only.')
+    const recallText = (recall.text ?? '').trim()
+    checks.push({
+      name: 'memory',
+      ok: /BANANA/i.test(recallText),
+      evidence: recall.error
+        ? recall.error
+        : `"${oneLine(recallText)}" for a codeword given in the previous turn (that turn answered "${oneLine((told.text ?? '').trim()) || told.error || 'nothing'}")`,
+    })
+
+    const proof = join(workDir, 'live-proof.txt')
+    const jobAsk = (command) => `Call the tool mcp__jarvis_shell__run_command with the argument command set to exactly \`${command}\` and no other arguments. Then reply with the single word DONE.`
+    let workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 300_000)
+    let ranIt = existsSync(proof) && /BANANA/i.test(readFileSync(proof, 'utf8'))
+    if (!ranIt) {
+      step('RETRY   a real command  the first ask produced no file; asking once more, naming the tool and the command')
+      workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 300_000)
+      ranIt = existsSync(proof) && /BANANA/i.test(readFileSync(proof, 'utf8'))
+    }
+    checks.push({
+      name: 'a real command',
+      ok: ranIt,
+      optional: true,
+      evidence: ranIt
+        ? `the model called ${workTurn.tools.join(', ') || 'mcp__jarvis_shell__run_command'} and live-proof.txt now contains BANANA`
+        : workTurn.error
+          ? `the turn failed: ${workTurn.error}`
+          : `no file written — tools announced: [${workTurn.tools.join(', ') || 'none'}], answer: "${oneLine((workTurn.text ?? '').trim())}"`,
+    })
+    noteLines.push(`Tool turn: announced [${workTurn.tools.join(', ') || 'none'}]${workTurn.error ? `, failed: ${workTurn.error}` : `, said "${oneLine((workTurn.text ?? '').trim())}"`}.`)
+    return { checks, noteLines }
+  } catch (error) {
+    checks.push({ name: 'the bridge ran a turn', ok: false, optional: true, evidence: `could not be driven: ${error?.message ?? error}` })
+    return { checks, noteLines }
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.on('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+async function waitForFrame(frames, predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const found = frames.find(predicate)
+    if (found) return found
+    await sleep(400)
+  }
+  return null
+}
 
 /* --------------------------------------------------------------------- helpers */
 
@@ -378,6 +587,10 @@ function oneLine(text) {
 }
 
 function finish(code) {
+  try { bridgeSocket?.close() } catch { /* already closed */ }
+  if (bridgeChild && bridgeChild.exitCode === null && bridgeChild.signalCode === null) {
+    try { bridgeChild.kill() } catch { /* already gone */ }
+  }
   if (!KEEP_RUNTIME) stopRuntime()
   process.exit(code)
 }

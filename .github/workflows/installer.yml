@@ -140,8 +140,12 @@ jobs:
   # This job does the whole first-run story with nobody watching — installs the
   # portable runtime, pulls the model the RAM planner selected, sends four
   # prompts through the same client the bridge uses, and fails the run when the
-  # answers are wrong. The runtime and the weights are cached, so the first run
-  # pays for the download and later runs pay only for the inference.
+  # answers are wrong. Then it starts the real bridge with the acting tools
+  # enabled and drives it over its own socket: a session turn, a follow-up that
+  # has to remember what was said, and a job the model has to do with a tool —
+  # a command whose file on disk is the evidence, not the model's word for it.
+  # The runtime and the weights are cached, so the first run pays for the
+  # download and later runs pay only for the inference.
   live-models:
     name: Live model self-test (downloads and prompts the model)
     needs: verify

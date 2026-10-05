@@ -250,6 +250,20 @@ minutes, prints the log as it grows, and kills what is left over.
 See *Voice* above: the local speech stack has to be installed for speech input
 inside the app window.
 
+**How do you know the AI can actually do something, not just talk?**
+Two layers. The packaged self-test (`JARVIS.exe --self-test`) proves the window,
+the interface server and the bridge handshake work without a model at all. The
+live self-test (`npm run test:live`, run by the *Live model self-test* CI job)
+proves the model half: it installs the runtime, pulls the weights the RAM
+planner picked, prompts them, and then starts the **real bridge** with the
+acting tools on, connects to it over its own socket and has the AI work in a
+session — it greets, it is told a codeword and asked it back, and it is asked
+to run `echo BANANA>live-proof.txt` through `mcp__jarvis_shell__run_command`.
+The check reads the file off the disk; whether the model says it did the job
+counts for nothing. The transcript is written to `models/live-test-report.txt`
+and published as a check annotation on the run, so the answer is readable
+without downloading anything.
+
 **Something is wrong and I want to know what.**
 `%LOCALAPPDATA%\JARVIS\logs\desktop.log` has the whole startup, every model
 the bridge tried to reach, and every reason it gave. The tray opens it
