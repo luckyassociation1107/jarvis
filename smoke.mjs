@@ -13,6 +13,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -290,6 +291,10 @@ const autopilotChecks = [
       && typeof runtimeData.plan?.path === 'string'
   })()],
   ['the one-click button asks the bridge for the runtime as well as the chosen three', Boolean(setupPage) && /models\/download/.test(setupPage) && /runtime:\s*!\(state\.plan/.test(setupPage) && /chat: state\.pick\.chat/.test(setupPage)],
+  ['/models/download installs the runtime first when the page asks for it, then the three', (() => {
+    const route = readFileSync(join(process.cwd(), 'bridge/server.mjs'), 'utf8')
+    return /pathname === '\/models\/download'/.test(route) && /await ensureRuntime\(\{ variant, onStep \}\)/.test(route) && /installSelection\(saved, \{ dir: 'models', onStep \}\)/.test(route)
+  })()],
   ['the setup page installs the runtime silently instead of sending anyone to a download page', Boolean(setupPage) && (process.platform === 'win32' ? setupPage.includes('/VERYSILENT') : setupPage.includes('install:ollama')) && !setupPage.includes('target="_blank"') && !setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
   ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {

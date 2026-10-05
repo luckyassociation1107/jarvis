@@ -1133,11 +1133,15 @@ const handleRequest = async (req, res) => {
   }
 
   // One request that both remembers the three and downloads them, so a stale
-  // page cannot save one set and pull another.
+  // page cannot save one set and pull another. When the page says the runtime
+  // is missing, the runtime comes first — on Windows that is the official
+  // installer run silently, everywhere else the CLI script — and the models
+  // only start once something is answering on the model port.
   if (req.method === 'POST' && requestUrl.pathname === '/models/download') {
     let saved
+    let request = {}
     try {
-      const request = await readJsonBody(req, 16 * 1024)
+      request = (await readJsonBody(req, 16 * 1024)) ?? {}
       saved = writeSelection(request)
       refreshPipeline()
     } catch (error) {
@@ -1169,7 +1173,20 @@ const handleRequest = async (req, res) => {
       job.updatedAt = Date.now()
       job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
     }
-    void installSelection(saved, { dir: 'models', onStep }).then((result) => {
+    void (async () => {
+      if (request.runtime === true) {
+        const variant = request.variant === 'rocm' ? 'rocm' : request.variant === 'auto' ? (rocmSuggested() ? 'rocm' : 'default') : 'default'
+        const ready = await ensureRuntime({ variant, onStep })
+        if (!ready.ok) {
+          job.error = ready.error ?? 'the model runtime could not be installed'
+          job.state = 'failed'
+          job.updatedAt = Date.now()
+          return null
+        }
+      }
+      return installSelection(saved, { dir: 'models', onStep })
+    })().then((result) => {
+      if (result === null) return
       const failed = result.log.filter((item) => !item.ok && !item.skipped).length
       const installed = result.log.filter((item) => item.ok && !item.skipped).length
       job.result = result.log
