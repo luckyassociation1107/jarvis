@@ -392,6 +392,58 @@ async function runBridgeStage() {
   const slot = (name) => (currentPlan.choices[name]?.fits ? currentPlan.choices[name].model : null) ?? modelTags[0]
   const chatTag = slot('chat')
 
+  /**
+   * Ask the runtime directly whether these weights can emit a tool call at all.
+   *
+   * The bridge asks in the OpenAI dialect; whether the answer comes back as a
+   * tool call or as a sentence describing one is the model's chat template, not
+   * the bridge. One trivial tool, no history, and a plain instruction is enough
+   * to tell those two apart — and the answer decides how to read the work turns
+   * below, which either confirm it or exonerate the wiring.
+   */
+  const toolDialectProbe = async (model) => {
+    const body = {
+      model,
+      messages: [{ role: 'user', content: 'Run this command on this machine: echo hello' }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'run_command',
+          description: 'Run a shell command and return its output.',
+          parameters: {
+            type: 'object',
+            properties: { command: { type: 'string', description: 'The command to run.' } },
+            required: ['command'],
+          },
+        },
+      }],
+      temperature: 0,
+      max_tokens: 300,
+      reasoning_effort: 'none',
+      stream: false,
+    }
+    try {
+      const response = await fetch(`${RUNTIME_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(180_000),
+      })
+      if (!response.ok) return { ok: false, note: `asked directly, the runtime answered HTTP ${response.status}` }
+      const data = await response.json()
+      const message = data?.choices?.[0]?.message ?? {}
+      const calls = (message.tool_calls ?? []).map((call) => call?.function?.name).filter(Boolean)
+      if (calls.length) return { ok: true, note: `yes — asked directly, the model called ${calls.join(', ')}` }
+      const said = String(message.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 140)
+      return {
+        ok: false,
+        note: `no — asked directly with a single tool (thinking off), the model wrote prose instead: "${said || '(nothing)'}". Its chat template is not turning intent into a tool call; the bridge can only execute what it is given.`,
+      }
+    } catch (error) {
+      return { ok: false, note: `the direct request could not be made: ${error?.message ?? error}` }
+    }
+  }
+
   /** Start a bridge and wait for it to answer /health. */
   const startBridge = async (extraEnv, label) => {
     const port = await freePort()
@@ -528,6 +580,11 @@ async function runBridgeStage() {
         ? recall.error
         : `"${oneLine(recallText)}" for a word given in the previous turn (that turn answered "${oneLine((told.text ?? '').trim()) || told.error || 'nothing'}")`,
     })
+    // Reported beside the memory line, and for the same reason: what the model
+    // can do is not the same question as whether the app works.
+    const dialect = await toolDialectProbe(chatTag)
+    checks.push({ name: 'a tool call is possible', ok: dialect.ok, optional: true, evidence: dialect.note })
+
     noteLines.push('', 'Bridge phase one — JARVIS_MODEL_REASONING=none, JARVIS_MODEL_MAX_TOKENS=700 (a thinking small model answers a capped turn with an empty string).')
     await stopBridge()
 
