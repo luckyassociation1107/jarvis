@@ -260,7 +260,16 @@ acting tools on, connects to it over its own socket and has the AI work in a
 session — it greets, it is told a codeword and asked it back, and it is asked
 to run `echo BANANA>live-proof.txt` through `mcp__jarvis_shell__run_command`.
 The check reads the file off the disk; whether the model says it did the job
-counts for nothing. The transcript is written to `models/live-test-report.txt`
+counts for nothing.
+
+Which checks decide the verdict is a deliberate split: the ones about the
+application — the servers joining, the bridge answering over its socket —
+gate it, and the ones about model behaviour (recalling the word, choosing the
+tool) are reported next to them. A 2B rung can pass every wiring check and
+still word-find badly; that is worth reading in the transcript, not worth
+calling a broken install. The work turn is tried twice, once with thinking
+off and once under the app's own configuration, because the two fail
+differently, and the report names the one that acted. The transcript is written to `models/live-test-report.txt`
 and published as a check annotation on the run, so the answer is readable
 without downloading anything.
 

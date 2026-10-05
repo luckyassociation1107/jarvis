@@ -153,11 +153,17 @@ jobs:
     # push, a tag and a manual dispatch are the ways to ask for it.
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Generous on purpose: the agent stage holds real conversations with a real
+    # model, and a runner-sized CPU is the slow part. Every individual wait
+    # inside the test is bounded; this is the ceiling that catches the rest.
+    timeout-minutes: 90
     env:
-      # Smallest planned rung (a 2B Q8), so the runner's disk and the job's
-      # minutes are spent on the pipeline, not on a 27B download.
-      JARVIS_LIVE_CAP_GB: '4'
+      # The rung a 16 GB machine's own ladder reaches at a modest cap: a 4.5B
+      # Q4, five gigabytes to download once and cached after. The smallest rung
+      # (a 2B Q8) proved the wiring but could not hold a word across a turn or
+      # pick a tool, which made the report read like a product fault instead of
+      # a small model behaving like one.
+      JARVIS_LIVE_CAP_GB: '6'
     steps:
       - uses: actions/checkout@v4
 
