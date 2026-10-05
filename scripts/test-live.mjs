@@ -502,7 +502,10 @@ async function runBridgeStage() {
     noteLines.push(`Tool turn: announced [${workTurn.tools.join(', ') || 'none'}]${workTurn.error ? `, failed: ${workTurn.error}` : `, said "${oneLine((workTurn.text ?? '').trim())}"`}.`)
     return { checks, noteLines }
   } catch (error) {
-    checks.push({ name: 'the bridge ran a turn', ok: false, optional: true, evidence: `could not be driven: ${error?.message ?? error}` })
+    // Deliberately not optional. An unrunnable stage once reported itself as an
+    // informational line and the run went green on 0/0 bridge checks — a
+    // self-test that cannot test anything must say so at the top of its voice.
+    checks.push({ name: 'the bridge ran a turn', ok: false, evidence: `could not be driven: ${error?.message ?? error}` })
     return { checks, noteLines }
   }
 }
