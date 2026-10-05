@@ -24,6 +24,13 @@
 # that can actually affect the build. A `v*` tag additionally checks that the
 # tag matches `package.json`, then attaches the installer to a GitHub release.
 #
+# Every gating command pipes through `tee` and, on failure, through
+# scripts/ci-report.mjs, which reprints the tail as a check annotation. Job logs
+# are a zip served from results-receiver.actions.githubusercontent.com, and that
+# host is unreachable from some networks (a sandbox fails the download with
+# `EOF`), which leaves "exit code 1" as the only clue. Annotations are served
+# from api.github.com and survive that.
+#
 # The app is not code-signed: there is no certificate in this repository, so
 # Windows SmartScreen shows "unknown publisher" the first time. Signing is a
 # `win.certificateFile` entry away for anyone who has one; see docs/DESKTOP.md.
@@ -83,26 +90,46 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --no-audit --no-fund 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm ci' ci.log; exit 1; }
 
       - name: Build the interface
-        run: npm run build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run build' ci.log; exit 1; }
 
       - name: Desktop packaging self-test
-        run: npm run test:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:desktop 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run test:desktop' ci.log; exit 1; }
 
       - name: Installer and endpoint contracts
-        run: npm run test:installers
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:installers 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run test:installers' ci.log; exit 1; }
 
       # Informational, and deliberately not a gate. `npm run smoke` is the
       # project's own end-to-end script, and two of its checks assert the
-      # *Windows* runtime archive while a third needs a live model server —
-      # it exits non-zero on a clean Linux runner (and on a clean checkout of
-      # this repository) with nothing actually broken. Failing the build on it
-      # would teach everyone to ignore the build.
+      # *Windows* runtime archive while a third needs a live model server — it
+      # exits non-zero on a clean Linux runner (and on a clean checkout of this
+      # repository) with nothing actually broken. Failing the build on it would
+      # teach everyone to ignore the build.
       - name: Bridge smoke test (informational)
+        shell: bash
         continue-on-error: true
-        run: npm run smoke
+        run: |
+          set -o pipefail
+          npm run smoke 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run smoke (informational)' ci.log; exit 1; }
 
   installer:
     name: Windows installer
@@ -117,13 +144,25 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --no-audit --no-fund 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm ci' ci.log; exit 1; }
 
       - name: Build the interface
-        run: npm run build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run build' ci.log; exit 1; }
 
       - name: Desktop packaging self-test
-        run: npm run test:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:desktop 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'npm run test:desktop' ci.log; exit 1; }
 
       # A release tag that disagrees with package.json produces an installer
       # whose version is not the version in its own name. Cheaper to refuse it.
@@ -139,44 +178,59 @@ jobs:
           }
 
       - name: Package the installer
+        shell: bash
         env:
           # No certificate in this repository, and electron-builder should not go
           # looking for one on the runner or try to publish on a tag build.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --win nsis --x64 --publish never
+        run: |
+          set -o pipefail
+          npx electron-builder --win nsis --x64 --publish never 2>&1 | tee ci.log || {
+            node scripts/ci-report.mjs 'electron-builder' ci.log; exit 1; }
 
       - name: Check the installer exists
         shell: pwsh
         run: |
-          $setup = Get-ChildItem release -Filter 'JARVIS-Setup-*.exe' | Select-Object -First 1
-          if (-not $setup) {
-            Write-Host 'Files found in the release directory:'
-            if (Test-Path 'release') { Get-ChildItem 'release' -Recurse | Select-Object FullName }
-            throw 'electron-builder produced no installer'
+          try {
+            $setup = Get-ChildItem release -Filter 'JARVIS-Setup-*.exe' | Select-Object -First 1
+            if (-not $setup) {
+              Write-Host 'Files found in the release directory:'
+              if (Test-Path 'release') { Get-ChildItem 'release' -Recurse | Select-Object FullName }
+              throw 'electron-builder produced no installer'
+            }
+            $mb = [math]::Round($setup.Length / 1MB, 1)
+            Write-Host "installer: $($setup.Name) ($mb MB)"
+            if ($setup.Length -lt 40MB) { throw "the installer is only $mb MB — the app files did not get packed" }
+            Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
+          } catch {
+            Write-Host "::error::installer check failed: $($_.Exception.Message)"
+            Write-Host '::error::see the "Package the installer" step for the electron-builder output'
+            exit 1
           }
-          $mb = [math]::Round($setup.Length / 1MB, 1)
-          Write-Host "installer: $($setup.Name) ($mb MB)"
-          if ($setup.Length -lt 40MB) { throw "the installer is only $mb MB — the app files did not get packed" }
-          Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
 
       - name: Run the packaged application in self-test mode
         shell: pwsh
         run: |
-          $exe = Get-ChildItem release/win-unpacked -Filter '*.exe' |
-            Where-Object { $_.Name -notlike 'Uninstall*' } |
-            Select-Object -First 1
-          if (-not $exe) { throw 'no packaged executable found' }
-          Write-Host "running $($exe.FullName) --self-test"
-          $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru -Wait
-          # The data folder (and therefore the log) lives outside the install,
-          # under the runner's local app data, so it survives a reinstall.
-          $log = Join-Path $env:LOCALAPPDATA 'JARVIS/logs/desktop.log'
-          if (Test-Path $log) {
-            Write-Host '--- packaged self-test log ---'
-            Get-Content $log | Select-Object -Last 60
+          try {
+            $exe = Get-ChildItem release/win-unpacked -Filter '*.exe' |
+              Where-Object { $_.Name -notlike 'Uninstall*' } |
+              Select-Object -First 1
+            if (-not $exe) { throw 'no packaged executable found' }
+            Write-Host "running $($exe.FullName) --self-test"
+            $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru -Wait
+            # The data folder (and therefore the log) lives outside the install,
+            # under the runner's local app data, so it survives a reinstall.
+            $log = Join-Path $env:LOCALAPPDATA 'JARVIS/logs/desktop.log'
+            if (Test-Path $log) {
+              Write-Host '--- packaged self-test log ---'
+              Get-Content $log | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+            }
+            if ($process.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit $($process.ExitCode))" }
+            Write-Host 'packaged self-test passed'
+          } catch {
+            Write-Host "::error::packaged self-test failed: $($_.Exception.Message)"
+            exit 1
           }
-          if ($process.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit $($process.ExitCode))" }
-          Write-Host 'packaged self-test passed'
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
