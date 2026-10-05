@@ -210,14 +210,16 @@ for (const name of ['launch_app', 'quit_app', 'focus_window', 'window_action', '
 
 // --- the setup page and the terminal client --------------------------------
 
-const { OLLAMA_DOWNLOAD, installerPage } = await import('../bridge/installer.mjs')
+const { installerPage } = await import('../bridge/installer.mjs')
 const setupPage = installerPage({ platform: 'win32', port: 8787, hudUrl: 'http://localhost:5173' })
 assert.ok(setupPage.startsWith('<!doctype html>'), 'the setup page is a standalone document')
 assert.ok(setupPage.includes('J.A.R.V.I.S'), 'it is branded')
-assert.ok(setupPage.includes(OLLAMA_DOWNLOAD.win32), 'it links the official installer for the platform it was rendered for')
+assert.ok(setupPage.includes('/VERYSILENT'), 'Windows is told the installer is run silently, not downloaded by hand')
+assert.ok(!setupPage.includes('target="_blank"'), 'the setup page never sends anyone to a browser download page')
 assert.ok(setupPage.includes('http://localhost:5173'), 'it carries the HUD link when the host script knows it')
-assert.ok(setupPage.includes('ramGb: state.selected'), 'the one button installs the stack that is selected')
-assert.ok(setupPage.includes('autopilot/install'), 'it drives the installer endpoints on the bridge that served it')
+assert.ok(setupPage.includes('models/catalogue'), 'the page shows the catalogue the person chooses from')
+assert.ok(setupPage.includes('chat: state.pick.chat'), 'the one button downloads the three chosen models')
+assert.ok(setupPage.includes('models/download'), 'it drives the download endpoints on the bridge that served it')
 assert.ok(!/<script[^>]+src=|<link[^>]+href="https?:/.test(setupPage), 'it loads nothing from the network — a setup page that needs a CDN is useless on a fresh machine')
 assert.ok(!setupPage.includes('undefined'), 'no field is rendered as undefined')
 // A page that is pure string assembly can ship a syntax error from one bad
@@ -227,7 +229,9 @@ assert.ok(setupScript, 'the page carries its script inline')
 assert.doesNotThrow(() => new Function(setupScript[1]), 'the setup page script parses')
 const foreignPage = installerPage({ platform: 'linux', port: 8787 })
 assert.ok(!foreignPage.includes('install.sh'), 'there is no Linux one-liner on the page any more')
-assert.ok(foreignPage.includes('This page sets up Windows'), 'and a host that is not Windows is told so plainly')
+assert.ok(foreignPage.includes('install:ollama'), 'a Linux host is pointed at the CLI path instead of a Windows installer')
+const otherOs = installerPage({ platform: 'freebsd', port: 8787 })
+assert.ok(otherOs.includes('This page sets up freebsd'), 'a host the project cannot unpack on is told so plainly')
 assert.ok(!foreignPage.includes('hud='), 'without a known HUD there is no dead link')
 
 const cli = await import('../scripts/cli.mjs')
@@ -308,4 +312,4 @@ console.log('PASS  key combos, Windows argv, SendKeys escaping, hostile text as 
 console.log('PASS  desktop capabilities, Start-menu app discovery and launch matching')
 console.log('PASS  read-only bridges expose no acting tool, and write mode registers the full surface')
 console.log('PASS  the capability block states the machine as it is, and never invents a missing one')
-console.log('PASS  the setup page is self-contained and installs the selected stack, and the terminal client formats what it sees')
+console.log('PASS  the setup page is self-contained and installs the chosen three, and the terminal client formats what it sees')

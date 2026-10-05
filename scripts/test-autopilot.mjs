@@ -337,3 +337,61 @@ try {
   await rm(configDir, { recursive: true, force: true })
   await new Promise((resolve, reject) => ollama.close((error) => error ? reject(error) : resolve()))
 }
+
+// --- the catalogue a person chooses from ------------------------------------
+//
+// The planner still exists, but it no longer decides what gets downloaded: the
+// catalogue is shown, the person picks one model for each of three jobs, and
+// only that choice is installed. These checks are about that contract.
+{
+  const { catalogue, defaultSelection, filterCatalogue, readSelection, writeSelection } = await import('../bridge/catalogue.mjs')
+  const { installSelection } = await import('../bridge/autopilot.mjs')
+
+  const selectionDir = await mkdtemp(join(tmpdir(), 'jarvis-selection-'))
+  process.env.JARVIS_MODEL_SELECTION = join(selectionDir, 'model-selection.json')
+  try {
+    const cat = catalogue()
+    assert.deepEqual(cat.slots.map((slot) => slot.id), ['chat', 'vision', 'coder'], 'the catalogue offers exactly the three jobs')
+    assert.ok(cat.machine.budgetGb > 0 && cat.machine.totalRamGb > 0, 'the catalogue says what this machine has to spend')
+
+    for (const slot of cat.slots) {
+      assert.ok(slot.entries.length >= 13, `${slot.id} lists the whole ladder, not one rung`)
+      assert.equal(slot.defaultModel, slot.entries[0].id, `${slot.id} opens on its smallest rung, so a first run is minutes not hours`)
+      const sizes = slot.entries.map((entry) => entry.downloadGb)
+      assert.deepEqual(sizes, [...sizes].sort((a, b) => a - b), `${slot.id} is ordered smallest download first`)
+      for (const entry of slot.entries) {
+        assert.equal(typeof entry.fits, 'boolean', `${entry.id} says whether it fits, rather than being hidden`)
+        assert.ok(entry.quant && entry.parametersB > 0, `${entry.id} names its parameters and quantization`)
+        if (slot.id === 'vision') assert.equal(entry.multimodal, true, 'nothing in the vision column is blind')
+      }
+    }
+    assert.equal(readSelection(), null, 'nothing is chosen until the person chooses')
+
+    const defaults = defaultSelection(cat)
+    const saved = writeSelection(defaults)
+    assert.deepEqual(readSelection(), { ...saved }, 'what was chosen is what is remembered next launch')
+
+    assert.throws(() => writeSelection({ chat: 'nope:latest', vision: defaults.vision, coder: defaults.coder }), /not a chat model/i, 'a tag that is not in the catalogue is refused')
+    assert.throws(() => writeSelection({ chat: defaults.chat, vision: 'hf.co/mradermacher/Huihui-Qwen3.5-27B-abliterated-GGUF:Q2_K', coder: defaults.coder }), /not a vision model/i, 'a tag with no vision row cannot fill the vision slot, and the vision column has no blind rows to offer')
+    assert.throws(() => writeSelection({ chat: defaults.chat }), /all three slots/i, 'a partial choice is refused')
+
+    const narrow = filterCatalogue(cat.slots, { maxDownloadGb: 2, fitOnly: true, quants: ['Q8_0'] })
+    assert.ok(narrow.every((slot) => slot.entries.every((entry) => entry.downloadGb <= 2 && entry.fits && entry.quant === 'Q8_0')), 'filters only ever hide, they never relabel')
+    assert.ok(narrow.some((slot) => slot.entries.length > 0), 'the small rungs survive a tight filter')
+
+    const big = Object.fromEntries(cat.slots.map((slot) => [slot.id, slot.entries.at(-1).id]))
+    writeSelection(big)
+    const dry = await installSelection(big, { dry: true })
+    assert.equal(dry.plan.choices.chat.model, big.chat, 'chat downloads the model that was chosen, not the one the ladder would have picked')
+    assert.equal(dry.plan.choices.vision.model, big.vision, 'vision follows the choice too')
+    assert.equal(dry.plan.choices.reason.model, big.coder, 'and the coder choice is what the reasoning pipeline routes to')
+    assert.equal(dry.plan.choices.speech?.fits, false, 'a catalogue download does not drag the speech weights along')
+    assert.ok(dry.plan.notes.some((note) => /chosen by hand/i.test(note)), 'the plan says out loud that a person picked these')
+
+    console.log(`PASS  the catalogue lists ${cat.slots.reduce((n, slot) => n + slot.entries.length, 0)} models across chat/vision/coder with truthful per-device fit flags and smallest-first defaults`)
+    console.log('PASS  the chosen three are saved, validated (unknown tag, wrong slot, partial choice all refused), and are the only three that download')
+  } finally {
+    delete process.env.JARVIS_MODEL_SELECTION
+    await rm(selectionDir, { recursive: true, force: true })
+  }
+}

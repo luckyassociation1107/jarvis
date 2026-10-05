@@ -550,6 +550,25 @@ function bridgeHttp() {
   return `http://127.0.0.1:${BRIDGE_PORT}`
 }
 
+/**
+ * Has anyone chosen the three models yet?
+ *
+ * First run now has something to decide, not just something to download, so the
+ * desktop asks the bridge whether a choice has been saved. A bridge that cannot
+ * answer counts as "not chosen" — showing the catalogue is the safe direction,
+ * and the window says so itself if the bridge is still waking up.
+ */
+async function modelChoiceMissing() {
+  try {
+    const response = await fetch(`${bridgeHttp()}/models/selection`, { signal: AbortSignal.timeout(4000) })
+    if (!response.ok) return true
+    const data = await response.json()
+    return !data?.selection
+  } catch {
+    return true
+  }
+}
+
 /* ----------------------------------------------------------------------- tray */
 
 function trayMenu() {
@@ -795,12 +814,14 @@ async function main() {
     saveSettings()
   }
 
-  // First launch on a machine with no models: the interface is up but cannot
-  // think yet, and the fix is one window away. Offer it once, then stay out of
-  // the way — the MODEL STACK panel keeps the same installer reachable forever.
+  // First launch: the interface is up, but which models it thinks with is the
+  // person's decision, and the catalogue is where it is made. So the window
+  // opens when nothing has been chosen yet, just as it does when the bridge is
+  // too unhealthy to run anything. Offered once, then the tray and the MODEL
+  // STACK panel keep it reachable forever.
   if (!settings.setupOffered) {
     const health = await waitForBridge(30_000)
-    if (!health?.ok) openSetup()
+    if (!health?.ok || await modelChoiceMissing()) openSetup()
     settings.setupOffered = true
     saveSettings()
   }

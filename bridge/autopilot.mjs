@@ -106,7 +106,14 @@ const HIGH_PARAMETER_TEXT = [
   ...NATIVE_MULTIMODAL.slice(6),
 ]
 
-const LADDERS = {
+/**
+ * Every rung this project knows, per pipeline slot.
+ *
+ * Exported because `bridge/catalogue.mjs` shows these rows to the person choosing
+ * instead of letting the planner choose for them: one source of truth, so the
+ * numbers in the shop window and the numbers in the plan cannot drift apart.
+ */
+export const LADDERS = {
   chat: HIGH_PARAMETER_TEXT,
   vision: NATIVE_MULTIMODAL,
   reason: HIGH_PARAMETER_TEXT,
@@ -593,6 +600,49 @@ export async function install(opts = {}) {
   const installed = log.filter((item) => item.ok && !item.skipped)
   onStep({ phase: 'done', installed: installed.length, skipped: log.filter((item) => item.skipped).length, failed: failures.length })
   return { log, plan: p, installed }
+}
+
+/**
+ * Download exactly the models a person chose, and nothing else.
+ *
+ * The planner is still consulted — for the machine's shape, the notes and the
+ * slots that are not one of the three — but the three model slots are overwritten
+ * with the chosen rungs, so the ladder's opinion cannot sneak a download in.
+ * Unknown tags are refused loudly: a catalogue page that has gone stale should
+ * fail with a sentence, not with a five-gigabyte pull of the wrong thing.
+ *
+ * @param {{chat?: string, vision?: string, coder?: string}} selection
+ */
+export async function installSelection(selection = {}, opts = {}) {
+  const base = plan()
+  const ladderFor = { chat: 'chat', vision: 'vision', coder: 'reason' }
+  const choices = { ...base.choices }
+  const chosen = []
+  for (const [userSlot, ladder] of Object.entries(ladderFor)) {
+    const wanted = selection?.[userSlot]
+    if (!wanted) throw new Error(`no ${userSlot} model was chosen; all three slots are required`)
+    const rung = LADDERS[ladder].find((candidate) => candidate.model === wanted)
+    if (!rung) throw new Error(`${wanted} is not a ${userSlot} model in the catalogue`)
+    choices[ladder] = { ...rung, kind: rung.kind ?? 'ollama', mode: 'chosen', fits: true }
+    chosen.push(rung)
+  }
+  // Everything the planner would have picked on its own is skipped, including
+  // the speech weights: this call downloads the three, no more.
+  for (const cap of Object.keys(choices)) {
+    if (Object.values(ladderFor).includes(cap)) continue
+    choices[cap] = { ...choices[cap], fits: false }
+  }
+  const planned = {
+    ...base,
+    choices,
+    effectiveModelBytes: chosen.reduce((sum, rung) => sum + (rung.residentBytes ?? 0), 0),
+    totalDownloadBytes: chosen.reduce((sum, rung) => sum + (rung.bytes ?? 0), 0),
+    notes: [
+      'Models chosen by hand in the setup window; the RAM ladder picked none of them.',
+      ...base.notes.filter((note) => !/AI allocation/.test(note)),
+    ],
+  }
+  return install({ ...opts, planned, skipWhisper: true })
 }
 
 async function installedOllamaModels() {

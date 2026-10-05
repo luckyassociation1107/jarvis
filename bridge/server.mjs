@@ -21,10 +21,11 @@
  */
 
 import { WebSocketServer } from 'ws'
-import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, withLocalSpeechModel, replanAutopilot } from './local-llm.mjs'
+import { runTurn, modelStatus, PIPELINE, AUTOPILOT_PLAN, BRIDGE_MODEL_NAME, withLocalSpeechModel, replanAutopilot, refreshPipeline } from './local-llm.mjs'
+import { catalogue, defaultSelection, filterCatalogue, readSelection, writeSelection, USER_SLOTS, selectionPath } from './catalogue.mjs'
 import { status as modelSlotStatus, summary as modelSummary } from './models.mjs'
 import { available as whisperAvailable, transcribe } from './whisper.mjs'
-import { availableRam, install as autopilotInstall, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
+import { availableRam, install as autopilotInstall, installSelection, plan as planRam, planSummary, ladder as autopilotLadder, saveAllocation, tierProfiles } from './autopilot.mjs'
 import { ensureRuntime, resolveVariants, rocmSuggested, runtimeStatus } from './portable-runtime.mjs'
 import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -1079,6 +1080,168 @@ const handleRequest = async (req, res) => {
     }
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
     return res.end(JSON.stringify(job))
+  }
+
+  // ── The catalogue ──────────────────────────────────────────────────────────
+  // What this machine could run, for each of the three jobs, with the numbers
+  // that make the choice a choice: download size, resident size, parameters,
+  // quantization, and whether the RAM and the disk are there. Nothing here
+  // downloads anything, and the planner's opinion is not consulted — the point
+  // of the catalogue is that the person decides.
+  if (req.method === 'GET' && requestUrl.pathname === '/models/catalogue') {
+    const number = (value) => {
+      const parsed = Number(value)
+      return value === null || value === '' || !Number.isFinite(parsed) ? undefined : parsed
+    }
+    const filters = {
+      maxDownloadGb: number(requestUrl.searchParams.get('maxGb')),
+      maxResidentGb: number(requestUrl.searchParams.get('maxResidentGb')),
+      maxParametersB: number(requestUrl.searchParams.get('maxParams')),
+      minQuality: number(requestUrl.searchParams.get('quality')),
+      quants: (requestUrl.searchParams.get('quant') ?? '').split(',').map((q) => q.trim()).filter(Boolean),
+      fitOnly: requestUrl.searchParams.get('fit') === '1',
+      search: requestUrl.searchParams.get('q') ?? '',
+    }
+    const cat = catalogue()
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({
+      ...cat,
+      slots: filterCatalogue(cat.slots, filters),
+      selection: readSelection(),
+      defaults: defaultSelection(cat),
+      selectionPath: selectionPath(),
+      slotsRequired: USER_SLOTS.map((slot) => slot.id),
+    }))
+  }
+
+  if (req.method === 'GET' && requestUrl.pathname === '/models/selection') {
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ selection: readSelection(), pipeline: PIPELINE }))
+  }
+
+  if (req.method === 'POST' && requestUrl.pathname === '/models/select') {
+    try {
+      const request = await readJsonBody(req, 8 * 1024)
+      const saved = writeSelection(request)
+      refreshPipeline()
+      res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ok: true, selection: saved, pipeline: PIPELINE }))
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
+    }
+  }
+
+  // One request that both remembers the three and downloads them, so a stale
+  // page cannot save one set and pull another.
+  if (req.method === 'POST' && requestUrl.pathname === '/models/download') {
+    let saved
+    try {
+      const request = await readJsonBody(req, 16 * 1024)
+      saved = writeSelection(request)
+      refreshPipeline()
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
+    }
+    const active = [...AUTOPILOT_JOBS.values()].find((job) => job.state === 'running')
+    if (active) {
+      res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ jobId: active.id, state: active.state, selection: saved }))
+    }
+    const job = {
+      id: randomUUID(),
+      state: 'running',
+      kind: 'models',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      progress: { phase: 'starting' },
+      steps: [],
+      result: null,
+      error: null,
+    }
+    AUTOPILOT_JOBS.set(job.id, job)
+    for (const [id, old] of AUTOPILOT_JOBS) {
+      if (old.state !== 'running' && Date.now() - old.updatedAt > 30 * 60 * 1000) AUTOPILOT_JOBS.delete(id)
+    }
+    const onStep = (step) => {
+      job.progress = step
+      job.updatedAt = Date.now()
+      job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
+    }
+    void installSelection(saved, { dir: 'models', onStep }).then((result) => {
+      const failed = result.log.filter((item) => !item.ok && !item.skipped).length
+      const installed = result.log.filter((item) => item.ok && !item.skipped).length
+      job.result = result.log
+      job.state = failed ? (installed ? 'partial' : 'failed') : 'completed'
+      job.updatedAt = Date.now()
+    }).catch((error) => {
+      job.error = String(error?.message ?? error)
+      job.state = 'failed'
+      job.updatedAt = Date.now()
+    })
+    res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ jobId: job.id, state: job.state, selection: saved }))
+  }
+
+  if (req.method === 'GET' && requestUrl.pathname === '/models/download/status') {
+    const id = requestUrl.searchParams.get('id') ?? ''
+    const job = AUTOPILOT_JOBS.get(id)
+    if (!job) {
+      res.writeHead(404, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'download job not found' }))
+    }
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify(job))
+  }
+
+  // The runtime, installed the way the person asked for: no browser, no wizard.
+  // Windows runs the official installer silently; everywhere else the CLI
+  // script does it. Both are followed by the same start-and-wait.
+  if (req.method === 'POST' && requestUrl.pathname === '/runtime/install') {
+    let request = {}
+    try {
+      request = await readJsonBody(req, 4 * 1024)
+    } catch (error) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: String(error?.message ?? error) }))
+    }
+    const active = [...AUTOPILOT_JOBS.values()].find((job) => job.state === 'running')
+    if (active) {
+      res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ jobId: active.id, state: active.state }))
+    }
+    const job = {
+      id: randomUUID(),
+      state: 'running',
+      kind: 'runtime',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      progress: { phase: 'starting' },
+      steps: [],
+      result: null,
+      error: null,
+    }
+    AUTOPILOT_JOBS.set(job.id, job)
+    const onStep = (step) => {
+      job.progress = step
+      job.updatedAt = Date.now()
+      job.steps = [...job.steps.slice(-38), { ...step, at: job.updatedAt }]
+    }
+    const variant = request.variant === 'rocm' ? 'rocm' : request.variant === 'auto' ? (rocmSuggested() ? 'rocm' : 'default') : 'default'
+    const installMode = request.mode === 'portable' ? 'portable' : 'auto'
+    void ensureRuntime({ variant, installMode, onStep }).then((result) => {
+      job.result = result
+      job.state = result.ok ? 'completed' : 'failed'
+      if (!result.ok) job.error = result.error ?? 'the runtime could not be installed'
+      job.updatedAt = Date.now()
+    }).catch((error) => {
+      job.error = String(error?.message ?? error)
+      job.state = 'failed'
+      job.updatedAt = Date.now()
+    })
+    res.writeHead(202, { ...cors, 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ jobId: job.id, state: job.state }))
   }
 
   if (req.method === 'GET' && req.url === '/health') {

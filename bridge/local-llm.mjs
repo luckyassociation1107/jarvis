@@ -29,6 +29,7 @@
 
 /** Where the model server is, trailing slash trimmed. Exported for the banner. */
 import { plan as buildAutopilotPlan } from './autopilot.mjs'
+import { chosenModel } from './catalogue.mjs'
 
 export const MODEL_URL = (
   process.env.JARVIS_MODEL_BASE_URL ?? 'http://localhost:11434/v1'
@@ -77,19 +78,27 @@ const API_KEY = process.env.JARVIS_MODEL_API_KEY ?? 'jarvis-local'
  */
 const SLOTS = {
   chat: {
-    model: process.env.JARVIS_MODEL_CHAT ?? (AUTOPILOT.choices.chat?.fits ? AUTOPILOT.choices.chat.model : null),
+    model: process.env.JARVIS_MODEL_CHAT ?? chosenModel('chat') ?? (AUTOPILOT.choices.chat?.fits ? AUTOPILOT.choices.chat.model : null),
     url: process.env.JARVIS_MODEL_CHAT_URL,
   },
   vision: {
-    model: process.env.JARVIS_MODEL_VISION ?? (AUTOPILOT.choices.vision?.fits ? AUTOPILOT.choices.vision.model : null),
+    model: process.env.JARVIS_MODEL_VISION ?? chosenModel('vision') ?? (AUTOPILOT.choices.vision?.fits ? AUTOPILOT.choices.vision.model : null),
     url: process.env.JARVIS_MODEL_VISION_URL,
   },
   reason: {
-    model: process.env.JARVIS_MODEL_REASON ?? (AUTOPILOT.choices.reason?.fits ? AUTOPILOT.choices.reason.model : null),
+    model: process.env.JARVIS_MODEL_REASON ?? chosenModel('coder') ?? (AUTOPILOT.choices.reason?.fits ? AUTOPILOT.choices.reason.model : null),
     url: process.env.JARVIS_MODEL_REASON_URL,
   },
   coder: {
-    model: process.env.JARVIS_MODEL_CODER ?? (AUTOPILOT.choices.coder?.fits ? AUTOPILOT.choices.coder.model : null) ?? process.env.JARVIS_MODEL_REASON ?? null,
+    // There is no separate `coder` rung in the RAM plan — coding is the
+    // `reason` ladder. So the order is: an explicit pin, then the person's
+    // choice for the coder job, then whatever the planner chose to reason with.
+    model: process.env.JARVIS_MODEL_CODER
+      ?? chosenModel('coder')
+      ?? (AUTOPILOT.choices.coder?.fits ? AUTOPILOT.choices.coder.model : null)
+      ?? process.env.JARVIS_MODEL_REASON
+      ?? (AUTOPILOT.choices.reason?.fits ? AUTOPILOT.choices.reason.model : null)
+      ?? null,
     url: process.env.JARVIS_MODEL_CODER_URL ?? process.env.JARVIS_MODEL_REASON_URL,
   },
 }
@@ -97,8 +106,19 @@ const SLOTS = {
 /** Pin every slot to one model, for anyone who would rather not choose. */
 const PINNED = process.env.JARVIS_MODEL_NAME ?? null
 
-/** The model name for a slot, honouring the pin. */
-const modelFor = (slot) => PINNED ?? SLOTS[slot].model
+/**
+ * The model name for a slot.
+ *
+ * Precedence is deliberate: an environment variable pins a slot outright (tests
+ * and diagnostics), then the choice a person made in the setup window, then what
+ * the RAM planner would have picked. The middle term is read fresh, so changing
+ * the choice while the bridge is running takes effect on the next turn.
+ */
+const modelFor = (slot) =>
+  PINNED
+  ?? process.env[`JARVIS_MODEL_${slot.toUpperCase()}`]
+  ?? chosenModel(slot)
+  ?? SLOTS[slot].model
 
 /** The server for a slot. A per-slot URL defaults to the shared one, so a big
  *  model can live on another machine without the others moving. */
@@ -106,20 +126,39 @@ const urlFor = (slot) =>
   (PINNED ? null : SLOTS[slot].url)?.replace(/\/+$/, '') || MODEL_URL
 
 /** Every slot, for the boot banner and /health. */
-export const PIPELINE = Object.fromEntries(
-  Object.entries(SLOTS).map(([slot]) => [
-    slot,
-    {
-      model: modelFor(slot),
-      url: urlFor(slot),
-      fits: PINNED || process.env[`JARVIS_MODEL_${slot.toUpperCase()}`]
-        ? null
-        : (AUTOPILOT.choices[slot]?.fits ?? false),
-      residentBytes: AUTOPILOT.choices[slot]?.residentBytes ?? null,
-      unavailable: !modelFor(slot),
-    },
-  ]),
-)
+/** The plan rung a slot is judged by. `coder` borrows the reasoning rung. */
+const rungFor = (slot) => AUTOPILOT.choices[slot] ?? (slot === 'coder' ? AUTOPILOT.choices.reason : undefined)
+
+/** One slot's view of itself, for the boot banner and `/health`. */
+function pipelineSlot(slot) {
+  const rung = rungFor(slot)
+  return {
+    model: modelFor(slot),
+    url: urlFor(slot),
+    fits: PINNED || process.env[`JARVIS_MODEL_${slot.toUpperCase()}`]
+      ? null
+      : (rung?.fits ?? false),
+    residentBytes: rung?.residentBytes ?? null,
+    unavailable: !modelFor(slot),
+  }
+}
+
+/** Every slot, for the boot banner and /health. */
+export const PIPELINE = Object.fromEntries(Object.keys(SLOTS).map((slot) => [slot, pipelineSlot(slot)]))
+
+/**
+ * Re-read what every slot points at.
+ *
+ * The setup window can change the chosen models while the bridge is running;
+ * routing already reads the choice fresh on every turn, and this is for the
+ * things that were computed once — the boot banner, `/health`, the diagnostics
+ * panel — so they stop describing a model nobody chose any more.
+ */
+export function refreshPipeline() {
+  for (const slot of Object.keys(SLOTS)) PIPELINE[slot] = pipelineSlot(slot)
+  BRIDGE_MODEL_NAME = modelFor('chat')
+  return PIPELINE
+}
 
 /** The name the boot line and error messages lead with. */
 export let BRIDGE_MODEL_NAME = modelFor('chat')

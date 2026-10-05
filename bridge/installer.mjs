@@ -3,10 +3,17 @@
  *
  * Installation used to be a command: the build script decided which models fit
  * and pulled them, with no say from the person waiting. This page replaces that
- * with a choice and a single button. `npm run setup` hosts the bridge, opens the
- * default browser at /install, and everything from then on happens here: what
- * this machine is, whether the runtime is present, which stack to download, and
- * the progress of every file.
+ * with a catalogue and a choice. Every model the project knows is listed for the
+ * three things a person actually asks for — chat, vision, and coding/reasoning —
+ * with its download size, its resident size, its parameters and its
+ * quantization, and with the ones this machine cannot hold marked rather than
+ * hidden. The three the person ticked are the three that get downloaded.
+ *
+ * The runtime is not a browser problem either: on Windows the official installer
+ * is fetched and run silently from here, and everywhere else the official CLI
+ * script is. Nobody is sent to a download page, and nothing is installed
+ * system-wide on a machine where the installer cannot run — the standalone build
+ * inside the project is the fallback.
  *
  * It is served by the bridge rather than by Vite or a public site because it has
  * to talk to the bridge's own install endpoints, and because it must work on a
@@ -33,9 +40,9 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
   const download = OLLAMA_DOWNLOAD[platform] ?? OLLAMA_DOWNLOAD.linux
   const osName = PLATFORM_NAME[platform] ?? platform
   const runtimeLine = platform === 'win32'
-    ? 'Download the installer and run it, then come back and press re-check.'
+    ? 'Press <b>Install everything</b> below and this page does the whole runtime by itself: it downloads the official Ollama installer and runs it silently (<code>OllamaSetup.exe /VERYSILENT</code>) — no browser, no wizard, no download page. Then it starts Ollama and pulls the three models you chose. On a machine that blocks installers, the standalone build inside this project is unpacked instead.'
     : platform === 'linux' || platform === 'darwin'
-      ? `Run <code>npm run install:ollama</code> in your terminal, or download from the link below, then press re-check.`
+      ? 'Press <b>Install everything</b> below and this page runs the official Ollama CLI installer for you, then pulls the three models you chose. Prefer to do it yourself? <code>npm run install:ollama</code>, then press re-check.'
       : `This page sets up ${osName}; this host is ${platform}, so the project runtime cannot be unpacked here. Every other part still runs.`
 
   return `<!doctype html>
@@ -88,13 +95,28 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
   .bar > i { display:block; height:100%; width:0; background:linear-gradient(90deg,#2b6c92,var(--cyan)); transition:width .3s; }
   code { font-family:var(--mono); background:#0b1320; border:1px solid var(--line); border-radius:6px; padding:2px 6px; }
   .note { color:var(--dim); font-size:13px; margin-top:10px; }
+  .filters { display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin:0 0 14px; }
+  .filters label { display:flex; gap:6px; align-items:center; font-family:var(--mono); font-size:11px; letter-spacing:.08em; color:var(--dim); text-transform:uppercase; }
+  .filters select, .filters input[type=search] { font-family:system-ui,sans-serif; font-size:13px; text-transform:none; letter-spacing:0; color:var(--text); background:#0b1320; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  .catalogue { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:14px; }
+  .slot { border:1px solid var(--line); border-radius:12px; padding:12px; background:#0b1320; }
+  .slothero { margin-bottom:8px; }
+  .slothero b { font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--cyan); display:block; }
+  .slothero span { font-size:12px; }
+  .entry { display:flex; gap:10px; align-items:flex-start; border:1px solid transparent; border-radius:9px; padding:8px 9px; cursor:pointer; }
+  .entry:hover { border-color:#33506f; }
+  .entry.active { border-color:var(--cyan); background:#0f1c2c; }
+  .entry input { margin-top:3px; accent-color:var(--cyan); }
+  .entry .name { font-family:var(--mono); font-size:12px; word-break:break-all; }
+  .entry .badges { display:block; margin-top:5px; }
+  .badge.ok { color:var(--green); border-color:#25492f; }
   footer { max-width:1040px; margin:26px auto 0; padding:0 22px; color:var(--dim); font-family:var(--mono); font-size:11px; letter-spacing:.1em; }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">J.A.R.V.I.S <span>· setup</span></div>
-  <div class="sub">One button: the model runtime, then the stack you picked, downloaded by this bridge into this project's own folders. No installer, no administrator prompt, no system-wide changes.</div>
+  <div class="sub">Pick one model for each of three jobs. This page installs the model runtime for you — on Windows by running the official installer silently — and then downloads exactly the three models you chose. Nothing is downloaded until you press the button.</div>
 </header>
 <main>
   <section class="card">
@@ -108,13 +130,20 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
   </section>
 
   <section class="card">
-    <h2>3 · stack</h2>
-    <div id="tiers" class="tiers"><span class="muted">loading the ladder…</span></div>
+    <h2>3 · models — one for each job</h2>
+    <p class="note">Everything this project knows about, with what it costs and what it needs. The small ones are ticked to start with; a bigger one is allowed, and marked when it will not fit here. <b>chat</b>, <b>vision</b> and <b>coder &amp; reasoning</b> all need a pick before the button wakes up.</p>
+    <div class="filters">
+      <label>biggest download <select id="fMaxGb"></select></label>
+      <label>biggest model <select id="fMaxParams"></select></label>
+      <label>quantization <select id="fQuant"></select></label>
+      <label><input type="checkbox" id="fFit" checked> only what fits</label>
+      <label>search <input id="fSearch" type="search" placeholder="model name" autocomplete="off"></label>
+    </div>
+    <div id="catalogue" class="catalogue"><span class="muted">loading the catalogue…</span></div>
     <div class="actions">
       <button id="install" class="primary" disabled>Install everything</button>
-      <span id="pick" class="muted">no stack selected</span>
+      <span id="pick" class="muted">choosing…</span>
       <span style="flex:1"></span>
-      <label class="muted" style="font-size:13px"><input type="checkbox" id="fitsOnly"> show only what this machine can run</label>
     </div>
   </section>
 
@@ -128,91 +157,168 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
 <footer>bridge · http://localhost:${port} · setup page is served locally</footer>
 <script>
 (function () {
-  var DOWNLOAD = ${JSON.stringify(download)}
   var HUD = ${JSON.stringify(hudUrl)}
   var OS = ${JSON.stringify(osName)}
-  var state = { plan: null, tiers: [], selected: null, job: null, poll: null, fitsOnly: false, runtime: null, variant: 'default' }
+  var RUNTIME_LINE = ${JSON.stringify(runtimeLine)}
+  var state = {
+    cat: null,
+    plan: null,
+    pick: {},
+    filters: { maxGb: '', maxParams: '', quant: '', fit: true, q: '' },
+    filtersBuilt: false,
+    job: null,
+    poll: null,
+    runtime: null,
+    variant: 'default',
+    variantChosen: false
+  }
 
   function el(id) { return document.getElementById(id) }
   function gb(n) { return (Math.round(n * 100) / 100) + ' GB' }
-  function modelsOf(tier) {
-    var seen = {}, out = []
-    Object.keys(tier.slots || {}).forEach(function (cap) {
-      var s = tier.slots[cap]
-      var name = s.model || s.file
-      if (!name || seen[name]) return
-      seen[name] = 1
-      out.push('<b>' + name + '</b>')
+  function esc(value) {
+    return String(value).replace(/[&<>"]/g, function (c) {
+      if (c === '&') return '&amp;'
+      if (c === '<') return '&lt;'
+      if (c === '>') return '&gt;'
+      return '&quot;'
     })
-    return out.join(' · ') || 'browser voice only'
   }
-
   function stat(label, value, cls) {
     return '<div class="stat"><b>' + label + '</b><span class="' + (cls || '') + '">' + value + '</span></div>'
   }
+  function unique(values) {
+    var seen = {}
+    var out = []
+    values.forEach(function (v) { if (v != null && v !== '' && !seen[v]) { seen[v] = 1; out.push(v) } })
+    return out.sort(function (a, b) {
+      return typeof a === 'number' ? a - b : String(a).localeCompare(String(b))
+    })
+  }
 
-  function renderMachine() {
-    var ram = state.plan.ram || {}
+  function renderMachine(machine) {
     el('machine').innerHTML =
-      stat('platform', OS + ' · ' + (state.plan.runtime && state.plan.runtime.arch ? state.plan.runtime.arch : ''))
-      + stat('memory', (ram.totalGb || '?') + ' GB', '')
-      + stat('free now', (ram.freeGb || '?') + ' GB', (ram.freeGb || 0) > (ram.totalGb || 1) * 0.25 ? 'ok' : 'bad')
-      + stat('disk free', (state.plan.runtime && state.plan.runtime.diskFreeGb != null ? state.plan.runtime.diskFreeGb + ' GB' : 'unknown'))
-      + stat('ai ceiling', gb(ram.modelsGb || 0) + ' · ' + (ram.sharePercent || 0) + '% of free')
+      stat('platform', OS)
+      + stat('memory', (machine.totalRamGb || '?') + ' GB')
+      + stat('free now', (machine.freeRamGb || '?') + ' GB', (machine.freeRamGb || 0) > (machine.totalRamGb || 1) * 0.25 ? 'ok' : 'bad')
+      + stat('disk free', machine.freeDiskGb != null ? machine.freeDiskGb + ' GB' : 'unknown')
+      + stat('ai ceiling', gb(machine.budgetGb || 0) + ' · ' + (machine.sharePercent || 0) + '% of free')
+  }
+
+  function buildFilters(cat) {
+    if (state.filtersBuilt) return
+    var all = []
+    cat.slots.forEach(function (slot) { all = all.concat(slot.entries) })
+    function fill(id, any, list) {
+      var html = '<option value="">' + any + '</option>'
+      list.forEach(function (value) {
+        html += '<option value="' + esc(value.value) + '">' + esc(value.label) + '</option>'
+      })
+      el(id).innerHTML = html
+    }
+    fill('fMaxGb', 'any download', unique(all.map(function (e) { return e.downloadGb })).map(function (v) { return { value: v, label: v + ' GB or less' } }))
+    fill('fMaxParams', 'any model', unique(all.map(function (e) { return e.parametersB })).map(function (v) { return { value: v, label: v + ' B or less' } }))
+    fill('fQuant', 'any quant', unique(all.map(function (e) { return e.quant })).map(function (v) { return { value: v, label: v } }))
+    state.filtersBuilt = true
+  }
+
+  function visible(entry) {
+    var f = state.filters
+    if (f.fit && !entry.fits) return false
+    if (f.maxGb !== '' && entry.downloadGb > Number(f.maxGb)) return false
+    if (f.maxParams !== '' && (entry.parametersB || 0) > Number(f.maxParams)) return false
+    if (f.quant !== '' && entry.quant !== f.quant) return false
+    if (f.q && entry.model.toLowerCase().indexOf(f.q.toLowerCase()) < 0) return false
+    return true
+  }
+
+  function entryRow(slot, entry) {
+    var chosen = state.pick[slot.id] === entry.id
+    var badges = '<span class="badge">' + entry.parametersB + ' B</span>'
+      + '<span class="badge">' + esc(entry.quant) + '</span>'
+      + '<span class="badge">' + gb(entry.downloadGb) + ' download</span>'
+      + '<span class="badge">' + gb(entry.residentGb) + ' RAM</span>'
+      + (entry.multimodal ? '<span class="badge">sees images</span>' : '')
+      + (entry.fits ? '<span class="badge ok">fits here</span>' : '<span class="badge big">over the ceiling</span>')
+    return '<label class="entry' + (chosen ? ' active' : '') + '" data-slot="' + slot.id + '" data-id="' + esc(entry.id) + '">'
+      + '<input type="radio" name="slot-' + slot.id + '"' + (chosen ? ' checked' : '') + '>'
+      + '<span><span class="name">' + esc(entry.model) + '</span><span class="badges">' + badges + '</span></span>'
+      + '</label>'
+  }
+
+  function renderCatalogue() {
+    var cat = state.cat
+    if (!cat) return
+    var html = ''
+    cat.slots.forEach(function (slot) {
+      var rows = slot.entries.filter(visible)
+      html += '<div class="slot"><div class="slothero"><b>' + esc(slot.label) + '</b><span class="muted">' + esc(slot.purpose) + '</span></div>'
+      html += rows.map(function (entry) { return entryRow(slot, entry) }).join('') || '<span class="muted">nothing in the catalogue matches these filters</span>'
+      html += '</div>'
+    })
+    el('catalogue').innerHTML = html
+    Array.prototype.forEach.call(el('catalogue').querySelectorAll('.entry'), function (row) {
+      row.onclick = function () { pickModel(row.getAttribute('data-slot'), row.getAttribute('data-id')) }
+    })
+  }
+
+  function pickModel(slotId, id) {
+    state.pick[slotId] = id
+    renderCatalogue()
+    updatePick()
+  }
+
+  function findEntry(slotId, id) {
+    var slot = (state.cat.slots || []).filter(function (candidate) { return candidate.id === slotId })[0]
+    if (!slot) return null
+    return slot.entries.filter(function (entry) { return entry.id === id })[0] || null
+  }
+
+  function updatePick() {
+    if (!state.cat) return
+    var missing = ['chat', 'vision', 'coder'].filter(function (slot) { return !state.pick[slot] })
+    var button = el('install')
+    button.disabled = missing.length > 0
+    var total = 0
+    Object.keys(state.pick).forEach(function (slotId) {
+      var entry = findEntry(slotId, state.pick[slotId])
+      if (entry) total += entry.downloadGb
+    })
+    var running = !!(state.plan && state.plan.ollama)
+    el('pick').textContent = missing.length
+      ? 'still to choose: ' + missing.join(', ')
+      : 'three chosen · ' + gb(total) + ' of models' + (running ? '' : ' · runtime installs first')
+    button.textContent = running ? 'Download my three' : 'Install everything'
   }
 
   function renderRuntime() {
-    var rt = state.plan.runtime || {}
-    var running = state.plan.ollama
-    var slots = (state.plan.modelSlots || []).filter(function (s) { return s.model })
+    var plan = state.plan
+    if (!plan) return
+    var rt = plan.runtime || {}
+    var running = !!plan.ollama
+    var slots = (plan.modelSlots || []).filter(function (s) { return s.model })
     var ready = slots.filter(function (s) { return s.state === 'ready' }).length
-    var portable = rt.portable || {}
     var html = '<div class="grid">'
       + stat('ollama', running ? 'running' : (rt.ollamaInstalled ? 'installed, not running' : 'not installed'), running ? 'ok' : 'bad')
-      + stat('project runtime', portable.present ? 'ready in models/runtime' : (portable.supported ? 'not downloaded yet' : 'Windows only — this host cannot run it'), portable.present ? 'ok' : '')
       + stat('models ready', ready + ' / ' + slots.length, ready === slots.length && slots.length ? 'ok' : 'bad')
       + '</div>'
-      + (running && ready < slots.length
-        ? '<p class="note">Selected stack still needs ' + (slots.length - ready) + ' model' + (slots.length - ready === 1 ? '' : 's') + '. Pick a stack below and download it in one click.</p>'
-        : '')
     if (!running) {
-      var portable = rt.portable || {}
-      var line
-      if (rt.ollamaInstalled) {
-        line = 'Ollama is installed but not answering. Press <b>Install everything</b> below and this page will start it for you; or start it yourself (<code>ollama serve</code>, or the desktop app) and press re-check.'
-      } else if (portable.present) {
-        line = 'The model runtime is already unpacked in this project (<code>' + (portable.path || '') + '</code>). Press <b>Install everything</b> below: it starts here, and the models follow.'
-      } else {
-        var chosen = chosenVariant()
-        line = 'No model runtime yet. Press <b>Install everything</b> below and this page downloads the official standalone Ollama archive'
-          + (chosen ? ' (<code>' + chosen.name + '</code>' + (chosen.sizeBytes ? ' · ' + gb(chosen.sizeBytes / 1073741824) : '') + ')' : '')
-          + ' into this project, checks it against the release checksum, unpacks it, starts it, then downloads the stack you picked. Nothing is installed system-wide and nothing is added to your PATH.'
-      }
-      html += '<p class="note">' + line + '</p>'
-      var variants = state.runtime && state.runtime.variants ? state.runtime.variants : []
-      if (!rt.ollamaInstalled && !portable.present && variants.length > 1) {
+      html += '<p class="note">' + RUNTIME_LINE + '</p>'
+      var variants = (state.runtime && state.runtime.variants) || []
+      if (!rt.ollamaInstalled && variants.length > 1) {
         html += '<p class="note muted" style="font-size:13px">Which build? The default covers NVIDIA and CPU; AMD cards need their own build.</p><div class="tiers">'
         variants.forEach(function (v) {
           html += '<label class="tier' + (state.variant === v.id ? ' active' : '') + '"><input type="radio" name="rtvariant" value="' + v.id + '"' + (state.variant === v.id ? ' checked' : '') + '>'
             + '<span class="ram">' + (v.id === 'rocm' ? 'AMD · ROCm' : 'NVIDIA CUDA + CPU') + '</span>'
-            + '<span class="meta">' + v.name + (v.sizeBytes ? ' · ' + gb(v.sizeBytes / 1073741824) : '') + (v.verified ? ' · checksum published' : '') + (state.runtime.rocmSuggested && v.id === 'rocm' ? ' · detected on this machine' : '') + '</span></label>'
+            + '<span class="meta">' + esc(v.name) + (v.sizeBytes ? ' · ' + gb(v.sizeBytes / 1073741824) : '') + (v.verified ? ' · checksum published' : '') + (state.runtime.rocmSuggested && v.id === 'rocm' ? ' · detected on this machine' : '') + '</span></label>'
         })
         html += '</div>'
       }
-      html += '<p class="note muted" style="font-size:13px">Already have Ollama, or want it managed by Windows itself? ' + ${JSON.stringify(runtimeLine)} + '</p>'
-      html += '<div class="actions"><a href="' + DOWNLOAD + '" target="_blank" rel="noreferrer"><button>Download the ' + OS + ' installer instead</button></a>'
-      html += '<span style="flex:1"></span><button id="recheck">Re-check</button></div>'
+      html += '<div class="actions"><span style="flex:1"></span><button id="recheck">Re-check</button></div>'
     }
     el('runtime').innerHTML = html
     var again = el('recheck')
     if (again) again.onclick = load
     wireVariants()
-  }
-
-  function chosenVariant() {
-    var list = (state.runtime && state.runtime.variants) || []
-    for (var i = 0; i < list.length; i += 1) if (list[i].id === state.variant) return list[i]
-    return list[0] || null
   }
 
   function wireVariants() {
@@ -226,114 +332,78 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
     }
   }
 
-  function tierRow(tier) {
-    var tooBig = tier.ramGb > (state.plan.runtime && state.plan.runtime.totalRamGb ? state.plan.runtime.totalRamGb : Infinity)
-    var badges = ''
-    if (tier.recommended) badges += '<span class="badge rec">recommended</span>'
-    if (tooBig) badges += '<span class="badge big">larger than this machine</span>'
-    return '<label class="tier' + (state.selected === tier.ramGb ? ' active' : '') + '" data-ram="' + tier.ramGb + '">'
-      + '<input type="radio" name="tier" value="' + tier.ramGb + '"' + (state.selected === tier.ramGb ? ' checked' : '') + '>'
-      + '<span class="ram">' + (tier.ramGb < 1 ? '500 MB' : tier.ramGb + ' GB') + '</span>'
-      + '<span class="models">' + modelsOf(tier) + badges + '</span>'
-      + '<span class="size">' + gb(tier.totalDownloadGb || 0) + '</span>'
-      + '</label>'
-  }
-
-  function renderTiers() {
-    var hostRam = (state.plan.runtime && state.plan.runtime.totalRamGb) || 0
-    var show = state.tiers.filter(function (t) { return !state.fitsOnly || t.ramGb <= hostRam })
-    el('tiers').innerHTML = show.map(tierRow).join('') || '<span class="muted">no stacks match</span>'
-    Array.prototype.forEach.call(el('tiers').querySelectorAll('.tier'), function (row) {
-      row.onclick = function () { pick(Number(row.getAttribute('data-ram'))) }
-    })
-    updatePick()
-  }
-
-  function pick(ramGb) {
-    state.selected = ramGb
-    renderTiers()
-  }
-
-  function updatePick() {
-    var tier = state.tiers.filter(function (t) { return t.ramGb === state.selected })[0]
-    var button = el('install')
-    if (!tier || !state.plan.ollama) {
-      button.disabled = true
-    } else {
-      button.disabled = false
-    }
-    el('pick').textContent = tier
-      ? 'Install everything · ' + (tier.ramGb < 1 ? '500 MB' : tier.ramGb + ' GB') + ' stack · ' + gb(tier.totalDownloadGb || 0) + ' of models'
-      : 'no stack selected'
-  }
-
   function stepLine(step) {
     var label = ''
     if (step.phase === 'plan') label = 'planned · ' + (step.summary || '')
     else if (step.phase === 'pull') label = 'downloading ' + step.model + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
-    else if (step.phase === 'whisper') label = 'downloading ' + step.file + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
+    else if (step.phase === 'skip') label = 'already there · ' + (step.model || step.cap || '') + (step.status ? ' · ' + step.status : '')
     else if (step.phase === 'runtime') label = 'runtime · ' + (step.status || 'ready')
     else if (step.phase === 'runtime-download') label = 'runtime · ' + (step.status || 'downloading') + (step.total ? ' · ' + Math.round((step.completed / step.total) * 100) + '%' : '')
+    else if (step.phase === 'runtime-install') label = 'runtime · ' + (step.status || 'running the official installer silently')
     else if (step.phase === 'runtime-unpack') label = 'runtime · ' + (step.status || 'unpacking')
     else if (step.phase === 'runtime-ready') label = 'runtime · ' + (step.status || 'ready')
-    else if (step.phase === 'runtime-verify') label = 'runtime · ' + (step.status || 'verifying')
-    else if (step.phase === 'skip') label = 'skipped ' + (step.model || step.cap || '') + (step.status ? ' · ' + step.status : '')
-    else if (step.phase === 'browser-voice') label = 'voice · ' + (step.status || step.model || 'browser')
-    else if (step.phase === 'done') label = 'finished · ' + step.installed + ' installed, ' + (step.skipped || 0) + ' skipped, ' + (step.failed || 0) + ' failed'
+    else if (step.phase === 'done') label = 'finished · ' + step.installed + ' installed, ' + (step.skipped || 0) + ' already there, ' + (step.failed || 0) + ' failed'
     else if (step.phase === 'error') label = 'error · ' + (step.message || '')
     else label = step.phase
     var runtimePhase = step.phase && step.phase.indexOf('runtime') === 0
-    if (step.phase === 'runtime-verify') cls = 'now'
-    var cls = step.phase === 'done' ? 'done' : step.phase === 'error' ? 'fail' : (step.phase === 'pull' || step.phase === 'whisper' || step.phase === 'runtime-download') ? 'now' : runtimePhase && step.ok === false ? 'fail' : ''
-    return '<div class="step ' + cls + '"><span class="mark">' + (step.phase === 'done' ? '✓' : step.phase === 'error' ? '✗' : '›') + '</span><span>' + label + '</span></div>'
+    var cls = step.phase === 'done' ? 'done' : step.phase === 'error' ? 'fail' : (step.phase === 'pull' || step.phase === 'runtime-download' || step.phase === 'runtime-install') ? 'now' : runtimePhase && step.ok === false ? 'fail' : ''
+    return '<div class="step ' + cls + '"><span class="mark">' + (step.phase === 'done' ? '✓' : step.phase === 'error' ? '✗' : '›') + '</span><span>' + esc(label) + '</span></div>'
   }
 
   function renderProgress(job) {
     var steps = (job.steps || []).slice(-60)
     el('steps').innerHTML = steps.map(stepLine).join('') || '<div class="step muted">starting…</div>'
     el('steps').scrollTop = el('steps').scrollHeight
-    var current = steps.filter(function (s) { return s.phase === 'pull' || s.phase === 'whisper' || s.phase === 'runtime-download' }).pop()
+    var current = steps.filter(function (s) { return s.phase === 'pull' || s.phase === 'runtime-download' }).pop()
     if (current && current.total) el('bar').style.width = Math.min(100, Math.round((current.completed / current.total) * 100)) + '%'
     else if (job.state === 'running') el('bar').style.width = '8%'
     if (job.state !== 'running') {
-      el('bar').style.width = job.state === 'completed' ? '100%' : '100%'
+      el('bar').style.width = '100%'
       var failed = job.state === 'failed' || job.state === 'partial'
       el('done').innerHTML = '<p class="note">' + (failed
-        ? 'Partly finished. Anything that failed is listed above; press re-check and try again.'
+        ? 'Partly finished. Anything that failed is listed above; press the button again and it retries only what is missing.'
         : HUD
-          ? 'Stack ready. Open JARVIS below to use the installed models.'
-          : 'Stack ready. Restart the bridge (Ctrl-C, then <code>npm start</code>) so the new models are routed.') + '</p>'
-        + (HUD ? '<div class="actions"><a href="' + HUD + '"><button>Open JARVIS</button></a></div>' : '')
+          ? 'Your three models are ready. Open JARVIS below — the first turn loads the weights into memory.'
+          : 'Your three models are ready. Restart the bridge (Ctrl-C, then <code>npm start</code>) so the new models are routed.') + '</p>'
+        + (HUD && !failed ? '<div class="actions"><a href="' + HUD + '"><button>Open JARVIS</button></a></div>' : '')
       if (state.poll) { clearInterval(state.poll); state.poll = null }
       load()
     }
   }
 
   function install() {
-    if (!state.selected) return
+    var missing = ['chat', 'vision', 'coder'].filter(function (slot) { return !state.pick[slot] })
+    if (missing.length) return
     el('install').disabled = true
     el('done').innerHTML = ''
-    fetch('autopilot/install', {
+    fetch('models/download', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ramGb: state.selected, runtime: true, runtimeVariant: state.variant }),
+      body: JSON.stringify({
+        chat: state.pick.chat,
+        vision: state.pick.vision,
+        coder: state.pick.coder,
+        runtime: !(state.plan && state.plan.ollama),
+        variant: state.variant
+      })
     }).then(function (r) { return r.json() }).then(function (res) {
-      if (res.error) { el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + res.error + '</span></div>'; return }
+      if (res.error) { el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + esc(res.error) + '</span></div>'; el('install').disabled = false; return }
       state.job = res.jobId
       el('steps').innerHTML = '<div class="step now"><span class="mark">›</span><span>starting…</span></div>'
       if (state.poll) clearInterval(state.poll)
       state.poll = setInterval(poll, 1200)
       poll()
     }).catch(function (error) {
-      el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + error.message + '</span></div>'
+      el('steps').innerHTML = '<div class="step fail"><span class="mark">✗</span><span>' + esc(error.message) + '</span></div>'
+      el('install').disabled = false
     })
   }
 
   function poll() {
     if (!state.job) return
-    fetch('autopilot/install/status?id=' + encodeURIComponent(state.job))
+    fetch('models/download/status?id=' + encodeURIComponent(state.job))
       .then(function (r) { return r.json() })
-      .then(function (job) { if (job.error) return; renderProgress(job) })
+      .then(function (job) { if (job.error && job.state !== 'failed') return; renderProgress(job) })
       .catch(function () {})
   }
 
@@ -347,30 +417,34 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
 
   function load() {
     loadRuntime()
+    fetch('models/catalogue').then(function (r) { return r.json() }).then(function (cat) {
+      state.cat = cat
+      if (!Object.keys(state.pick).length) state.pick = Object.assign({}, cat.defaults || {})
+      buildFilters(cat)
+      renderMachine(cat.machine)
+      renderCatalogue()
+      updatePick()
+    }).catch(function (error) {
+      el('catalogue').innerHTML = '<div class="stat"><b>bridge</b><span class="bad">' + esc(error.message) + '</span></div>'
+    })
     fetch('autopilot').then(function (r) { return r.json() }).then(function (plan) {
       state.plan = plan
-      state.tiers = plan.tiers || []
-      if (!state.selected) {
-        var host = (plan.runtime && plan.runtime.totalRamGb) || 0
-        var nearest = state.tiers.filter(function (t) { return t.ramGb <= host })[0]
-        state.selected = (plan.ram && plan.ram.totalGb ? plan.ram.totalGb : nearest ? nearest.ramGb : 8)
-        // the ladder is in 1 GB steps; snap to the nearest row at or below the host
-        var exact = state.tiers.filter(function (t) { return t.ramGb === Math.floor(state.selected) })[0]
-        state.selected = exact ? exact.ramGb : nearest ? nearest.ramGb : state.selected
-      }
-      state.tiers = state.tiers.map(function (t) {
-        return Object.assign({}, t, { recommended: t.ramGb === state.selected })
-      })
-      renderMachine()
       renderRuntime()
-      renderTiers()
-    }).catch(function (error) {
-      el('machine').innerHTML = '<div class="stat"><b>bridge</b><span class="bad">' + error.message + '</span></div>'
-    })
+      updatePick()
+    }).catch(function () { /* the catalogue is still useful without the plan */ })
   }
 
   el('install').onclick = install
-  el('fitsOnly').onchange = function () { state.fitsOnly = this.checked; renderTiers() }
+  ;['fMaxGb', 'fMaxParams', 'fQuant'].forEach(function (id) {
+    el(id).onchange = function () {
+      state.filters.maxGb = el('fMaxGb').value
+      state.filters.maxParams = el('fMaxParams').value
+      state.filters.quant = el('fQuant').value
+      renderCatalogue()
+    }
+  })
+  el('fFit').onchange = function () { state.filters.fit = this.checked; renderCatalogue() }
+  el('fSearch').oninput = function () { state.filters.q = this.value; renderCatalogue() }
   load()
 })()
 </script>

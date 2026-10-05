@@ -81,16 +81,30 @@ in the workflow, and the warning goes away for your users too.
 
 1. The window opens on the HUD. There is no model yet, so JARVIS can see you
    and hear you but cannot think.
-2. Because the stack is incomplete, the **model setup** window opens once. It
-   is the same page `npm start` and `npm run setup` open — press the button and
-   it downloads the model runtime (Ollama's standalone build, no installer, no
-   admin) plus the largest model stack this machine's RAM can hold, into the
-   app's own data folder.
-3. When the download finishes, the runtime is started and the interface starts
-   answering. No restart needed; the HUD reconnects on its own.
+2. Because nothing has been chosen yet, the **model setup** window opens once.
+   It is the same page `npm start` and `npm run setup` open, and it is a
+   catalogue, not a script: every model this project knows, for each of three
+   jobs — **chat** (abliterated, multilingual), **vision** (reads screenshots
+   and images), and **coder & reasoning** (abliterated, argues with itself,
+   builds whole projects) — with its download size, its resident size, its
+   parameters and its quantization, sorted smallest first, and the ones this
+   machine cannot hold marked rather than hidden. Filters narrow by size,
+   parameters and quantization; the three small rungs are ticked to start with,
+   so a first run is minutes. Whatever the RAM allows, the choice is yours:
+   nothing is downloaded until you press the button.
+3. The runtime is not a browser problem either. On Windows the page downloads
+   the official Ollama installer itself and runs it silently
+   (`OllamaSetup.exe /VERYSILENT`) — no download page, no wizard, no
+   administrator prompt on a normal account — and falls back to the standalone
+   build inside the app's own folder on a machine that blocks installers. On
+   Linux and macOS it runs the official CLI installer.
+4. When the three models are in, the runtime is started and the interface
+   starts answering. No restart needed; the HUD reconnects on its own.
 
 The setup window is always reachable afterwards from the tray
-(**Model setup…**) and from the interface's **MODEL STACK** panel.
+(**Model setup…**) and from the interface's **MODEL STACK** panel — reopening it
+is how you change the three models later; the bridge re-reads the choice on the
+next turn, so nothing has to be restarted.
 
 ---
 

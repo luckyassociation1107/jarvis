@@ -273,7 +273,7 @@ const autopilotChecks = [
       // unpack it would be the lie this project keeps refusing to tell.
       && (portable.supported ? Boolean(portable.asset) : portable.asset === null)
   })()],
-  ['the setup page is served by the bridge itself', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('autopilot/install')],
+  ['the setup page is served by the bridge itself, and shows the catalogue', Boolean(setupPage) && setupPage.includes('J.A.R.V.I.S — setup') && setupPage.includes('Install everything') && setupPage.includes('models/catalogue') && setupPage.includes('models/download')],
   ['/autopilot/runtime offers the real Windows archive the one-click install would fetch', (() => {
     const variants = runtimeData?.variants ?? []
     if (process.platform !== 'win32') {
@@ -289,8 +289,8 @@ const autopilotChecks = [
       && typeof first.sizeBytes === 'number'
       && typeof runtimeData.plan?.path === 'string'
   })()],
-  ['the one-click button asks the bridge for the runtime as well as the models', Boolean(setupPage) && setupPage.includes('runtime: true') && setupPage.includes('models/runtime')],
-  ['the setup page offers the official runtime download for this platform', Boolean(setupPage) && setupPage.includes(autopilotData.runtime.downloadUrl)],
+  ['the one-click button asks the bridge for the runtime as well as the chosen three', Boolean(setupPage) && /models\/download/.test(setupPage) && /runtime:\s*!\(state\.plan/.test(setupPage) && /chat: state\.pick\.chat/.test(setupPage)],
+  ['the setup page installs the runtime silently instead of sending anyone to a download page', Boolean(setupPage) && (process.platform === 'win32' ? setupPage.includes('/VERYSILENT') : setupPage.includes('install:ollama')) && !setupPage.includes('target="_blank"') && !setupPage.includes(autopilotData.runtime.downloadUrl)],
   ['/autopilot returns the RAM and selected-slot fields used by ModelManager', Boolean(autopilotData.ram && Number.isFinite(autopilotData.ram.effectiveModelGb)) && Array.isArray(autopilotData.fits) && autopilotData.fits.every((slot) => typeof slot.id === 'string' && typeof slot.kind === 'string' && typeof slot.fits === 'boolean' && Number.isFinite(slot.downloadGb) && Number.isFinite(slot.residentGb))],
   ['/autopilot reports the user-share allocation instead of a fixed OS/apps split', (() => {
     const ram = autopilotData.ram ?? {}

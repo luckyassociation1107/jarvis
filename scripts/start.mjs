@@ -147,7 +147,7 @@ async function offerSetup() {
         const wanted = (plan.modelSlots ?? []).filter((slot) => slot.model)
         const incomplete = wanted.some((slot) => slot.state !== 'ready')
         if (!plan.ollama || incomplete) {
-          if (autoInstall) return installEverything(plan, bridgePort, hud)
+          if (autoInstall) return installEverything(bridgePort, hud)
           const url = `http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`
           console.log(`\n  No complete model stack yet. Choose one in the setup page:\n    ${url}\n`)
           openBrowser(url)
@@ -160,46 +160,43 @@ async function offerSetup() {
 }
 
 /**
- * `--auto`: press the button for the user.
+ * `--auto`: press the button for the user — with the choice the user made.
  *
- * This is the double-click path, so it has to be honest about everything it
- * does: the chosen size and the model names are printed before anything is
- * downloaded, each step is reported as it happens, and a failure names itself
- * instead of leaving a half-installed stack and a cheerful message.
- *
- * The user is always shown what will be downloaded and asked to confirm,
- * unless JARVIS_AUTO_INSTALL=1 is set (for CI / scripted flows).
+ * The models belong to the person, not to the planner, so this reads the saved
+ * selection instead of picking a rung. When nothing has been chosen yet it
+ * refuses to guess: it prints the setup URL and opens it, because a stack that
+ * appeared without anyone choosing it is exactly what this project stopped
+ * doing. The one exception is an unattended run — JARVIS_AUTO_INSTALL=1, a CI
+ * machine with no browser — where the catalogue's own defaults are used, and
+ * those are the smallest rungs on purpose, so a test run is minutes not hours.
  */
-async function installEverything(plan, bridgePort, hud) {
-  // The same rung the setup page preselects: the largest tier this machine's
-  // RAM can hold, which is what the planner's own catalogue would offer.
-  const totalRamGb = Number(plan.runtime?.totalRamGb ?? plan.ram?.totalGb ?? 0)
-  const tiers = (plan.tiers ?? []).filter((tier) => Number(tier.ramGb) > 0)
-  const fitting = tiers.filter((tier) => tier.ramGb <= totalRamGb).sort((a, b) => b.ramGb - a.ramGb)[0]
-  const ramGb = fitting?.ramGb ?? tiers[0]?.ramGb ?? 0.5
-
-  // Show the user exactly what will be installed
-  console.log(`\n  Recommended model stack: ${ramGb < 1 ? '500 MB' : `${ramGb} GB`} · ${gb(fitting?.totalDownloadGb ?? 0)} of models`)
-
-  // List the models in the chosen tier
-  if (fitting?.slots) {
-    console.log('  Models:')
-    const seen = new Set()
-    for (const [cap, slot] of Object.entries(fitting.slots)) {
-      const name = slot.model ?? slot.file
-      if (!name || seen.has(name)) continue
-      seen.add(name)
-      console.log(`    [${cap.toUpperCase()}] ${name}`)
-    }
+async function installEverything(bridgePort, hud) {
+  const catalogue = await fetchJson(`http://localhost:${bridgePort}/models/catalogue`)
+  const saved = await fetchJson(`http://localhost:${bridgePort}/models/selection`)
+  let selection = saved?.selection ?? null
+  if (!selection && process.env.JARVIS_AUTO_INSTALL === '1') {
+    selection = catalogue?.defaults ?? null
+    console.log('\n  Nothing chosen yet; taking the catalogue defaults — the smallest of each slot.')
+  }
+  if (!selection) {
+    const url = `http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`
+    console.log('\n  No models chosen yet. Pick one for each job in the setup page:')
+    console.log(`    ${url}\n`)
+    openBrowser(url)
+    return
   }
 
-  console.log('  Runtime first, then the chat/vision/coding weights. Ctrl-C stops it all.')
+  const chosen = ['chat', 'vision', 'coder'].map((slot) => selection[slot]).filter(Boolean)
+  const rows = chosen.map((id) => entryOf(catalogue, id) ?? { model: id, downloadGb: 0 })
+  const downloadGb = rows.reduce((sum, row) => sum + (row.downloadGb ?? 0), 0)
+  console.log(`\n  Chosen models: ${gb(downloadGb)} to download`)
+  for (const row of rows) console.log(`    ${row.model}`)
 
-  // Always ask for confirmation unless JARVIS_AUTO_INSTALL=1
+  // Show the user exactly what is about to happen, then ask once.
   if (process.env.JARVIS_AUTO_INSTALL !== '1') {
     const answer = await new Promise((resolve) => {
       const rl = createInterface({ input: process.stdin, output: process.stdout })
-      rl.question('\n  Proceed with installation? [Y/n] ', (a) => {
+      rl.question('\n  Download these three now? [Y/n] ', (a) => {
         rl.close()
         resolve(a.trim())
       })
@@ -215,19 +212,19 @@ async function installEverything(plan, bridgePort, hud) {
 
   let job
   try {
-    const response = await fetch(`http://localhost:${bridgePort}/autopilot/install`, {
+    const response = await fetch(`http://localhost:${bridgePort}/models/download`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ramGb, runtime: true, runtimeVariant: 'auto' }),
+      body: JSON.stringify({ ...selection, runtime: true, variant: 'auto' }),
     })
     job = await response.json()
   } catch (error) {
-    console.error(`  Could not start the installer: ${error.message}`)
+    console.error(`  Could not start the download: ${error.message}`)
     console.error(`  Open the setup page instead: http://localhost:${bridgePort}/install?hud=${encodeURIComponent(hud)}`)
     return
   }
   if (job?.error) {
-    console.error(`  Installer refused: ${job.error}`)
+    console.error(`  The bridge refused: ${job.error}`)
     return
   }
 
@@ -236,7 +233,7 @@ async function installEverything(plan, bridgePort, hud) {
   while (Date.now() < deadline && !stopping) {
     let status
     try {
-      const response = await fetch(`http://localhost:${bridgePort}/autopilot/install/status?id=${encodeURIComponent(job.jobId)}`)
+      const response = await fetch(`http://localhost:${bridgePort}/models/download/status?id=${encodeURIComponent(job.jobId)}`)
       status = await response.json()
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 1200))
@@ -252,7 +249,7 @@ async function installEverything(plan, bridgePort, hud) {
     if (status.state !== 'running') {
       if (status.state === 'failed') console.error(`\n  Installation failed: ${status.error ?? 'see the steps above'}`)
       else if (status.state === 'partial') console.log('\n  Partly installed — the skipped steps are listed above.')
-      else console.log('\n  Everything is installed. Ask away.')
+      else console.log('\n  Your models are installed. Ask away.')
       // The HUD URL is the one Vite printed a line or two above, which is not
       // always 5173: a second copy of the app moves it along.
       console.log(`  Open the Vite URL above in Chrome and say “Hey Jarvis”, or type at it with \`npm run cli\`.`)
@@ -260,6 +257,24 @@ async function installEverything(plan, bridgePort, hud) {
     }
     await new Promise((resolve) => setTimeout(resolve, 1200))
   }
+}
+
+/** GET a JSON endpoint on the bridge, or null when it is not answering yet. */
+async function fetchJson(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(4000) })
+    return response.ok ? await response.json() : null
+  } catch {
+    return null
+  }
+}
+
+/** One catalogue entry by model tag, wherever in the catalogue it sits. */
+function entryOf(catalogue, id) {
+  for (const slot of catalogue?.slots ?? []) {
+    for (const entry of slot.entries ?? []) if (entry.id === id) return entry
+  }
+  return null
 }
 
 /** One terminal line per installer step, deduplicated by the caller. */
@@ -271,6 +286,7 @@ function stepLine(step) {
       : `↓ ${step.status ?? 'runtime'}`
     case 'runtime-verify': return `· ${step.status ?? 'verifying'}`
     case 'runtime-unpack': return `· ${step.status ?? 'unpacking'}`
+    case 'runtime-install': return `↓ ${step.status ?? 'running the official installer silently'}`
     case 'runtime-ready': return `✓ ${step.status ?? 'runtime ready'}`
     case 'runtime': return step.ok === false ? `✗ ${step.status}` : `· ${step.status}`
     case 'plan': return `· ${step.summary ?? 'planned'}`

@@ -42,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -52,6 +52,9 @@ import process from 'node:process'
 /** The release this installs from. Overridable so tests and mirrors do not need the internet. */
 export const DEFAULT_RELEASE_API = 'https://api.github.com/repos/ollama/ollama/releases/latest'
 export const DEFAULT_RELEASE_BASE = 'https://github.com/ollama/ollama/releases/latest/download'
+
+/** The official Windows installer. Downloaded and run by the app, never a browser. */
+export const OLLAMA_SETUP_URL = 'https://ollama.com/download/OllamaSetup.exe'
 
 export function releaseApi(env = process.env) {
   return String(env.JARVIS_RUNTIME_API ?? DEFAULT_RELEASE_API)
@@ -558,6 +561,11 @@ export async function ensureRuntime({
   modelsDir = runtimeModelsDir(env),
   onStep = () => {},
   fetchImpl = fetch,
+  // 'auto' installs Ollama system-wide on Windows the way a person would — the
+  // official installer, run silently, over the CLI — and falls back to the
+  // standalone build. 'portable' keeps everything inside the project, which is
+  // what CI wants: no admin, no system PATH, no version drift between runs.
+  installMode = env.JARVIS_OLLAMA_INSTALL ?? 'auto',
 } = {}) {
   if (!platformSupported(platform, arch)) {
     const error = `Windows only: JARVIS cannot install the model runtime on ${platform}/${arch}; install Ollama from https://ollama.com/download and press re-check`
@@ -574,7 +582,25 @@ export async function ensureRuntime({
     return ensureRuntimeUnix({ platform, arch, variant, env, url, modelsDir, onStep, fetchImpl })
   }
 
-  // ── Windows: existing portable runtime flow ──
+  // ── Windows: the silent system install first, the standalone build after ──
+  // The person installing JARVIS asked for Ollama to appear on their machine
+  // without a browser and without a wizard; the fallback is what keeps this
+  // working on a locked-down machine where an installer cannot run at all.
+  if (platform === 'win32' && installMode !== 'portable') {
+    const system = await installOllamaSystem({ onStep, env, fetchImpl })
+    if (system.ok) {
+      const started = await startRuntime({ bin: system.bin, url, modelsDir, onStep, env })
+      if (!started.ok) onStep({ phase: 'runtime', status: started.error, ok: false })
+      return { ...started, bin: system.bin, system: true, version: system.version }
+    }
+    onStep({
+      phase: 'runtime',
+      status: `the silent system installer did not take over (${system.error}); unpacking the standalone build instead`,
+      ok: true,
+    })
+  }
+
+  // ── Windows: the portable runtime flow ──
   const plan = runtimePlan({ platform, arch, variant, env })
   let bin = findRuntimeBinary(plan, env)
   if (!bin) {
@@ -612,6 +638,66 @@ export async function ensureRuntime({
   const started = await startRuntime({ bin, url, modelsDir, onStep, env })
   if (!started.ok) onStep({ phase: 'runtime', status: started.error, ok: false })
   return { ...started, bin }
+}
+
+/**
+ * Windows: run the official installer silently, with nobody watching.
+ *
+ * Three things this is not. It is not a browser download — the file is fetched
+ * over HTTPS by the app, so a machine with no browser open, or no browser at
+ * all, still gets a runtime. It is not a wizard — Inno Setup's `/VERYSILENT`
+ * answers every page, and the install is per-user, so it does not need an
+ * administrator. And it is not trusted blindly: the installer's own exit code
+ * is the answer, and if it says no, the caller falls back to the standalone
+ * build rather than leaving the person with nothing.
+ */
+async function installOllamaSystem({ onStep = () => {}, env = process.env, fetchImpl = fetch } = {}) {
+  const dir = join(tmpdir(), 'jarvis-ollama-setup')
+  const setup = join(dir, 'OllamaSetup.exe')
+  try {
+    await mkdir(dir, { recursive: true })
+    onStep({ phase: 'runtime-download', status: `downloading ${OLLAMA_SETUP_URL} over HTTPS` })
+    const response = await fetchImpl(OLLAMA_SETUP_URL, { signal: AbortSignal.timeout(600_000), redirect: 'follow' })
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
+    await pipeline(response.body, createWriteStream(setup))
+    const bytes = statSync(setup).size
+    // A captive portal or a proxy error page is not an installer, and running
+    // one would be worse than failing: a size floor is the cheapest guard.
+    if (bytes < 20 * 1024 * 1024) throw new Error(`the downloaded installer is only ${bytes} bytes; that is not an installer`)
+    onStep({ phase: 'runtime-install', status: `running OllamaSetup.exe /VERYSILENT (${(bytes / MB).toFixed(0)} MB, per-user, no administrator)` })
+
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(setup, ['/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES'], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      child.stdout?.on('data', (chunk) => onStep({ phase: 'runtime-install', status: String(chunk).trim() }))
+      child.stderr?.on('data', (chunk) => onStep({ phase: 'runtime-install', status: String(chunk).trim() }))
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    if (code !== 0) throw new Error(`OllamaSetup.exe exited with code ${code}`)
+
+    const bin = findInstalledOllama(env)
+    if (!bin) throw new Error('the installer finished but no ollama.exe was found in the usual places')
+    onStep({ phase: 'runtime-ready', status: `Ollama installed at ${bin}`, ok: true })
+    return { ok: true, bin, version: null, mode: 'system' }
+  } catch (error) {
+    const message = String(error?.message ?? error)
+    onStep({ phase: 'runtime', status: `silent install failed: ${message}`, ok: false })
+    return { ok: false, error: message }
+  }
+}
+
+/** Where the installer puts `ollama.exe`, in the order it is worth looking. */
+function findInstalledOllama(env = process.env) {
+  const candidates = [
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe') : null,
+    env.ProgramFiles ? join(env.ProgramFiles, 'Ollama', 'ollama.exe') : null,
+    env['ProgramFiles(x86)'] ? join(env['ProgramFiles(x86)'], 'Ollama', 'ollama.exe') : null,
+    join(homedir(), 'AppData', 'Local', 'Programs', 'Ollama', 'ollama.exe'),
+  ].filter(Boolean)
+  return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
 
 /**
