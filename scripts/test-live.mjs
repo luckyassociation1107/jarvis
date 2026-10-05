@@ -408,6 +408,13 @@ async function runBridgeStage() {
         // bridge/local-llm.mjs already uses: room for an answer, not for a
         // monologue. The timeout is raised to match a capped call on a runner
         // with prompt processing to do.
+        // Ollama turns thinking on for the Qwen3.5 family by default, and the
+        // OpenAI-compatible endpoint this client speaks ignores Ollama's own
+        // `think` field — a capped call then spends every token reasoning and
+        // answers with nothing, which is exactly how the first capped run went.
+        // "none" is the documented way to switch it off there, and it is what
+        // makes a turn on a runner-sized CPU finish inside the test.
+        JARVIS_MODEL_REASONING: 'none',
         JARVIS_MODEL_MAX_TOKENS: '700',
         JARVIS_MODEL_TIMEOUT_MS: '300000',
         JARVIS_MODEL_REASON_URL: `${RUNTIME_URL}/v1`,
@@ -510,6 +517,8 @@ async function runBridgeStage() {
           : `no file written — tools announced: [${workTurn.tools.join(', ') || 'none'}], answer: "${oneLine((workTurn.text ?? '').trim())}"`,
     })
     noteLines.push(`Tool turn: announced [${workTurn.tools.join(', ') || 'none'}]${workTurn.error ? `, failed: ${workTurn.error}` : `, said "${oneLine((workTurn.text ?? '').trim())}"`}.`)
+    noteLines.push('Bridge stage configuration: JARVIS_MODEL_REASONING=none, JARVIS_MODEL_MAX_TOKENS=700 — a 2B thinking model on a runner-sized CPU otherwise reasons past the turn budget.')
+
     return { checks, noteLines }
   } catch (error) {
     // Deliberately not optional. An unrunnable stage once reported itself as an

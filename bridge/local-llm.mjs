@@ -175,6 +175,20 @@ const TURN_TIMEOUT_MS = Number(process.env.JARVIS_MODEL_TIMEOUT_MS ?? 180_000)
  */
 const MAX_TOKENS = Number(process.env.JARVIS_MODEL_MAX_TOKENS ?? 0)
 
+/**
+ * How hard the model should think before answering, sent as the OpenAI
+ * `reasoning_effort` field — "none", "low", "medium", "high", "max".
+ *
+ * Empty by default: the model's own default stands, which for the Qwen3.5
+ * family is thinking on. It is `reasoning_effort` and not Ollama's native
+ * `think` because this client speaks the OpenAI-compatible endpoint, and that
+ * endpoint silently drops `think` — the model then spends the entire token
+ * budget reasoning and answers with an empty string. "none" is the documented
+ * way to switch thinking off there, and servers that do not know the field
+ * ignore it.
+ */
+const REASONING_EFFORT = String(process.env.JARVIS_MODEL_REASONING ?? '').trim()
+
 // ---------------------------------------------------------------------------
 // Tool shaping
 // ---------------------------------------------------------------------------
@@ -721,6 +735,7 @@ async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
       temperature: TEMPERATURE,
       stream: true,
       ...(MAX_TOKENS > 0 ? { max_tokens: MAX_TOKENS } : {}),
+      ...(REASONING_EFFORT ? { reasoning_effort: REASONING_EFFORT } : {}),
     }),
     // signal is optional, and AbortSignal.any rejects anything that is not one.
     signal: signal
@@ -1177,6 +1192,7 @@ export async function complete(slot, messages, opts = {}) {
           messages,
           temperature: opts.temperature ?? 0.1,
           max_tokens: opts.maxTokens ?? 400,
+          ...(REASONING_EFFORT ? { reasoning_effort: REASONING_EFFORT } : {}),
           stream: false,
         }),
         signal: opts.signal
