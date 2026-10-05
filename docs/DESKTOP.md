@@ -33,7 +33,7 @@ attaches the same file to the GitHub release, so users can download it without
 an account:
 
 ```
-https://github.com/<owner>/jarvis/releases/latest
+https://github.com/luckyassociation1107/jarvis/releases/latest
 ```
 
 **Or build it yourself** on a Windows machine with Node 20+:
