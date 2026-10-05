@@ -230,13 +230,13 @@ process.on('uncaughtException', (error) => reportFatal('uncaught exception', err
 process.on('unhandledRejection', (error) => reportFatal('unhandled rejection', error))
 
 if (SELF_TEST) {
-  // A build runner has no GPU, and on some images no interactive desktop
-  // either. Chromium's attempt to initialise one of those can leave
-  // `app.whenReady()` pending forever: no error, no exit code, just a job that
-  // runs until it is cancelled. The self-test only needs the interface to be
-  // *served* — nothing is painted — so it starts without acceleration and
-  // without the sandbox. An installed app, where a person is looking at the
-  // window, keeps both.
+  // A build runner has no GPU, nobody is looking at the screen, and the
+  // self-test only needs the interface to be *served* — nothing is painted or
+  // composited. Software rendering and no sandbox keep a headless image out of
+  // the GPU-init and sandbox paths that a GUI app can stall on. An installed
+  // app, where a person is looking at the window, keeps both. (The stall this
+  // was first blamed for turned out to be the top-level await at the bottom of
+  // this file; these switches are hygiene, not the fix.)
   app.disableHardwareAcceleration()
   for (const flag of ['disable-gpu', 'disable-gpu-compositing', 'disable-software-rasterizer', 'no-sandbox']) {
     app.commandLine.appendSwitch(flag)
@@ -842,36 +842,42 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  // Electron's `whenReady()` waits on a window system. On a CI runner without
-  // one it can stay pending forever, and a self-test that waits on it reports
-  // nothing at all: the job hangs and the watchdog's single line is the only
-  // evidence. So it is bounded, and the answer is written down — everything the
-  // self-test exercises is loopback, and a HUD server and a utility-process
-  // bridge do not need a display to answer on 127.0.0.1.
+  // Do not turn this into `await app.whenReady()` — not even a bounded race.
+  //
+  // This file is the app's ESM entry point, and Electron does not reach the
+  // code that resolves `whenReady()` until the entry point has finished
+  // evaluating: `JoinAppCode()` in `shell/common/node_bindings.cc` pumps the
+  // loop until `app_code_loaded_`, which is set after the initial ESM import
+  // chain resolves. A top-level await on ready is therefore a spinlock — the
+  // entry waits for the event that cannot fire until the entry returns. Every
+  // other file in this project may await ready all it likes; only the entry
+  // module cannot.
+  //
+  // This was found the only way it could be: the packaged app stayed alive on
+  // the runner, logged nothing at all, and exited through the self-test
+  // watchdog. From a user's seat it is an installed app that shows no window
+  // and no error. A bounded race does not help, either: the timeout still has
+  // to be awaited at the top level, so the module blocks for the whole budget
+  // and then starts the app before Electron is ready.
+  //
+  // The two log lines below are what make the next stall, if there ever is
+  // one, name itself.
   log('waiting for Electron to finish starting')
-  const ready = await Promise.race([
-    app.whenReady().then(() => true).catch(() => false),
-    new Promise((done) => {
-      const timer = setTimeout(() => done(false), 30_000)
-      timer.unref?.()
-    }),
-  ])
-  log(ready
-    ? (SELF_TEST ? 'electron is ready; running the self-test' : 'electron is ready; opening the window')
-    : 'electron did not finish starting within 30s; continuing without it')
-
-  try {
-    await main()
-  } catch (error) {
-    log(`startup failed: ${error?.stack ?? error}`)
-    // A modal dialog in self-test mode would block until the CI job's timeout:
-    // the exit code and the log are the report there.
-    if (!SELF_TEST) {
-      dialog.showErrorBox(
-        `${APP_NAME} could not start`,
-        `${error?.message ?? error}\n\nLog file:\n${LOG_FILE}`,
-      )
+  void app.whenReady().then(async () => {
+    log(SELF_TEST ? 'electron is ready; running the self-test' : 'electron is ready; opening the window')
+    try {
+      await main()
+    } catch (error) {
+      log(`startup failed: ${error?.stack ?? error}`)
+      // A modal dialog in self-test mode would block until the CI job's timeout:
+      // the exit code and the log are the report there.
+      if (!SELF_TEST) {
+        dialog.showErrorBox(
+          `${APP_NAME} could not start`,
+          `${error?.message ?? error}\n\nLog file:\n${LOG_FILE}`,
+        )
+      }
+      app.exit(1)
     }
-    app.exit(1)
-  }
+  })
 }
