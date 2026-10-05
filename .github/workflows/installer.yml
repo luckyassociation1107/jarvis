@@ -189,6 +189,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # The transcript is the answer to "did the AI actually work?" — the
+      # prompts, the model, the timings and the raw answers. Annotations come
+      # back over api.github.com, unlike job logs (a zip served from a host some
+      # networks cannot reach), so the same report a reader would have to
+      # download is also in the run's checks.
+      - name: Publish the transcript as a check annotation
+        if: always()
+        shell: bash
+        run: |
+          if [ -f models/live-test-report.txt ]; then
+            node scripts/ci-report.mjs --level notice 'live model self-test result' models/live-test-report.txt
+          fi
+
   installer:
     name: Windows installer
     needs: verify
