@@ -37,3 +37,6 @@ public/mediapipe/
 .arena/
 
 /release/
+
+# CI build output (installer compilation artifacts)
+installer-build/

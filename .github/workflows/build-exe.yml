@@ -1,0 +1,200 @@
+# Build JARVIS as a Windows installable EXE.
+#
+# This workflow runs on windows-latest, builds the Vite frontend,
+# bundles it with a portable Node.js runtime and the bridge server,
+# then compiles an Inno Setup installer (JARVIS-Setup.exe).
+#
+# The installer is attached to a GitHub Release on every tag push
+# (v*.*.*) and is also available as a workflow artifact on every run.
+
+name: Build Windows EXE Installer
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    name: Build JARVIS Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the browser UI (Vite)
+        env:
+          VITE_BASE_PATH: /
+        run: npm run build
+
+      - name: Download portable Node.js for Windows x64
+        shell: pwsh
+        run: |
+          $nodeVersion = "v22.14.0"
+          $nodeZip = "node-$nodeVersion-win-x64.zip"
+          $url = "https://nodejs.org/dist/$nodeVersion/$nodeZip"
+          Write-Host "Downloading portable Node.js $nodeVersion..."
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\$nodeZip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\$nodeZip" -DestinationPath "$env:RUNNER_TEMP\node-portable" -Force
+          # The zip contains a folder like node-v22.14.0-win-x64/
+          $extracted = Get-ChildItem "$env:RUNNER_TEMP\node-portable" | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path "installer-build\node-portable" | Out-Null
+          Copy-Item -Path "$($extracted.FullName)\*" -Destination "installer-build\node-portable\" -Recurse
+          Write-Host "Node.js portable extracted to installer-build\node-portable"
+          & "installer-build\node-portable\node.exe" --version
+
+      - name: Prepare distribution folder
+        shell: pwsh
+        run: |
+          $distDir = "installer-build\JARVIS"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          New-Item -ItemType Directory -Force -Path "$distDir\bridge" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$distDir\scripts" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$distDir\dist" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$distDir\public" | Out-Null
+
+          # Copy the built frontend
+          Copy-Item -Path "dist\*" -Destination "$distDir\dist\" -Recurse -Force
+
+          # Copy bridge server files
+          Copy-Item -Path "bridge\*" -Destination "$distDir\bridge\" -Recurse -Force
+
+          # Copy essential scripts
+          Copy-Item -Path "scripts\start.mjs" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\start.bat" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\start-hidden.vbs" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\stop.bat" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\open-browser.mjs" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\ollama-endpoints.mjs" -Destination "$distDir\scripts\" -Force
+          Copy-Item -Path "scripts\vendor-mediapipe.mjs" -Destination "$distDir\scripts\" -Force
+
+          # Copy config files
+          Copy-Item -Path "package.json" -Destination "$distDir\" -Force
+          Copy-Item -Path "package-lock.json" -Destination "$distDir\" -Force
+          Copy-Item -Path "models.json" -Destination "$distDir\" -Force
+          Copy-Item -Path ".env.example" -Destination "$distDir\" -Force
+
+          # Copy public assets if they exist
+          if (Test-Path "public") {
+            Copy-Item -Path "public\*" -Destination "$distDir\public\" -Recurse -Force
+          }
+
+          # Copy index.html from repo root if needed
+          if (Test-Path "index.html") {
+            Copy-Item -Path "index.html" -Destination "$distDir\" -Force
+          }
+
+          # Copy the portable Node.js
+          Copy-Item -Path "installer-build\node-portable" -Destination "$distDir\node-portable" -Recurse -Force
+
+          # Create the launcher script that uses the bundled Node
+          $launcherContent = @'
+          @echo off
+          :: JARVIS Launcher — uses the bundled portable Node.js
+          setlocal
+          set "JARVIS_DIR=%~dp0.."
+          set "PATH=%JARVIS_DIR%\node-portable;%PATH%"
+          cd /d "%JARVIS_DIR%"
+
+          :: Start the bridge server with the bundled Node
+          start "JARVIS Bridge" /min "%JARVIS_DIR%\node-portable\node.exe" "%JARVIS_DIR%\bridge\server.mjs"
+
+          :: Wait a moment for the bridge to start
+          timeout /t 3 /nobreak >nul
+
+          :: Open the browser to the built frontend
+          start "" "http://localhost:8787"
+
+          echo.
+          echo   JARVIS is running. Close this window to stop.
+          echo   Press any key to stop JARVIS...
+          pause >nul
+
+          :: Cleanup
+          taskkill /F /FI "WINDOWTITLE eq JARVIS Bridge*" >nul 2>&1
+          endlocal
+          '@
+          Set-Content -Path "$distDir\scripts\jarvis-launcher.bat" -Value $launcherContent -Encoding ASCII
+
+          Write-Host "Distribution folder prepared at $distDir"
+          Get-ChildItem $distDir -Recurse | Measure-Object | Select-Object -ExpandProperty Count
+          Write-Host "files copied."
+
+      - name: Install production dependencies in dist
+        shell: pwsh
+        run: |
+          $distDir = "installer-build\JARVIS"
+          $env:PATH = "$distDir\node-portable;$env:PATH"
+
+          # Use the bundled Node's npm to install production deps
+          cd $distDir
+          & "$distDir\node-portable\node.exe" "$distDir\node-portable\node_modules\npm\bin\npm-cli.js" install --production --no-audit --no-fund
+          Write-Host "Production dependencies installed in dist."
+
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          # Inno Setup is pre-installed on windows-latest runners
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup not found at default path, searching..."
+            $found = Get-ChildItem "C:\Program Files*" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $iscc = $found.FullName }
+            else { throw "Inno Setup (ISCC.exe) not found on this runner." }
+          }
+          Write-Host "Using Inno Setup: $iscc"
+          & $iscc "installer\jarvis.iss"
+          Write-Host "Installer compiled successfully."
+
+      - name: Verify installer was created
+        shell: pwsh
+        run: |
+          $installerPath = "installer-build\JARVIS-Setup.exe"
+          if (-not (Test-Path $installerPath)) {
+            # Check alternate output location
+            $alt = Get-ChildItem "installer-build" -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($alt) {
+              Write-Host "Installer found at: $($alt.FullName)"
+            } else {
+              Write-Host "Contents of installer-build:"
+              Get-ChildItem "installer-build" -Recurse | Select-Object FullName
+              throw "Installer EXE was not created."
+            }
+          } else {
+            $size = (Get-Item $installerPath).Length / 1MB
+            Write-Host "Installer created: $installerPath ($([math]::Round($size, 1)) MB)"
+          }
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-Windows-Installer
+          path: installer-build/*.exe
+          retention-days: 30
+
+      - name: Upload installer to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer-build/*.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
