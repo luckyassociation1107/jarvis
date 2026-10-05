@@ -479,7 +479,7 @@ function withDeclineNudge(messages) {
  * the patterns above are exactly what it guesses on.
  *
  * @param {Array<{role: string, content: unknown}>} messages
- * @returns {'chat' | 'vision' | 'reason'}
+ * @returns {'chat' | 'vision' | 'reason' | 'coder'}
  */
 export function pickModel(messages) {
   // An image is the one unambiguous signal. A text-only model shown a picture

@@ -9,7 +9,8 @@
  * the project, start it, and die with the parent process.
  *
  * Windows: standalone zip, no installer, no PATH, no admin prompt.
- * Linux/macOS: official install script or direct tarball binary download.
+ * Other platforms must use their official Ollama installer; this module does
+ * not advertise an archive until that format is safely implemented and tested.
  *
  * Two things this has to survive:
  *
@@ -72,9 +73,10 @@ export function runtimeModelsDir(env = process.env) {
 
 /** Windows only: x64 and arm64 both have a standalone zip. */
 export function platformSupported(platform = process.platform, arch = process.arch) {
-  return (platform === 'win32' && (arch === 'x64' || arch === 'arm64'))
-    || platform === 'linux'
-    || platform === 'darwin'
+  // This module's bundled runtime is the Windows standalone zip. Linux and
+  // macOS users can install their own Ollama; never claim we can unpack a
+  // package we do not ship an extractor for.
+  return platform === 'win32' && (arch === 'x64' || arch === 'arm64')
 }
 
 /**
@@ -84,30 +86,18 @@ export function platformSupported(platform = process.platform, arch = process.ar
  * API result is ranked by when it can.
  */
 export function candidateNames({ platform = process.platform, arch = process.arch, variant = 'default' } = {}) {
-  if (platform === 'win32') {
-    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
-    if (bits === 'arm64') return ['ollama-windows-arm64.zip']
-    return variant === 'rocm'
-      ? ['ollama-windows-amd64-rocm.zip']
-      : ['ollama-windows-amd64.zip']
-  }
-  if (platform === 'linux') {
-    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
-    if (variant === 'rocm' && bits === 'amd64') return ['ollama-linux-amd64-rocm.tar.zst']
-    return [`ollama-linux-${bits}.tar.zst`]
-  }
-  if (platform === 'darwin') {
-    const bits = arch === 'arm64' ? 'arm64' : 'amd64'
-    return [`ollama-darwin-${bits}.tgz`]
-  }
-  return []
+  if (platform !== 'win32' || !['x64', 'arm64'].includes(arch)) return []
+  if (arch === 'arm64') return ['ollama-windows-arm64.zip']
+  return variant === 'rocm'
+    ? ['ollama-windows-amd64-rocm.zip']
+    : ['ollama-windows-amd64.zip']
 }
 
 /** Which unpacker an archive name needs. Everything Windows ships as a zip. */
 export function archiveKind(name) {
+  // The portable installer ships a Windows zip only. Keep tarballs out of the
+  // plan until their extractors are implemented and covered by tests.
   if (/\.zip$/i.test(String(name ?? ''))) return 'zip'
-  if (/\.tar\.zst$/i.test(String(name ?? ''))) return 'tar.zst'
-  if (/\.tgz$/i.test(String(name ?? '')) || /\.tar\.gz$/i.test(String(name ?? ''))) return 'tgz'
   return null
 }
 
@@ -177,6 +167,7 @@ export async function fetchRelease({ platform = process.platform, arch = process
 /** The variants worth offering on this machine. */
 export async function resolveVariants({ platform = process.platform, arch = process.arch, env = process.env, fetchImpl = fetch } = {}) {
   const variants = []
+  if (!platformSupported(platform, arch)) return { variants, source: 'unsupported' }
   for (const id of ['default', 'rocm']) {
     // The ROCm build is x64 only; ARM Windows has one archive.
     if (id === 'rocm' && arch !== 'x64') continue
@@ -569,7 +560,7 @@ export async function ensureRuntime({
   fetchImpl = fetch,
 } = {}) {
   if (!platformSupported(platform, arch)) {
-    const error = `JARVIS installs the model runtime on Windows, Linux, and macOS (this is ${platform}/${arch}); install Ollama from https://ollama.com/download and press re-check`
+    const error = `Windows only: JARVIS cannot install the model runtime on ${platform}/${arch}; install Ollama from https://ollama.com/download and press re-check`
     onStep({ phase: 'runtime', status: error, ok: false })
     return { ok: false, error }
   }

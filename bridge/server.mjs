@@ -905,7 +905,7 @@ const handleRequest = async (req, res) => {
         totalRamGb: +(totalmem() / 1073741824).toFixed(1),
         diskFreeGb: diskFreeGb(),
         ollamaInstalled: Boolean(programPath('ollama')),
-        downloadUrl: OLLAMA_DOWNLOAD.win32,
+        downloadUrl: OLLAMA_DOWNLOAD[process.platform] ?? OLLAMA_DOWNLOAD.linux,
         // The standalone build the page can fetch for a machine that has
         // nothing yet: same binary, no installer, unpacked inside this repo.
         // Read per request so a download that just finished shows up here.

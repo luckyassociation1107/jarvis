@@ -554,13 +554,13 @@ const cliChecks = [
 // because the middle one fails silently: a text model shown a photograph
 // describes the prompt instead of the picture, with total confidence.
 const IMG = [{ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AA' } }]
-const routing = await import('./bridge/local-llm.mjs')
-  .then((m) => m.pickModel)
-  .catch(() => null)
+const routingModule = await import('./bridge/local-llm.mjs').catch(() => null)
+const routing = routingModule?.pickModel
+const technicalSlot = routingModule?.PIPELINE?.coder?.model ? 'coder' : 'reason'
 const routingChecks = routing
   ? [
       ['an image routes to the vision slot', routing([{ role: 'user', content: IMG }]) === 'vision'],
-      ['a technical question routes to the reason slot', routing([{ role: 'user', content: 'why does this regex fail?' }]) === 'reason'],
+      [`a technical question routes to the ${technicalSlot} slot`, routing([{ role: 'user', content: 'why does this regex fail?' }]) === technicalSlot],
       ['a tool-shaped question routes to the reason slot', routing([{ role: 'user', content: 'take a screenshot of my phone' }]) === 'reason'],
       ['a plain greeting routes to the chat slot', routing([{ role: 'user', content: 'say good evening' }]) === 'chat'],
       ['an image in a tool result also routes to vision', routing([
