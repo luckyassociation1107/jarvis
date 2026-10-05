@@ -152,8 +152,13 @@ await new Promise((resolve, reject) => {
 try {
   const port = modelServer.address().port
   const setupPath = fileURLToPath(new URL('./setup.mjs', import.meta.url))
+  // Keep this preflight assertion independent of the runner's RAM tier: a
+  // machine with more free memory legitimately selects a different planner
+  // model, but an explicit test route makes the empty-inventory contract stable.
+  const preflightChatModel = 'jarvis-test/preflight-chat'
   const setup = await runNode(setupPath, [], {
     ...baseEnv,
+    JARVIS_MODEL_CHAT: preflightChatModel,
     JARVIS_MODEL_BASE_URL: 'http://127.0.0.1:1/v1',
     JARVIS_MODEL_CHAT_URL: `http://127.0.0.1:${port}/v1`,
     JARVIS_MODEL_VISION_URL: `http://127.0.0.1:${port}/v1`,
@@ -161,8 +166,8 @@ try {
   })
   assert.equal(setup.status, 0, setup.stderr || 'read-only preflight exited unsuccessfully')
   assert.match(setup.stdout, new RegExp(`Model server reachable at http://127\\.0\\.0\\.1:${port}/v1 — 0 models listed`))
-  assert.match(setup.stdout, /chat\s+huihui_ai\/qwen3\.5-abliterated:[^\n]+ is not loaded\./)
-  assert.doesNotMatch(setup.stdout, /chat\s+huihui_ai\/qwen3\.5-abliterated:[^\n]+ cannot be verified/)
+  assert.ok(setup.stdout.includes(`chat    ${preflightChatModel} is not loaded.`), 'a known-empty model list reports the chosen chat model as not loaded')
+  assert.ok(!setup.stdout.includes(`chat    ${preflightChatModel} cannot be verified`), 'a reachable empty inventory is not treated as an unavailable endpoint')
 } finally {
   await new Promise((resolve, reject) => modelServer.close((error) => error ? reject(error) : resolve()))
 }
