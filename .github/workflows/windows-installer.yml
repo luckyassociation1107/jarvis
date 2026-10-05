@@ -3,6 +3,8 @@ name: Windows installer
 on:
   workflow_dispatch:
   push:
+    branches:
+      - arena/01a10a83-jarvis
     tags:
       - 'v*'
 
