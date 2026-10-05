@@ -16,6 +16,48 @@ power.
 
 ---
 
+## Install it like an application (Windows .exe)
+
+No Node, no terminal, no build step: download one installer, and the app
+downloads its own model runtime and model stack on first launch.
+
+1. Open the **Actions** tab → **Build Windows installer** → newest green run.
+2. Download the **`JARVIS-Windows-installer`** artifact.
+3. Run `JARVIS-Setup-<version>-x64.exe`.
+
+That is it. The installer is per-user (no administrator prompt), creates a
+desktop icon and a Start Menu entry, adds an uninstaller to *Apps & features*,
+and offers to start JARVIS when it finishes. The first launch opens the same
+one-click model setup page `npm start` uses, so nothing has to be downloaded or
+configured by hand.
+
+Published releases attach the same installer to the release page, so a version
+tag gives users a plain download link — no account needed:
+
+```
+https://github.com/luckyassociation1107/jarvis/releases/latest
+```
+
+The installer is built by [`.github/workflows/installer.yml`](.github/workflows/installer.yml),
+which builds the interface, runs the packaging self-test (`npm run test:desktop`),
+packages with electron-builder, and then launches the *packaged application*
+in self-test mode before anything is published.
+
+Full details — where the files go, the tray menu, the writes toggle, the
+SmartScreen warning, the one limitation of running the voice stack inside a
+desktop shell, and how to build the installer yourself with `npm run dist` —
+are in **[docs/DESKTOP.md](docs/DESKTOP.md)**.
+
+The source path is unchanged and still the way to run JARVIS with the browser's
+own speech recogniser:
+
+```powershell
+npm ci
+npm start
+```
+
+---
+
 ## Uncensored Model Stack
 
 JARVIS uses **abliterated** (uncensored) models — alignment and bias filtered

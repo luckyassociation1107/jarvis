@@ -1,0 +1,229 @@
+# J.A.R.V.I.S. as a Windows application (.exe)
+
+The normal way to run JARVIS is `npm start` in a source checkout: Node, a
+terminal, and Chrome for the wake word. That is a fine way to run it if you
+write software. This document is about the other way — a downloaded installer,
+an icon, and no terminal at all.
+
+Nothing about the intelligence changes. The installer ships the same
+`bridge/server.mjs`, the same `dist/` interface, and the same one-click model
+installer. What it adds is a shell for people who do not have Node and should
+not have to get it: a window, a tray icon, microphone permission, and a way to
+quit.
+
+---
+
+## Getting the installer
+
+The installer is built by GitHub Actions — [`.github/workflows/installer.yml`](../.github/workflows/installer.yml)
+— not committed to the repository, because it is a hundred-megabyte file of
+somebody else's Electron runtime and there is no version of that which belongs
+in git.
+
+**Download it:**
+
+1. Open the repository's **Actions** tab.
+2. Run **Build Windows installer** (it also runs by itself on pushes to `main`
+   and pull requests that touch the app).
+3. Open the newest green run and download the artifact
+   **`JARVIS-Windows-installer`**. Inside is `JARVIS-Setup-1.0.0-x64.exe`.
+
+**Or, on a version tag** (`git tag v1.0.0 && git push --tags`), the workflow
+attaches the same file to the GitHub release, so users can download it without
+an account:
+
+```
+https://github.com/<owner>/jarvis/releases/latest
+```
+
+**Or build it yourself** on a Windows machine with Node 20+:
+
+```powershell
+npm ci
+npm run dist          # builds the interface, then the installer
+# → release\JARVIS-Setup-1.0.0-x64.exe
+
+npm run dist:dir      # unpacked folder instead, for a quick look
+# → release\win-unpacked\JARVIS.exe
+```
+
+---
+
+## What the installer does
+
+An assisted NSIS installer, which means it shows its work:
+
+- **Per-user by default** — installs to `%LOCALAPPDATA%\Programs\JARVIS`, no
+  administrator prompt, no system-wide changes. It can be switched to a
+  machine-wide install on the installer's first page.
+- Creates a **desktop shortcut** and a **Start Menu entry** (`J.A.R.V.I.S.`).
+- Registers an **uninstaller** in *Apps & features* / *Add or Remove Programs*
+  under "J.A.R.V.I.S. (local AI assistant)".
+- Offers to **run the app when you finish**. The app also registers itself to
+  start with Windows on first launch, hidden in the tray, so "Hey Jarvis" works
+  without launching anything. The tray menu has a checkbox to turn that off.
+
+The app itself will **not** ask for administrator rights. It writes nothing
+outside its own install and data folders.
+
+### Windows will warn you the first time
+
+The build is not code-signed: there is no certificate in this repository, and a
+certificate costs money every year. So SmartScreen shows *"Windows protected
+your PC"* on first run. **More info → Run anyway** is the expected path. If you
+have an EV/OV certificate, add it to `package.json` under `build.win`
+(`certificateFile` + `certificatePassword`) or set `CSC_LINK`/`CSC_KEY_PASSWORD`
+in the workflow, and the warning goes away for your users too.
+
+---
+
+## The first launch
+
+1. The window opens on the HUD. There is no model yet, so JARVIS can see you
+   and hear you but cannot think.
+2. Because the stack is incomplete, the **model setup** window opens once. It
+   is the same page `npm start` and `npm run setup` open — press the button and
+   it downloads the model runtime (Ollama's standalone build, no installer, no
+   admin) plus the largest model stack this machine's RAM can hold, into the
+   app's own data folder.
+3. When the download finishes, the runtime is started and the interface starts
+   answering. No restart needed; the HUD reconnects on its own.
+
+The setup window is always reachable afterwards from the tray
+(**Model setup…**) and from the interface's **MODEL STACK** panel.
+
+---
+
+## Where everything lives
+
+| What | Where |
+| --- | --- |
+| The app | `%LOCALAPPDATA%\Programs\JARVIS` (per-user install) |
+| Models, runtime, memory, screenshots | `<install folder>\data\models` |
+| Settings | `<install folder>\data\desktop-settings.json` |
+| Logs (everything the brain printed) | `<install folder>\data\logs\desktop.log` |
+
+If the install folder is not writable — a machine-wide install into
+`Program Files` by a non-administrator, say — the app falls back to
+`%LOCALAPPDATA%\JARVIS` for the same `data` tree, and says so in the log.
+
+In a source checkout, `npm run desktop` uses the repository itself as the data
+folder, so it shares `models/` with `npm start` instead of downloading
+everything twice.
+
+Everything is one folder on purpose. Removing the app and the models means
+uninstalling it and deleting the install folder — the uninstaller deliberately
+leaves your models and your memory alone, because "uninstall" should not
+silently mean "download 8 GB again".
+
+---
+
+## The tray menu
+
+| Item | What it does |
+| --- | --- |
+| Open J.A.R.V.I.S. | Shows the window (also a single click on the tray icon) |
+| Model setup… | The one-click model installer window |
+| Let JARVIS take actions (writes) | Turns on shell/file/device tools, the desktop equivalent of `npm start -- --writes`. Off by default; the bridge restarts itself when you flip it |
+| Start with Windows | Login item, with `--hidden` so it lands in the tray |
+| Close window quits | Default off — closing the window keeps him listening |
+| Open logs / Open data folder | Opens the two folders above |
+| Developer tools / Restart / Quit | The obvious things |
+
+Closing the window does not quit; **Quit J.A.R.V.I.S.** in the tray does. Quitting
+stops the bridge *and* the model server it started, so nothing is left holding
+several gigabytes of RAM after you are done.
+
+---
+
+## Voice, and the one honest limitation
+
+The installer's window is Chromium. Chromium does not include Google's speech
+service, so `SpeechRecognition` — the API the browser path uses for the wake
+word — is present in the page and never answers. This is not a bug in this
+repository and cannot be fixed in this repository: it is the same reason no
+Electron app has working `webkitSpeechRecognition` without a Google API key.
+
+What this app does about it:
+
+- With `VITE_STT_ENGINE=auto` (the default), the HUD asks the bridge whether the
+  **local** speech stack is ready before choosing an engine. If the
+  multilingual Whisper runtime and model are installed, speech input runs on
+  your machine — no Google, nothing leaving the computer, and it works offline.
+  The setup page installs that stack when RAM allows.
+- If it is not installed, the interface falls back to the browser recogniser,
+  which in this window will not work, and the HUD says so instead of pretending
+  the microphone is alive.
+
+So: **install the local speech stack** (it is part of the one-click setup, and
+listed in the MODEL STACK panel), and voice works inside the app. If you would
+rather keep voice on the browser's own recogniser, `npm start` plus Chrome or
+Edge remains the fully-featured path — the desktop app is the same product with
+a smaller blast radius and no terminal.
+
+Everything else in the app — the interface, tools, panels, models, memory — is
+identical between the two paths.
+
+---
+
+## What is and is not supervised
+
+The shell keeps the assistant alive rather than relaying failures:
+
+- **The bridge is restarted** if it dies unexpectedly (four times in two
+  minutes, then it stops trying and explains itself).
+- **The window is reloaded** if the renderer crashes; the bridge and the models
+  never went anywhere.
+- **A second launch** focuses the running window instead of starting a second
+  copy, a second bridge and a second model server.
+- **A bridge already running on port 8787** (your own `npm start` session, say)
+  is used rather than fought over. The HUD's port range is inside the range that
+  bridge already trusts.
+
+There is no auto-update. Each release is a new installer; install it over the
+old one and your models stay where they are.
+
+---
+
+## The icon
+
+`desktop/icon.png` (512×512, transparent corners) is the master;
+`desktop/icon.ico` is generated from it and committed, because electron-builder
+needs the multi-resolution `.ico` at build time and cannot make one. To redo it
+after changing the artwork, on any machine with ImageMagick:
+
+```bash
+convert desktop/icon.png -define icon:auto-resize=256,128,64,48,32,24,16 desktop/icon.ico
+```
+
+`npm run test:desktop` checks that the committed `.ico` still has all seven
+sizes and still contains a 256px image — the failure it prevents arrives three
+minutes into a build on a Windows runner otherwise.
+
+---
+
+## Troubleshooting
+
+**The window is open but JARVIS never answers.**
+No model is reachable. Tray → *Model setup…* → install, then watch the log
+(tray → *Open logs*): the bridge prints one line per slot it cannot reach.
+
+**The window is blank.**
+The interface files are missing from the install. Reinstall; the packaged
+self-test in CI exists precisely to catch this before you do.
+
+**Nothing happens when I say "Hey Jarvis".**
+See *Voice* above: the local speech stack has to be installed for speech input
+inside the app window.
+
+**Something is wrong and I want to know what.**
+`data\logs\desktop.log` has the whole startup, every model the bridge tried to
+reach, and every reason it gave. The tray opens it directly.
+
+**I want to run it from source, like a developer.**
+
+```powershell
+npm ci
+npm run desktop           # Electron, reading the repo as its data folder
+npm run desktop:writes    # …with the acting tools enabled
+```

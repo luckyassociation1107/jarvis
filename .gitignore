@@ -36,7 +36,7 @@ public/mediapipe/
 .claude/
 .arena/
 
-/release/
-
-# CI build output (installer compilation artifacts)
-installer-build/
+# The installed desktop app keeps its models, logs and settings here, and
+# electron-builder writes the installer here. Both are machine-specific.
+data/
+release/

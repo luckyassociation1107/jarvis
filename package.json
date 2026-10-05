@@ -5,6 +5,7 @@
   "description": "A browser voice assistant with an Iron Man holographic interface, driven by a local open-source model through a small Node bridge.",
   "license": "MIT",
   "type": "module",
+  "main": "desktop/main.mjs",
   "engines": {
     "node": ">=20"
   },
@@ -29,7 +30,73 @@
     "test:installers": "node scripts/test-installers.mjs",
     "test:runtime": "node scripts/test-runtime.mjs",
     "test:control": "node scripts/test-control.mjs",
-    "build:desktop": "npm run build && electron-builder --win nsis --x64"
+    "desktop": "electron .",
+    "desktop:writes": "electron . --allow-writes",
+    "test:desktop": "node desktop/selftest.mjs",
+    "predist": "npm run build",
+    "dist": "electron-builder --win nsis --x64",
+    "predist:dir": "npm run build",
+    "dist:dir": "electron-builder --win dir --x64"
+  },
+  "build": {
+    "appId": "com.jarvis.assistant",
+    "productName": "JARVIS",
+    "copyright": "MIT licensed. Local models, local data, no account.",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "bridge/**/*",
+      "scripts/ollama-endpoints.mjs",
+      "scripts/ollama-start.mjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "hud"
+      },
+      {
+        "from": "desktop/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "desktop/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "icon": "desktop/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "JARVIS"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "J.A.R.V.I.S.",
+      "uninstallDisplayName": "J.A.R.V.I.S. (local AI assistant)",
+      "installerIcon": "desktop/icon.ico",
+      "uninstallerIcon": "desktop/icon.ico",
+      "installerHeaderIcon": "desktop/icon.ico",
+      "artifactName": "JARVIS-Setup-${version}-${arch}.${ext}",
+      "runAfterFinish": true
+    },
+    "npmRebuild": false
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",
@@ -55,44 +122,11 @@
     "@types/three": "^0.185.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.4",
-    "electron": "^38.8.6",
+    "electron": "^44.5.1",
     "electron-builder": "^26.15.3",
     "oxlint": "^1.75.0",
     "tsx": "^4.23.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
-  },
-  "main": "desktop/main.cjs",
-  "build": {
-    "appId": "ai.arena.jarvis",
-    "productName": "JARVIS",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "desktop/**",
-      "bridge/**",
-      "scripts/**",
-      "dist/**",
-      "models.json",
-      "models.uncensored.json",
-      "package.json"
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "artifactName": "JARVIS-Setup-${version}-${arch}.${ext}"
-    },
-    "asar": true
   }
 }

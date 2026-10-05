@@ -1,0 +1,174 @@
+# Build the Windows installer (.exe) for J.A.R.V.I.S.
+#
+# Two jobs, in this order, because the second one is slow and there is no point
+# spending four minutes on a Windows runner to learn that the interface does not
+# build:
+#
+#   1. `verify`  — Ubuntu. Builds the interface and runs the desktop self-test,
+#                  which checks the static server, the one-click setup page, the
+#                  brain's startup contract and the WebSocket origin rules using
+#                  plain Node. No Electron, no display, no model server needed.
+#   2. `installer` — Windows. Builds the same interface, runs the self-test
+#                  again, packages with electron-builder, then launches the
+#                  *packaged application* in self-test mode — asar archives,
+#                  utility processes and the origin handshake are all verified
+#                  against the real build before anything is published.
+#
+# What comes out: an NSIS setup .exe (per-user install, no admin prompt, desktop
+# and Start Menu shortcuts, uninstaller in Add/Remove Programs). On a version
+# tag it is attached to a GitHub release; on any other run it is an artifact of
+# the workflow run.
+#
+# The app is not code-signed: there is no certificate in this repository, so
+# Windows SmartScreen will show "unknown publisher" the first time. Signing is a
+# `win.certificateFile` entry away for anyone who has a certificate; see
+# docs/DESKTOP.md.
+
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - 'bridge/**'
+      - 'scripts/**'
+      - 'src/**'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'tsconfig*.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/installer.yml'
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'bridge/**'
+      - 'scripts/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/installer.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The CUDA build of onnxruntime-node is a 200 MB download for a provider this
+  # app never uses (speech runs on the browser's ONNX/WASM path). The project's
+  # own PowerShell launcher sets this too; the flag has to live here as well
+  # because `npm ci` runs before any of our code does.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+
+jobs:
+  verify:
+    name: Verify (web build + desktop self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the interface
+        run: npm run build
+
+      - name: Desktop packaging self-test
+        run: npm run test:desktop
+
+      - name: Bridge smoke test
+        run: npm run smoke
+
+  installer:
+    name: Windows installer
+    needs: verify
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the interface
+        run: npm run build
+
+      - name: Desktop packaging self-test
+        run: npm run test:desktop
+
+      - name: Package the installer
+        env:
+          # No certificate in this repository, and electron-builder should not go
+          # looking for one on the runner or try to publish on a tag build.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Check the installer exists
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem release -Filter 'JARVIS-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'electron-builder produced no installer' }
+          $mb = [math]::Round($setup.Length / 1MB, 1)
+          Write-Host "installer: $($setup.Name) ($mb MB)"
+          if ($setup.Length -lt 40MB) { throw "the installer is only $mb MB — the app files did not get packed" }
+
+      - name: Run the packaged application in self-test mode
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem release/win-unpacked -Filter '*.exe' |
+            Where-Object { $_.Name -notlike 'Uninstall*' } |
+            Select-Object -First 1
+          if (-not $exe) { throw 'no packaged executable found' }
+          Write-Host "running $($exe.FullName) --self-test"
+          $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -PassThru -Wait
+          $log = Join-Path (Split-Path $exe.FullName) 'data/logs/desktop.log'
+          if (Test-Path $log) {
+            Write-Host '--- packaged self-test log ---'
+            Get-Content $log | Select-Object -Last 60
+          }
+          if ($process.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit $($process.ExitCode))" }
+          Write-Host 'packaged self-test passed'
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-Windows-installer
+          path: |
+            release/JARVIS-Setup-*.exe
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach the installer to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          gh release view $tag --repo '${{ github.repository }}' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo '${{ github.repository }}' `
+              --title "J.A.R.V.I.S. $tag" `
+              --generate-notes `
+              --notes "Windows installer attached below. Windows may show a SmartScreen warning: the build is not code-signed. Click 'More info' → 'Run anyway'."
+          }
+          $assets = (Get-ChildItem release -Filter 'JARVIS-Setup-*.exe').FullName
+          gh release upload $tag $assets --repo '${{ github.repository }}' --clobber

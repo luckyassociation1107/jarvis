@@ -4,6 +4,13 @@ JARVIS is a browser HUD connected to a local Node bridge and local open-weight
 models. The browser is the face and voice interface; the bridge is the local
 model router, RAM planner and tool host. GitHub Pages serves the UI only.
 
+The installed Windows application (`desktop/`, built by
+[`.github/workflows/installer.yml`](.github/workflows/installer.yml)) is the same
+two halves with a desktop shell around them: a window instead of a browser tab,
+a loopback static server for the built interface, the bridge run inside
+Electron's own Node so the machine needs no Node install, and a tray icon
+instead of a terminal. See [docs/DESKTOP.md](docs/DESKTOP.md).
+
 ## Components
 
 ```text

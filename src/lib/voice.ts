@@ -530,7 +530,10 @@ async function startBrowserVoice(h: VoiceHandlers): Promise<Voice> {
   const Ctor =
     (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition
   if (!Ctor) {
-    h.onError('This browser has no speech recognition — use Chrome or Edge.')
+    h.onError(
+      'This browser has no speech recognition. Install the local speech stack in ' +
+        'MODEL STACK, or open the interface in Chrome or Edge.',
+    )
     return { stop: () => {}, live: () => false }
   }
 

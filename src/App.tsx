@@ -4,6 +4,7 @@ import { Boot } from './ui/Boot'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
 import { configureSttEngine, startVoice, type Voice, type VoiceMode } from './lib/voice'
+import { checkLocalWhisper } from './lib/local-stt'
 import { configureTtsEngine, createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
@@ -544,6 +545,7 @@ export default function App() {
       let ttsEngine: 'system' | 'kokoro' = TTS_ENGINE === 'kokoro' ? 'kokoro' : 'system'
       let ttsDtype: 'q8' | 'fp32' = KOKORO_DTYPE === 'fp32' ? 'fp32' : 'q8'
       let sttEngine: 'browser' | 'whisper' = STT_ENGINE === 'whisper' ? 'whisper' : 'browser'
+      let plannedWhisper = false
 
       const needsPlan = TTS_ENGINE === 'auto' || STT_ENGINE === 'auto' || (TTS_ENGINE === 'kokoro' && KOKORO_DTYPE === 'auto')
       if (needsPlan) {
@@ -556,10 +558,23 @@ export default function App() {
           if (TTS_ENGINE === 'auto') ttsEngine = ttsPlan?.engine === 'kokoro' ? 'kokoro' : 'system'
           if (KOKORO_DTYPE === 'auto' && ttsPlan?.dtype === 'fp32') ttsDtype = 'fp32'
           else if (KOKORO_DTYPE === 'auto' && ttsPlan?.dtype === 'q8') ttsDtype = 'q8'
-          if (STT_ENGINE === 'auto') sttEngine = speechPlan?.fits && speechPlan.kind === 'whisper' ? 'whisper' : 'browser'
+          if (STT_ENGINE === 'auto') plannedWhisper = Boolean(speechPlan?.fits && speechPlan.kind === 'whisper')
         } catch (error) {
           console.info('[jarvis] local speech plan unavailable; using browser STT and system TTS.', error)
         }
+      }
+
+      if (STT_ENGINE === 'auto') {
+        // The planner answers "does the speech model fit in this machine's RAM",
+        // which is not the same question as "is the transcriber installed", and
+        // it is not the same question as "can this browser recognise speech at
+        // all". Chromium as bundled into a desktop application has no speech
+        // service behind SpeechRecognition — the API is present and never
+        // answers — so the browser's own recogniser is the last resort, not the
+        // first choice. Ask the bridge whether the local transcriber is ready;
+        // fall back to the browser when it is not.
+        const local = plannedWhisper ? await checkLocalWhisper() : { ok: false }
+        sttEngine = local.ok ? 'whisper' : 'browser'
       }
 
       configureTtsEngine(ttsEngine, ttsDtype)
