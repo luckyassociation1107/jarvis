@@ -300,7 +300,9 @@ export function installerPage({ platform = process.platform, port = 8787, hudUrl
       var failed = job.state === 'failed' || job.state === 'partial'
       el('done').innerHTML = '<p class="note">' + (failed
         ? 'Partly finished. Anything that failed is listed above; press re-check and try again.'
-        : 'Stack ready. Restart the bridge (Ctrl-C, then <code>npm start</code>) so the new models are routed.') + '</p>'
+        : HUD
+          ? 'Stack ready. Open JARVIS below to use the installed models.'
+          : 'Stack ready. Restart the bridge (Ctrl-C, then <code>npm start</code>) so the new models are routed.') + '</p>'
         + (HUD ? '<div class="actions"><a href="' + HUD + '"><button>Open JARVIS</button></a></div>' : '')
       if (state.poll) { clearInterval(state.poll); state.poll = null }
       load()

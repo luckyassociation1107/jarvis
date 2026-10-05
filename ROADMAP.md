@@ -46,9 +46,24 @@ the resolved list, cached for ten minutes because GitHub's API rate-limits.
 `/help`, Ctrl-C to interrupt then leave, and `--once` for scripts. It answers the
 camera request a terminal cannot serve with the truth instead of hanging.
 
+### 5. Packaged Windows desktop app
+
+[`.github/workflows/installer.yml`](.github/workflows/installer.yml) builds an
+x64 Electron/NSIS installer from the same HUD and local bridge. The desktop app
+runs without a separate Node.js installation, has a tray shell, and stores
+models and user data outside the install directory. The first-run setup downloads
+the model runtime and weights separately; they are not bundled in the installer.
+
+Before an artifact is uploaded, the workflow builds and tests the interface,
+runs the desktop and installer contracts, packages on Windows, and launches the
+packaged executable in self-test mode. Successful runs upload the
+`JARVIS-Windows-Installer` artifact; a matching `v<version>` tag also publishes
+the installer as a GitHub Release. See [docs/DESKTOP.md](docs/DESKTOP.md) for
+installation and first-run details.
+
 ## Next
 
-### 5. Per-model tool-call benchmark (highest value)
+### 6. Per-model tool-call benchmark (highest value)
 
 Small models call tools correctly maybe half the time, and the README says so.
 `npm run bench` should run a fixed set of ten prompts (one per tool family)
@@ -57,21 +72,21 @@ the planner prefer the rung with the best *measured* score inside the RAM
 ceiling — not just the largest one that fits. Not built because it needs a live
 model to be meaningful; a stub-model version would only prove the harness.
 
-### 6. Constrained tool calling
+### 7. Constrained tool calling
 
 Ollama supports a JSON schema on the request. Sending the tool schema as a
 grammar would make malformed calls nearly impossible on the small rungs, which is
-where they hurt. Needs a measurement first (5) to know how much of the failure it
+where they hurt. Needs a measurement first (6) to know how much of the failure it
 removes, and a fallback path for endpoints that ignore `format`.
 
-### 7. Local memory (RAG)
+### 8. Local memory (RAG)
 
 A small embedding model plus the existing RAM planner: index a folder the user
 names, retrieve per turn, cite the file. The planner already serialises model
 residency, so an embedding rung would have to be accounted for in the same
 budget — that is the work, not the vector store.
 
-### 8. Approval prompt and audit log for effectful actions
+### 9. Approval prompt and audit log for effectful actions
 
 Write mode is one switch today: on or off. It should be "ask", with the ask
 surfaced in the browser *and* the terminal, and every effectful call appended to
@@ -80,21 +95,15 @@ protocol for the question; the HUD needs the dialog, and the CLI needs a y/n
 prompt. Until then, write mode should stay off unless the user turned it on
 deliberately.
 
-### 9. Scheduled tasks
+### 10. Scheduled tasks
 
 "Every morning at eight, summarise my notifications" needs a queue, a task
 store and a rule for what happens when the machine is asleep. Worth doing after
-(8), so a scheduled action has an approval story.
+(9), so a scheduled action has an approval story.
 
-### 10. Phone / LAN access
+### 11. Phone / LAN access
 
 The HUD is a static page plus a WebSocket; serving it to a phone on the same
 network is a token, a TLS story and a narrower origin allowlist — not a rewrite.
 It is left out of this round because it is the one change that widens exposure,
-and it should land with (8) rather than before it.
-
-### 11. Packaged desktop app
-
-Tauri/Electron around the same bridge and HUD. The launchers above already make
-the download-and-run path one click, so packaging is about polish (a dock icon,
-an update channel), not about capability.
+and it should land with (9) rather than before it.

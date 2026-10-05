@@ -43,7 +43,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - name: Install locked dependencies
+        env:
+          # JARVIS runs ONNX in the browser; the optional Node CUDA package is not used.
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+        run: npm ci
 
       - name: Build the static site
         env:
