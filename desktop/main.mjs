@@ -679,6 +679,7 @@ function handshake(origin) {
 }
 
 async function runSelfTest() {
+  log('self-test: running')
   const results = []
   const record = (name, ok, detail = '') => {
     results.push({ name, ok, detail })
@@ -822,7 +823,21 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  await app.whenReady()
+  // Electron's `whenReady()` waits on a window system. On a CI runner without
+  // one it can stay pending forever, and a self-test that waits on it reports
+  // nothing at all: the job hangs and the watchdog's single line is the only
+  // evidence. So it is bounded, and the answer is written down — everything the
+  // self-test exercises is loopback, and a HUD server and a utility-process
+  // bridge do not need a display to answer on 127.0.0.1.
+  const ready = await Promise.race([
+    app.whenReady().then(() => true).catch(() => false),
+    new Promise((done) => {
+      const timer = setTimeout(() => done(false), 30_000)
+      timer.unref?.()
+    }),
+  ])
+  log(ready ? 'electron is ready' : 'electron did not finish starting within 30s; continuing')
+
   try {
     await main()
   } catch (error) {
