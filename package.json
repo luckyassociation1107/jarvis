@@ -28,6 +28,7 @@
     "smoke": "node smoke.mjs",
     "test:autopilot": "node scripts/test-autopilot.mjs",
     "test:installers": "node scripts/test-installers.mjs",
+    "test:live": "node scripts/test-live.mjs",
     "test:runtime": "node scripts/test-runtime.mjs",
     "test:control": "node scripts/test-control.mjs",
     "desktop": "electron .",

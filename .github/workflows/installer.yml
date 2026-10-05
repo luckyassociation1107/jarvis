@@ -132,6 +132,63 @@ jobs:
           npm run smoke 2>&1 | tee ci.log || {
             node scripts/ci-report.mjs 'npm run smoke (informational)' ci.log; exit 1; }
 
+  # The only job that proves the brain works. Everything else here uses a stub
+  # model, or checks wiring, or makes sure the package unpacks: none of them
+  # downloads a weight or asks a question, so all of them can pass on a machine
+  # with no runtime, no model, or a model that cannot answer.
+  #
+  # This job does the whole first-run story with nobody watching — installs the
+  # portable runtime, pulls the model the RAM planner selected, sends four
+  # prompts through the same client the bridge uses, and fails the run when the
+  # answers are wrong. The runtime and the weights are cached, so the first run
+  # pays for the download and later runs pay only for the inference.
+  live-models:
+    name: Live model self-test (downloads and prompts the model)
+    needs: verify
+    # A real download on someone else's pull request is not friendly; a branch
+    # push, a tag and a manual dispatch are the ways to ask for it.
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Smallest planned rung (a 2B Q8), so the runner's disk and the job's
+      # minutes are spent on the pipeline, not on a 27B download.
+      JARVIS_LIVE_CAP_GB: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Keyed on the catalogue, not on this workflow or the test script: editing
+      # a prompt must not invalidate three gigabytes of weights.
+      - name: Cache the runtime and the model weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/runtime
+            models/ollama
+          key: jarvis-live-${{ runner.os }}-${{ hashFiles('bridge/autopilot.mjs', 'models.json', 'bridge/portable-runtime.mjs') }}
+          restore-keys: |
+            jarvis-live-${{ runner.os }}-
+
+      - name: Install the runtime, pull the model, prompt it
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:live 2>&1 | tee live.log || {
+            node scripts/ci-report.mjs 'live model self-test' live.log; exit 1; }
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-live-model-report
+          path: models/live-test-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
   installer:
     name: Windows installer
     needs: verify

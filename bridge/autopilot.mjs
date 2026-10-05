@@ -480,7 +480,18 @@ export function planSummary(input) {
 
 /** Install only after an explicit local UI action or setup-script invocation. */
 export async function install(opts = {}) {
-  const { dry = false, onStep = () => {}, dir = WHISPER_DIR, planned, skipOllamaModels = false, onlyOllamaSlots } = opts
+  const {
+    dry = false,
+    onStep = () => {},
+    dir = WHISPER_DIR,
+    planned,
+    skipOllamaModels = false,
+    onlyOllamaSlots,
+    // A caller that only needs the brain — the live model test, a diagnostics
+    // route — can leave the half-gigabyte speech weights alone. The app's own
+    // first run passes nothing here and installs everything the plan fits.
+    skipWhisper = false,
+  } = opts
   const p = planned ?? plan()
   const log = []
   const root = resolve(dir)
@@ -530,6 +541,12 @@ export async function install(opts = {}) {
     }
 
     if (rung.kind === 'whisper') {
+      if (skipWhisper) {
+        const note = 'skipped: speech weights are not part of this run'
+        onStep({ phase: 'skip', cap, file: rung.file, status: note, fits: rung.fits })
+        log.push({ cap, id: rung.file, ok: true, skipped: true, fits: rung.fits, note })
+        continue
+      }
       onStep({ phase: 'whisper', cap, file: rung.file, completed: 0, total: rung.bytes })
       try {
         const modelPath = join(root, rung.file)
