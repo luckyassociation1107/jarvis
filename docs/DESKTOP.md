@@ -101,10 +101,13 @@ in the workflow, and the warning goes away for your users too.
 4. When the three models are in, the runtime is started and the interface
    starts answering. No restart needed; the HUD reconnects on its own.
 
-The setup window is always reachable afterwards from the tray
-(**Model setup…**) and from the interface's **MODEL STACK** panel — reopening it
-is how you change the three models later; the bridge re-reads the choice on the
-next turn, so nothing has to be restarted.
+The setup window is always reachable afterwards — tray (**Model setup…**), or
+the **OPEN MODEL SETUP** button on the interface's **MODEL STACK** panel, which
+the desktop shell turns into the same window rather than a browser tab.
+Reopening it is how you change the three models later; the bridge re-reads the
+choice on the next turn, so nothing has to be restarted. On an install that
+predates the catalogue, the window opens by itself once after upgrading, even
+if the older "setup offered" flag is set.
 
 ---
 

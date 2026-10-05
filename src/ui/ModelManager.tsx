@@ -263,6 +263,12 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
       : null
   }
 
+  // The catalogue is a page the bridge serves, and the desktop shell turns this
+  // link into the setup window rather than a browser tab. Either way it is the
+  // one place the three models are chosen, and this is how a person gets there
+  // without hunting for a tray icon Windows hides by default.
+  const setupUrl = `${BRIDGE_HTTP_URL}/install?hud=${encodeURIComponent(typeof window === 'undefined' ? '' : window.location.origin)}`
+
   return (
     <div className="model-manager-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="model-manager" role="dialog" aria-modal="true" aria-labelledby="model-manager-title">
@@ -270,10 +276,18 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
           <div>
             <span className="model-manager-kicker">J.A.R.V.I.S. / LOCAL CONTROL PLANE</span>
             <h2 id="model-manager-title">RAM / MODEL STACK</h2>
-            <p>Autopilot chooses progressive abliterated chat/coding models with an independently verified multimodal vision route, inside the share of free RAM you decide.</p>
+            <p>The models are chosen by hand — one for chat, one for vision, one for coding and reasoning — from the catalogue in the setup window. This panel reads what the RAM plan makes of that choice, and how much of your free memory the AI may take.</p>
           </div>
           <button type="button" className="model-manager-close" onClick={onClose} aria-label="Close model stack">×</button>
         </header>
+
+        <div className="model-manager-catalogue">
+          <div>
+            <b>THE CATALOGUE</b>
+            <span>Every model this project knows, with its download size, resident size, parameters and quantization, marked against this machine's RAM and disk. Nothing is downloaded until you pick three and press the button.</span>
+          </div>
+          <a className="model-manager-setup" href={setupUrl} target="_blank" rel="noreferrer">OPEN MODEL SETUP</a>
+        </div>
 
         <div className="model-manager-status-row">
           <span className={`model-manager-link ${plan ? 'is-linked' : ''}`}><i />{blocked ? 'STATIC HOST / LOCAL BRIDGE BLOCKED' : plan ? 'LOCAL BRIDGE LINKED' : loading ? 'READING LOCAL PROFILE' : 'NO LOCAL BRIDGE'}</span>

@@ -165,6 +165,14 @@ const DEFAULT_SETTINGS = {
   quitOnClose: false,
   /** Whether the setup window has been offered once. */
   setupOffered: false,
+  /**
+   * Whether the *catalogue* has been offered once, on this install.
+   *
+   * A key of its own, not a reuse of `setupOffered`: an install that predates
+   * the catalogue has `setupOffered: true` and no models chosen by hand, and
+   * those are exactly the machines that should see it once after upgrading.
+   */
+  modelCatalogueOffered: false,
   /** Set once the login item has been registered, so we do not fight the user. */
   loginItemRegistered: false,
 }
@@ -449,8 +457,15 @@ function createWindow({ show = !HIDDEN_START } = {}) {
 
   // Links to the wider web open where they belong. The interface frames
   // articles through the bridge on purpose; a publisher's own page, or an
-  // OAuth flow, has no business replacing the HUD.
+  // OAuth flow, has no business replacing the HUD. One exception: the model
+  // setup page the interface links to *is* this app's own window — the same
+  // page, in the window built for it, rather than a browser tab the person then
+  // has to reconcile with the tray.
   win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith(`${bridgeHttp()}/install`)) {
+      openSetup()
+      return { action: 'deny' }
+    }
     openExternally(url)
     return { action: 'deny' }
   })
@@ -817,12 +832,15 @@ async function main() {
   // First launch: the interface is up, but which models it thinks with is the
   // person's decision, and the catalogue is where it is made. So the window
   // opens when nothing has been chosen yet, just as it does when the bridge is
-  // too unhealthy to run anything. Offered once, then the tray and the MODEL
-  // STACK panel keep it reachable forever.
-  if (!settings.setupOffered) {
+  // too unhealthy to run anything — and it opens on the first launch *after an
+  // upgrade* for anyone who has never chosen, which is what stops a person with
+  // an older install from saying the setup page never appeared. Offered once,
+  // then the tray, the interface's own button and MODEL STACK keep it reachable.
+  if (!settings.setupOffered || !settings.modelCatalogueOffered) {
     const health = await waitForBridge(30_000)
     if (!health?.ok || await modelChoiceMissing()) openSetup()
     settings.setupOffered = true
+    settings.modelCatalogueOffered = true
     saveSettings()
   }
 }
