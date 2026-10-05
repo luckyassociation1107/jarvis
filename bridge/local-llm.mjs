@@ -163,6 +163,18 @@ const CONNECT_TIMEOUT_MS = 5_000
 /** A whole turn, tools and all. Local models are slow; do not cut them off. */
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_MODEL_TIMEOUT_MS ?? 180_000)
 
+/**
+ * Answer length ceiling for one model call, in tokens.
+ *
+ * Off by default: 0 sends no `max_tokens` and lets the model stop on its own,
+ * which is what a machine fast enough to wait for it wants. A slow machine —
+ * or a small thinking model that writes its reasoning into the answer — can
+ * spend minutes on a sentence, and a turn that outstays even the timeout above
+ * comes back as a dead model server. Same family as JARVIS_MODEL_MAX_TURNS and
+ * JARVIS_MODEL_TIMEOUT_MS.
+ */
+const MAX_TOKENS = Number(process.env.JARVIS_MODEL_MAX_TOKENS ?? 0)
+
 // ---------------------------------------------------------------------------
 // Tool shaping
 // ---------------------------------------------------------------------------
@@ -708,6 +720,7 @@ async function streamChatRequest({ messages, tools, signal, onDelta, slot }) {
       ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
       temperature: TEMPERATURE,
       stream: true,
+      ...(MAX_TOKENS > 0 ? { max_tokens: MAX_TOKENS } : {}),
     }),
     // signal is optional, and AbortSignal.any rejects anything that is not one.
     signal: signal

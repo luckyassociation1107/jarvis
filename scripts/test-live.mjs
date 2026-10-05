@@ -400,6 +400,16 @@ async function runBridgeStage() {
         JARVIS_MODEL_REASON: slot('reason'),
         JARVIS_MODEL_VISION: slot('vision'),
         JARVIS_MODEL_CHAT_URL: `${RUNTIME_URL}/v1`,
+        // The first run of this stage proved the need: the bridge sends its
+        // whole system prompt and fifty tool schemas, and the 2B model answered
+        // "say hello" by generating 1,900 tokens — three minutes, past the
+        // bridge's own 180 s turn budget, so every turn came back as an
+        // unreachable model server. 700 is the ceiling the vision prep in
+        // bridge/local-llm.mjs already uses: room for an answer, not for a
+        // monologue. The timeout is raised to match a capped call on a runner
+        // with prompt processing to do.
+        JARVIS_MODEL_MAX_TOKENS: '700',
+        JARVIS_MODEL_TIMEOUT_MS: '300000',
         JARVIS_MODEL_REASON_URL: `${RUNTIME_URL}/v1`,
         JARVIS_MODEL_VISION_URL: `${RUNTIME_URL}/v1`,
         JARVIS_NO_BROWSER: '1',
@@ -441,7 +451,7 @@ async function runBridgeStage() {
     })
 
     let askId = 0
-    const ask = async (text, timeoutMs = 240_000) => {
+    const ask = async (text, timeoutMs = 300_000) => {
       const id = `live${++askId}`
       const start = frames.length
       bridgeSocket.send(JSON.stringify({ type: 'ask', id, text }))
@@ -482,11 +492,11 @@ async function runBridgeStage() {
 
     const proof = join(workDir, 'live-proof.txt')
     const jobAsk = (command) => `Call the tool mcp__jarvis_shell__run_command with the argument command set to exactly \`${command}\` and no other arguments. Then reply with the single word DONE.`
-    let workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 300_000)
+    let workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 480_000)
     let ranIt = existsSync(proof) && /BANANA/i.test(readFileSync(proof, 'utf8'))
     if (!ranIt) {
       step('RETRY   a real command  the first ask produced no file; asking once more, naming the tool and the command')
-      workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 300_000)
+      workTurn = await ask(jobAsk('echo BANANA>live-proof.txt'), 480_000)
       ranIt = existsSync(proof) && /BANANA/i.test(readFileSync(proof, 'utf8'))
     }
     checks.push({
